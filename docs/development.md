@@ -5,7 +5,18 @@
 ```bash
 cargo build -p tongyun-dev-cli
 cargo test -p tongyun-dev-cli
+
+# 启动网页控制台并自动打开浏览器（无参数默认行为）
+cargo run -p tongyun-dev-cli
+cargo run -p tongyun-dev-cli -- ui
+
+# CLI 与 Agent 命令
 cargo run -p tongyun-dev-cli -- status legacy_app --json
+cargo run -p tongyun-dev-cli -- start legacy_app --open
+cargo run -p tongyun-dev-cli -- open legacy_app
+cargo run -p tongyun-dev-cli -- stop legacy_app
+cargo run -p tongyun-dev-cli -- add my_app --name "我的应用" --root "~/code/my_app" --start "npm run dev" --port 3000
+cargo run -p tongyun-dev-cli -- remove my_app
 ```
 
 ## MVP 验收清单（给运维/产品）

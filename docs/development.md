@@ -70,17 +70,17 @@ Spring 用 `bash -c` 拉起 sdkman 再 `mvn spring-boot:run -Dspring-boot.run.pr
 | `legacy_app` | 8080 | `~/code/acme/legacy-app` | Tomcat，登录页探针 |
 | `demo_exam` | 8034 | `~/code/acme/01-exam/demo_exam` | Java 8，`profiles=dev` |
 | `demo_exam_vue` | 5777 | `~/code/acme/01-exam/demo-exam-vue` | pnpm / fnm 22 |
-| `demo_exam_student_vue` | 5999 | `~/code/acme/01-exam/student-vue` | pnpm / fnm 22 |
-| `ap_docs-site` | 8888 | `~/code/acme/02-ap/docs-site` | Spring |
-| `ap_docs-site_web` | 7888 | `~/code/acme/02-ap/docs-site-next` | Next，pnpm / fnm 22 |
-| `ap_admin_test_center` | 8110 | `~/code/acme/02-ap/admin-test-center` | Spring |
-| `ap_admin_test_center_vue` | 8111 | `~/code/acme/02-ap/admin-test-center-vue` | Vue，pnpm / fnm 22 |
+| `demo_exam_student_vue` | 5999 | `~/code/acme/01-exam/demo-exam-student-vue` | pnpm / fnm 22 |
+| `ap_docs-site` | 8888 | `~/code/acme/02-ap/acme-ap-docs-site-backend` | Spring |
+| `ap_docs-site_web` | 7888 | `~/code/acme/02-ap/acme-ap-docs-site-react` | pnpm / fnm 22 |
+| `ap_admin_test_center` | 8110 | `~/code/acme/02-ap/acme-ap-admin-test-center` | Spring |
+| `ap_admin_test_center_vue` | — | `~/code/acme/02-ap/admin-test-center-vue` | `enabled=false`，本机没有这个目录 |
 | `acme_system_ap_java_backend` | — | `~/code/acme/02-ap/acme-system-ap-java-backend` | `enabled=false`，私有 Maven 被挡住 |
-| `ops_class_admin_manager` | 8147 | `~/code/acme/03-ops-class/ops_class_admin_manager` | Spring |
-| `ops_class_admin_web` | 8146 | `~/code/acme/03-ops-class/ops-class-admin-web` | 管理端前端，pnpm / fnm 22 |
+| `ops_class_admin_manager` | 8147 | `~/code/acme/03-ops-class/ops-class-admin/ops_class_admin_manager` | Spring |
+| `ops_class_admin_web` | 8146 | `~/code/acme/03-ops-class/ops-class-admin/ops_class_admin_web` | 管理端前端，pnpm / fnm 22 |
 | `opsstudentmanageserver` | — | `~/code/acme/03-ops-class/opsstudentmanageserver` | `enabled=false`，`acme-job-sdk` 被挡住 |
 
-`02-ap` 里 docs-site / docs-site-next / admin-test-center / admin-test-center-vue，以及 `ops-class-admin-web` 的文件夹名是按仓库名写的。本机目录不同时只改 `root`。
+`04-papers`、`05-wechat`、`06-admin-misc` 以及 `ops_student_manage_vue` 已登记，`enabled=false`，原因是启动命令还没确认。路径以 `config/projects.toml` 为准。
 
 ## MVP 验收清单（给运维/产品）
 

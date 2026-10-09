@@ -20,7 +20,14 @@ cargo run -p tongyun-dev-cli -- status td_work --json
 
 ## 文档
 
-- [AGENTS.md](AGENTS.md) — AI 开发规则
-- [docs/prd.md](docs/prd.md) — 产品范围
+入口是 [AGENTS.md](AGENTS.md)。
+
+- [docs/prd.md](docs/prd.md) — 产品范围与 JSON / 配置契约
 - [docs/plan.md](docs/plan.md) — 排期
-- [docs/development.md](docs/development.md) — 命令与验收
+- [docs/architecture.md](docs/architecture.md) — 架构提案（M1 CLI 已按此实现）
+- [docs/development.md](docs/development.md) — 命令、CI、Mac 验收清单
+- [docs/user-flows.md](docs/user-flows.md) — 用户流程
+- [docs/testing/acceptance-tests.md](docs/testing/acceptance-tests.md) — 自动化与真机用例
+- [docs/decisions/](docs/decisions/) — ADR
+
+CI 只跑 `cargo fmt`、`clippy`、`cargo test`，不启动 Tomcat。Mac 上的 status → start → logs → stop 见 development.md。

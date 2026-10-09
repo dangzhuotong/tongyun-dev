@@ -60,6 +60,13 @@ fn print_status(st: &StatusJson, json: bool) -> Result<()> {
         );
         println!("  log {}", st.log_path);
         println!("  root {}", st.root);
+        if st.port_conflict {
+            if st.port_holder.is_empty() {
+                println!("  port {} held by another process", st.port);
+            } else {
+                println!("  port {} held by {}", st.port, st.port_holder);
+            }
+        }
     }
     Ok(())
 }

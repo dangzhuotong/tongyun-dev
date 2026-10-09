@@ -30,14 +30,16 @@ npm run tauri dev
 npm run tauri build
 ```
 
-`tauri dev` 打开窗口：左侧只列出 `enabled` 的项目（含 `td_work` 和各条产品线），按钮为启动 / 停止 / 刷新状态，状态区显示 `running`、`pid`、`port`、`login_probe`。下方日志区每 1.5 秒重读该项目的日志尾部。`enabled = false` 的项目不进列表；`tongyun-dev list` 仍会打印它们和 `reason`。配置查找与 CLI 相同：`TONGYUN_DEV_CONFIG`，否则从当前目录往上找 `config/projects.toml`。
+`tauri dev` 打开窗口：左侧列出全部项目。`enabled = false` 的项变灰，并显示 `reason`，启动按钮不可用。启动 / 停止进行中按钮保持「启动中…」「停止中…」，列表锁定，直到命令结束。状态区显示 `running`、`pid`、`port`、`login_probe`。端口被别的进程或其他项目占用时出现警告（`port_conflict` / `port_holder`）。「打开页面」用系统浏览器打开 `login_url` 或 `health_url`（都没有时打开 `http://127.0.0.1:<port>/`）。「打开日志」用系统默认程序打开日志文件。下方日志区每 1.5 秒重读该项目的日志尾部。配置查找与 CLI 相同：`TONGYUN_DEV_CONFIG`，否则从当前目录往上找 `config/projects.toml`。
+
+Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/release/bundle/macos/tongyun-dev.app`。安装步骤见 [README](../README.md)。
 
 ## 行为（td_work）
 
 - `~`、`$HOME`、`${HOME}` 会展开成绝对路径；`{{root}}`、`{{tomcat}}`、`{{log_dir}}` 用展开后的值替换。展开失败（没有 HOME）直接报错，不会把路径写成 `/code/...`。
 - `start` 在项目根目录执行 `scripts/start-td-work.sh`，继承当前终端的环境，并设置 `CATALINA_HOME`、`CATALINA_BASE`、`CATALINA_PID`。不用 `bash -l`。脚本返回后最多再等 180 秒（`TONGYUN_DEV_START_TIMEOUT`），直到登录页为 200、301 或 302。
 - `stop` 执行 `catalina.sh stop 15 -force`。已经停掉则成功退出。若 20 秒后端口或 Tomcat 仍在，只对 Java/Tomcat 进程发 TERM，再不行发 KILL。非 Java 占用 8080 时不杀，命令失败并写出 pid 与进程名。
-- `status --json` 的 `running` 表示 pid 文件或监听端口上有存活的 Java/Tomcat。`log_path` 是绝对路径。端口没开时不做 HTTP 请求，`login_probe.http_code` 为 `null`。
+- `status --json` 的 `running` 表示 pid 文件或监听端口上有存活的 Java/Tomcat。`log_path` 是绝对路径。端口没开时不做 HTTP 请求，`login_probe.http_code` 为 `null`。`port_conflict` 为真表示端口上的进程不是本项目的服务；`port_holder` 是 `pid` 和进程名，能对上其他项目的 pid 文件时带上那个 id。Spring / pnpm 只有 pid 文件（或其子进程）才算 `running`，别人占着端口算冲突，不算已启动。
 - `logs` 打印 catalina 日志；`--follow` 在文件还没生成时会等待，再用 `tail -F` 跟随。
 
 ## 配置字段
@@ -47,7 +49,7 @@ npm run tauri build
 | 字段 | 说明 |
 | --- | --- |
 | `name` / `root` / `port` | 显示名、项目根、端口。启用的项目端口不能为 0 |
-| `enabled` | 缺省 `true`。`false` 时桌面列表隐藏，`start` 直接失败并带上 `reason` |
+| `enabled` | 缺省 `true`。`false` 时桌面列表变灰并显示 `reason`，`start` 直接失败 |
 | `reason` | `enabled = false` 时必填 |
 | `start` / `stop` | 命令数组。`{{root}}` `{{tomcat}}` `{{log_dir}}` 会替换；`~` 和 `$HOME` 会展开 |
 | `background` | `true` 时把 `mvn` / `pnpm` 放到新进程组，stdout/stderr 追加到日志，pid 写入 pid 文件。Tomcat 的启动脚本会自己退出，保持 `false` |

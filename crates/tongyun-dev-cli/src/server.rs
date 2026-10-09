@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::json;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -7,16 +7,29 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::config::{expand_user, render, save_config, FileConfig, Project};
-use crate::runner::{cmd_start, cmd_stop, open_url, read_last_lines, status_of};
+use crate::runner::{cmd_start, cmd_stop, open_path, open_url, read_last_lines, status_of};
 
 struct AppState {
     config_path: PathBuf,
     config: FileConfig,
 }
 
-pub fn start_ui_server(config_path: PathBuf, config: FileConfig, port: u16, auto_open: bool) -> Result<()> {
+pub fn start_ui_server(config_path: PathBuf, config: FileConfig, initial_port: u16, auto_open: bool) -> Result<()> {
+    let mut port = initial_port;
+    let listener = loop {
+        let addr = format!("127.0.0.1:{port}");
+        match TcpListener::bind(&addr) {
+            Ok(l) => break l,
+            Err(e) => {
+                if port < initial_port + 20 {
+                    port += 1;
+                } else {
+                    anyhow::bail!("could not bind UI server to any port between {initial_port} and {port}: {e}");
+                }
+            }
+        }
+    };
     let addr = format!("127.0.0.1:{port}");
-    let listener = TcpListener::bind(&addr).with_context(|| format!("bind UI server to {addr}"))?;
     let url = format!("http://{addr}");
 
     println!();
@@ -166,6 +179,31 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<AppState>>) -> Resu
                     let body = json!({
                         "ok": res.is_ok(),
                         "url": target_url,
+                        "error": res.err().map(|e| e.to_string())
+                    });
+                    send_response(&mut stream, 200, "application/json", body.to_string().as_bytes())?;
+                }
+                None => {
+                    send_response(&mut stream, 404, "application/json", b"{\"error\":\"not found\"}")?;
+                }
+            }
+        }
+        ("POST", p) if p.starts_with("/api/projects/") && p.ends_with("/open-dir") => {
+            let id = p
+                .strip_prefix("/api/projects/")
+                .and_then(|s| s.strip_suffix("/open-dir"))
+                .unwrap_or("");
+            let proj_opt = {
+                let st = state.lock().unwrap();
+                st.config.projects.get(id).cloned()
+            };
+            match proj_opt {
+                Some(proj) => {
+                    let root_path = expand_user(&proj.root);
+                    let res = open_path(&root_path);
+                    let body = json!({
+                        "ok": res.is_ok(),
+                        "path": root_path.display().to_string(),
                         "error": res.err().map(|e| e.to_string())
                     });
                     send_response(&mut stream, 200, "application/json", body.to_string().as_bytes())?;
@@ -574,13 +612,22 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
                 ? `<button class="btn-stop" onclick="stopProject('${p.id}')">⏹ 停止</button>`
                 : `<button class="btn-start" onclick="startProject('${p.id}')">▶ 启动</button>`
               }
-              <button class="btn-outline" onclick="openProjectInBrowser('${p.id}')" title="在系统浏览器打开登录/访问页面">🌐 打开页面</button>
+              <button class="btn-outline" onclick="openProjectInBrowser('${p.id}')" title="在系统浏览器打开登录/访问页面">🌐 页面</button>
+              <button class="btn-outline" onclick="openProjectDir('${p.id}')" title="在系统文件管理器中打开源码目录">📁 目录</button>
               <button class="btn-outline" onclick="openLogModal('${p.id}', '${escapeHtml(p.name)}')">📜 日志</button>
               <button class="btn-danger-text" onclick="deleteProject('${p.id}')" title="删除项目注册">🗑</button>
             </div>
           </div>
         `;
       }).join('');
+    }
+
+    async function openProjectDir(id) {
+      try {
+        await fetch(`/api/projects/${id}/open-dir`, { method: 'POST' });
+      } catch (e) {
+        alert('打开目录失败: ' + e);
+      }
     }
 
     async function startProject(id) {

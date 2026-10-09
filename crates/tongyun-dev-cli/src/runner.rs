@@ -36,6 +36,9 @@ pub fn read_pid(path: &Path) -> Option<u32> {
 }
 
 pub fn pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
     #[cfg(windows)]
     {
         Command::new("tasklist")
@@ -150,6 +153,9 @@ pub fn run_argv(argv: &[String], proj: &Project) -> Result<()> {
 }
 
 pub fn cmd_start(id: &str, p: &Project) -> Result<()> {
+    if p.port > 0 && port_open(p.port) {
+        eprintln!("warning: port {} is already in use before starting {}", p.port, id);
+    }
     eprintln!("starting {id} …");
     run_argv(&p.start, p)?;
     Ok(())
@@ -157,15 +163,25 @@ pub fn cmd_start(id: &str, p: &Project) -> Result<()> {
 
 pub fn cmd_stop(id: &str, p: &Project) -> Result<()> {
     eprintln!("stopping {id} …");
-    // Best-effort stop; treat already-stopped as ok if port closed.
-    match run_argv(&p.stop, p) {
-        Ok(()) => {}
-        Err(e) => {
-            let st = status_of(id, p);
-            if !st.running && !st.port_open {
-                eprintln!("stop reported error but process/port already down: {e}");
-            } else {
-                return Err(e);
+    if p.stop.is_empty() {
+        let pid_path = expand_user(&render(&p.pid_file, p));
+        if let Some(pid) = read_pid(&pid_path).filter(|pid| pid_alive(*pid)) {
+            eprintln!("no stop command configured, terminating PID {pid} …");
+            #[cfg(windows)]
+            let _ = Command::new("taskkill").args(["/F", "/PID", &pid.to_string()]).status();
+            #[cfg(not(windows))]
+            let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+        }
+    } else {
+        match run_argv(&p.stop, p) {
+            Ok(()) => {}
+            Err(e) => {
+                let st = status_of(id, p);
+                if !st.running && !st.port_open {
+                    eprintln!("stop reported error but process/port already down: {e}");
+                } else {
+                    return Err(e);
+                }
             }
         }
     }
@@ -176,6 +192,36 @@ pub fn cmd_stop(id: &str, p: &Project) -> Result<()> {
             break;
         }
         thread::sleep(Duration::from_millis(500));
+    }
+    Ok(())
+}
+
+pub fn open_path(path: &Path) -> Result<()> {
+    if !path.exists() {
+        bail!("path does not exist: {}", path.display());
+    }
+    let p_str = path.display().to_string();
+    eprintln!("opening directory {p_str} …");
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer")
+            .arg(&p_str)
+            .spawn()
+            .with_context(|| format!("failed to open explorer for {p_str}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&p_str)
+            .spawn()
+            .with_context(|| format!("failed to open directory for {p_str}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(&p_str)
+            .spawn()
+            .with_context(|| format!("failed to open directory for {p_str}"))?;
     }
     Ok(())
 }

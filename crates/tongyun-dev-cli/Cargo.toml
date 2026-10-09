@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "tongyun-dev CLI: start/stop/status/logs for local projects"
 
+[lib]
+name = "tongyun_dev_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tongyun-dev"
 path = "src/main.rs"

@@ -1,15 +1,11 @@
 //! tongyun-dev — local project runner (start/stop/status/logs/open/ui)
-mod config;
-mod runner;
-mod server;
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use crate::config::{expand_user, get_proj, load_config, save_config, Project};
-use crate::runner::{cmd_logs, cmd_start, cmd_stop, open_url, status_of, StatusJson};
-use crate::server::start_ui_server;
+use tongyun_dev_cli::config::{expand_user, get_proj, load_config, save_config, Project};
+use tongyun_dev_cli::runner::{cmd_logs, cmd_start, cmd_stop, open_path, open_url, status_of, StatusJson};
+use tongyun_dev_cli::server::start_ui_server;
 
 #[derive(Parser, Debug)]
 #[command(name = "tongyun-dev", about = "Local project runner (start/stop/status/logs/open/ui)")]
@@ -37,9 +33,9 @@ enum Cmd {
     },
     /// Stop a project
     Stop { id: String },
-    /// Show status (process + port + login probe)
+    /// Show status (process + port + login probe). If ID is omitted, shows all projects.
     Status {
-        id: String,
+        id: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -51,8 +47,13 @@ enum Cmd {
         #[arg(long, default_value_t = 80)]
         lines: usize,
     },
-    /// Open project login/home page in default system browser
-    Open { id: String },
+    /// Open project login/home page in default system browser, or open directory
+    Open {
+        id: String,
+        /// Open project folder in file explorer instead of browser
+        #[arg(long)]
+        dir: bool,
+    },
     /// Register a new project
     Add {
         /// Project ID (e.g. acme_frontend)
@@ -162,22 +163,50 @@ fn main() -> Result<()> {
             print_status(&st, false)?;
         }
         Cmd::Status { id, json } => {
-            let p = get_proj(&cfg, &id)?;
-            let st = status_of(&id, p);
-            print_status(&st, json)?;
+            match id {
+                Some(id) => {
+                    let p = get_proj(&cfg, &id)?;
+                    let st = status_of(&id, p);
+                    print_status(&st, json)?;
+                }
+                None => {
+                    let mut ids: Vec<_> = cfg.projects.keys().cloned().collect();
+                    ids.sort();
+                    let list: Vec<StatusJson> = ids
+                        .iter()
+                        .map(|id| {
+                            let p = &cfg.projects[id];
+                            status_of(id, p)
+                        })
+                        .collect();
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&list)?);
+                    } else {
+                        for st in list {
+                            print_status(&st, false)?;
+                            println!();
+                        }
+                    }
+                }
+            }
         }
         Cmd::Logs { id, follow, lines } => {
             let p = get_proj(&cfg, &id)?;
             cmd_logs(p, follow, lines)?;
         }
-        Cmd::Open { id } => {
+        Cmd::Open { id, dir } => {
             let p = get_proj(&cfg, &id)?;
-            let target = if !p.login_url.is_empty() {
-                &p.login_url
+            if dir {
+                let root_path = expand_user(&p.root);
+                open_path(&root_path)?;
             } else {
-                &format!("http://127.0.0.1:{}", p.port)
-            };
-            open_url(target)?;
+                let target = if !p.login_url.is_empty() {
+                    &p.login_url
+                } else {
+                    &format!("http://127.0.0.1:{}", p.port)
+                };
+                open_url(target)?;
+            }
         }
         Cmd::Add {
             id,

@@ -1263,11 +1263,26 @@ port = 9
             "ap_docs-site",
             "ap_docs-site_web",
             "ap_admin_test_center",
-            "ap_admin_test_center_vue",
             "ops_class_admin_manager",
             "ops_class_admin_web",
         ];
-        let disabled = ["acme_system_ap_java_backend", "opsstudentmanageserver"];
+        let disabled = [
+            "ap_admin_test_center_vue",
+            "acme_system_ap_java_backend",
+            "opsstudentmanageserver",
+            "ops_student_manage_vue",
+            "papers_cn",
+            "acme_papers_server",
+            "tdmockserver",
+            "acme_wechat",
+            "acme_shop_center",
+            "acme_wechat_friend_manager",
+            "wxcenter",
+            "admin_acme_cn",
+            "acme_web_viewer",
+            "offlinestudent",
+            "g5_admin_vue",
+        ];
         assert_eq!(cfg.projects.len(), enabled.len() + disabled.len());
         for id in enabled {
             let p = resolve_project(id, cfg.projects.get(id).unwrap(), Some(home)).unwrap();
@@ -1331,6 +1346,10 @@ port = 9
         .unwrap();
         assert_eq!(student.port, 5999);
         assert_eq!(student.login_url, "http://127.0.0.1:5999/");
+        assert_eq!(
+            student.root,
+            PathBuf::from("/Users/dev/code/acme/01-exam/demo-exam-student-vue")
+        );
 
         let paper = resolve_project(
             "ap_docs-site",
@@ -1340,6 +1359,10 @@ port = 9
         .unwrap();
         assert_eq!(paper.port, 8888);
         assert!(paper.background);
+        assert_eq!(
+            paper.root,
+            PathBuf::from("/Users/dev/code/acme/02-ap/acme-ap-docs-site-backend")
+        );
         let web = resolve_project(
             "ap_docs-site_web",
             cfg.projects.get("ap_docs-site_web").unwrap(),
@@ -1348,6 +1371,10 @@ port = 9
         .unwrap();
         assert_eq!(web.port, 7888);
         assert_eq!(web.login_url, "http://127.0.0.1:7888/");
+        assert_eq!(
+            web.root,
+            PathBuf::from("/Users/dev/code/acme/02-ap/acme-ap-docs-site-react")
+        );
 
         let center = resolve_project(
             "ap_admin_test_center",
@@ -1356,13 +1383,18 @@ port = 9
         )
         .unwrap();
         assert_eq!(center.port, 8110);
+        assert_eq!(
+            center.root,
+            PathBuf::from("/Users/dev/code/acme/02-ap/acme-ap-admin-test-center")
+        );
         let center_vue = resolve_project(
             "ap_admin_test_center_vue",
             cfg.projects.get("ap_admin_test_center_vue").unwrap(),
             Some(home),
         )
         .unwrap();
-        assert_eq!(center_vue.port, 8111);
+        assert!(!center_vue.enabled);
+        assert!(center_vue.reason.contains("admin-test-center-vue"));
 
         let ops = resolve_project(
             "ops_class_admin_manager",
@@ -1371,6 +1403,12 @@ port = 9
         )
         .unwrap();
         assert_eq!(ops.port, 8147);
+        assert_eq!(
+            ops.root,
+            PathBuf::from(
+                "/Users/dev/code/acme/03-ops-class/ops-class-admin/ops_class_admin_manager"
+            )
+        );
         let ops_web = resolve_project(
             "ops_class_admin_web",
             cfg.projects.get("ops_class_admin_web").unwrap(),
@@ -1379,6 +1417,12 @@ port = 9
         .unwrap();
         assert_eq!(ops_web.port, 8146);
         assert!(ops_web.start.join(" ").contains("fnm"));
+        assert_eq!(
+            ops_web.root,
+            PathBuf::from(
+                "/Users/dev/code/acme/03-ops-class/ops-class-admin/ops_class_admin_web"
+            )
+        );
 
         let ap_blocked = cfg
             .projects

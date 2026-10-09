@@ -1,0 +1,14 @@
+# 本机项目注册。路径用 ~ 或绝对路径。不要写密码。
+
+[projects.td_work]
+name = "td_work"
+root = "~/code/testdaily/tdprojects"
+start = ["bash", "{{root}}/scripts/start-td-work.sh"]
+# stop：Tomcat 优雅停；start 脚本内部也会先 stop
+stop = ["bash", "-lc", "export CATALINA_PID=\"{{log_dir}}/td_work_tomcat.pid\" CATALINA_HOME=\"{{tomcat}}\" CATALINA_BASE=\"{{tomcat}}\"; \"{{tomcat}}/bin/catalina.sh\" stop 15 -force"]
+tomcat = "~/opt/apache-tomcat-9.0.98"
+log_dir = "~/code/_index/logs"
+log_file = "{{log_dir}}/td_work_catalina.out"
+pid_file = "{{log_dir}}/td_work_tomcat.pid"
+port = 8080
+login_url = "http://127.0.0.1:8080/td_work/admin/login.html"

@@ -70,17 +70,17 @@ Spring 用 `bash -c` 拉起 sdkman 再 `mvn spring-boot:run -Dspring-boot.run.pr
 | `td_work` | 8080 | `~/code/testdaily/tdprojects` | Tomcat，登录页探针 |
 | `td_new_toefl` | 8034 | `~/code/testdaily/01-new-toefl/td_new_toefl` | Java 8，`profiles=dev` |
 | `td_new_toefl_vue` | 5777 | `~/code/testdaily/01-new-toefl/td-new-toefl-vue` | pnpm / fnm 22 |
-| `td_new_toefl_student_vue` | 5999 | `~/code/testdaily/01-new-toefl/student-vue` | pnpm / fnm 22 |
-| `ap_whitepaper` | 8888 | `~/code/testdaily/02-ap/whitepaper` | Spring |
-| `ap_whitepaper_web` | 7888 | `~/code/testdaily/02-ap/whitepaper-next` | Next，pnpm / fnm 22 |
-| `ap_admin_test_center` | 8110 | `~/code/testdaily/02-ap/admin-test-center` | Spring |
-| `ap_admin_test_center_vue` | 8111 | `~/code/testdaily/02-ap/admin-test-center-vue` | Vue，pnpm / fnm 22 |
+| `td_new_toefl_student_vue` | 5999 | `~/code/testdaily/01-new-toefl/td-new-toefl-student-vue` | pnpm / fnm 22 |
+| `ap_whitepaper` | 8888 | `~/code/testdaily/02-ap/td-ap-whitepaper-backend` | Spring |
+| `ap_whitepaper_web` | 7888 | `~/code/testdaily/02-ap/td-ap-whitepaper-react` | pnpm / fnm 22 |
+| `ap_admin_test_center` | 8110 | `~/code/testdaily/02-ap/td-ap-admin-test-center` | Spring |
+| `ap_admin_test_center_vue` | — | `~/code/testdaily/02-ap/admin-test-center-vue` | `enabled=false`，本机没有这个目录 |
 | `testdaily_system_ap_java_backend` | — | `~/code/testdaily/02-ap/testdaily-system-ap-java-backend` | `enabled=false`，私有 Maven 被挡住 |
-| `lj_class_admin_manager` | 8147 | `~/code/testdaily/03-lj-class/lj_class_admin_manager` | Spring |
-| `lj_class_admin_web` | 8146 | `~/code/testdaily/03-lj-class/lj-class-admin-web` | 管理端前端，pnpm / fnm 22 |
+| `lj_class_admin_manager` | 8147 | `~/code/testdaily/03-lj-class/lj-class-admin/lj_class_admin_manager` | Spring |
+| `lj_class_admin_web` | 8146 | `~/code/testdaily/03-lj-class/lj-class-admin/lj_class_admin_web` | 管理端前端，pnpm / fnm 22 |
 | `ljstudentmanageserver` | — | `~/code/testdaily/03-lj-class/ljstudentmanageserver` | `enabled=false`，`td-job-sdk` 被挡住 |
 
-`02-ap` 里 whitepaper / whitepaper-next / admin-test-center / admin-test-center-vue，以及 `lj-class-admin-web` 的文件夹名是按仓库名写的。本机目录不同时只改 `root`。
+`04-papers`、`05-wechat`、`06-admin-misc` 以及 `lj_student_manage_vue` 已登记，`enabled=false`，原因是启动命令还没确认。路径以 `config/projects.toml` 为准。
 
 ## MVP 验收清单（给运维/产品）
 

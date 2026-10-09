@@ -65,11 +65,13 @@ export TONGYUN_DEV_CONFIG="$PWD/config/projects.toml"
 | `ap_whitepaper` | 8888 | 是 |
 | `ap_whitepaper_web` | 7888 | 是 |
 | `ap_admin_test_center` | 8110 | 是 |
-| `ap_admin_test_center_vue` | 8111 | 是 |
-| `testdaily_system_ap_java_backend` | — | 否，私有 Maven 被挡住 |
 | `lj_class_admin_manager` | 8147 | 是 |
 | `lj_class_admin_web` | 8146 | 是 |
+| `ap_admin_test_center_vue` | — | 否，本机没有独立目录 |
+| `testdaily_system_ap_java_backend` | — | 否，私有 Maven 被挡住 |
 | `ljstudentmanageserver` | — | 否，`td-job-sdk` 被挡住 |
+
+`04-papers`、`05-wechat`、`06-admin-misc` 里其余仓库也已登记，目前停用，原因是启动命令还没确认。
 
 路径和启动命令见 [config/projects.toml](config/projects.toml)，字段说明见 [docs/development.md](docs/development.md)。Spring / pnpm 在后台跑，日志默认在 `~/code/_index/logs/<id>.out`。
 

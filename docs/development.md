@@ -13,7 +13,24 @@ cargo run -p tongyun-dev-cli -- stop legacy_app
 cargo run -p tongyun-dev-cli -- logs legacy_app --follow
 ```
 
-二进制名是 `tongyun-dev`（`./target/debug/tongyun-dev`）。
+二进制名是 `tongyun-dev`（`./target/debug/tongyun-dev`）。逻辑在 `tongyun-dev-core`，CLI 和桌面壳共用。
+
+```bash
+cargo test -p tongyun-dev-core
+```
+
+## 桌面壳
+
+需要 Node.js 20+。Mac 上还要 Xcode Command Line Tools。在 `apps/desktop`：
+
+```bash
+cd apps/desktop
+npm install
+npm run tauri dev
+npm run tauri build
+```
+
+`tauri dev` 打开窗口：左侧项目列表（含 `legacy_app`），按钮为启动 / 停止 / 刷新状态，状态区显示 `running`、`pid`、`port`、`login_probe`。下方日志区每 1.5 秒重读 catalina 日志尾部（与 CLI 同一条 log 路径）。配置查找与 CLI 相同：`TONGYUN_DEV_CONFIG`，否则从当前目录往上找 `config/projects.toml`。
 
 ## 行为（legacy_app）
 

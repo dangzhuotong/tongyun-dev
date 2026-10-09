@@ -17,6 +17,7 @@
 2. 作为开发者，我能 `stop legacy_app`，Tomcat 停干净、8080 释放。
 3. 作为开发者 / Agent，我能 `status legacy_app --json` 看到：运行中否、pid、端口、登录页探测码、日志路径。
 4. 作为开发者 / Agent，我能 `logs legacy_app [--follow]` 读 catalina 日志。
+5. 作为开发者，我能打开桌面窗口，看到已注册项目（至少 `legacy_app`），点启动 / 停止 / 刷新，并看到 `running`、`pid`、`port`、`login_probe` 和 catalina 日志尾部。
 
 ## 验收（短）
 

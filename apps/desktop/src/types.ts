@@ -29,6 +29,8 @@ export type Status = {
   log_path: string;
   pid_path: string;
   root: string;
+  port_conflict: boolean;
+  port_holder: string;
 };
 
 export type LogTail = {

@@ -4,7 +4,7 @@
 
 - 仓库：私有
 - CLI 与桌面壳共用 `tongyun-dev-core`。壳是 Tauri 2 + React，见 [docs/decisions/0001-cli-first.md](docs/decisions/0001-cli-first.md)
-- 已注册本机 acme 产品线（桌面列表只显示启用项）：`legacy_app`、示例考试、AP、示例课管。私有 Maven 和 `acme-job-sdk` 被挡住的两项 `enabled=false`
+- 已注册本机 acme 产品线：`legacy_app`、示例考试、AP、示例课管。私有 Maven 和 `acme-job-sdk` 被挡住的两项在桌面列表里变灰，并带上原因。
 
 ## Mac 快速开始
 
@@ -77,7 +77,9 @@ export TONGYUN_DEV_CONFIG="$PWD/config/projects.toml"
 
 ## 桌面窗口（Mac）
 
-需要 Node.js 20+ 和 Xcode Command Line Tools。窗口调用同一套 Rust core：启用中的项目列表、启动、停止、刷新状态（`running` / `pid` / `port` / `login_probe`），并跟随该项目日志。停用项不显示。
+需要 Node.js 20+ 和 Xcode Command Line Tools。窗口调用同一套 Rust core：项目列表（停用项变灰并显示原因）、启动、停止、刷新状态（`running` / `pid` / `port` / `login_probe`），并跟随该项目日志。启动和停止结束前按钮保持加载状态。端口被其他进程占用时会警告。可以一键打开日志文件和登录页（或 health URL）。
+
+开发调试：
 
 ```bash
 cd apps/desktop
@@ -85,12 +87,28 @@ npm install
 npm run tauri dev
 ```
 
-打包：
+打包并安装 `.app`（在 `apps/desktop` 目录）：
 
 ```bash
-cd apps/desktop
+npm install
 npm run tauri build
 ```
+
+`npm run tauri build` 会先编前端，再编 release。产物：
+
+| 产物 | 路径 |
+| --- | --- |
+| 应用 | `apps/desktop/src-tauri/target/release/bundle/macos/tongyun-dev.app` |
+| 磁盘镜像 | `apps/desktop/src-tauri/target/release/bundle/dmg/` 里的 `.dmg`（文件名带版本和架构） |
+
+装到「应用程序」后打开：
+
+```bash
+cp -R apps/desktop/src-tauri/target/release/bundle/macos/tongyun-dev.app /Applications/
+open /Applications/tongyun-dev.app
+```
+
+也可以打开 `.dmg`，把 `tongyun-dev` 拖进「应用程序」。若 Gatekeeper 拦住：系统设置 → 隐私与安全性 → 仍要打开。
 
 开发时在仓库里运行，窗口会从当前目录往上找到 `config/projects.toml`。也可以先 `export TONGYUN_DEV_CONFIG=/absolute/path/to/config/projects.toml`。不要把密钥写进仓库。
 

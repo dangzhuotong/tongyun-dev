@@ -66,7 +66,9 @@ export function App() {
   }, [log?.text]);
 
   async function run(action: "start" | "stop") {
-    if (!selected) return;
+    if (!selected || busyRef.current) return;
+    const project = projects?.projects.find((row) => row.id === selected);
+    if (action === "start" && project && !project.enabled) return;
     setBusy(action);
     setError("");
     try {
@@ -83,9 +85,24 @@ export function App() {
     }
   }
 
-  const visible = projects?.projects.filter((project) => project.enabled) ?? [];
-  const hiddenCount = (projects?.projects.length ?? 0) - visible.length;
-  const current = visible.find((row) => row.id === selected) ?? null;
+  async function reveal(kind: "log" | "page") {
+    setError("");
+    try {
+      if (kind === "log") {
+        const path = log?.path || status?.log_path || "";
+        await invoke("open_log", { path });
+      } else {
+        await invoke("open_page", { url: pageUrl(status, current) });
+      }
+    } catch (err: unknown) {
+      setError(String(err));
+    }
+  }
+
+  const current = projects?.projects.find((row) => row.id === selected) ?? null;
+  const page = pageUrl(status, current);
+  const logPath = log?.path || status?.log_path || "";
+  const canOpenLog = Boolean(logPath) && !log?.missing;
 
   return (
     <div className="app">
@@ -98,11 +115,14 @@ export function App() {
           </div>
         </div>
         <ul className="projects">
-          {visible.map((project) => (
+          {projects?.projects.map((project) => (
             <li key={project.id}>
               <button
                 type="button"
-                className={project.id === selected ? "active" : ""}
+                className={[project.id === selected ? "active" : "", project.enabled ? "" : "disabled"]
+                  .filter(Boolean)
+                  .join(" ")}
+                disabled={busy !== ""}
                 onClick={() => {
                   setError("");
                   setStatus(null);
@@ -112,17 +132,16 @@ export function App() {
               >
                 <span>{project.name}</span>
                 <small>
-                  {project.id} · {project.port}
+                  {project.id}
+                  {project.port > 0 ? ` · ${project.port}` : ""}
                 </small>
+                {!project.enabled && <small className="reason">{project.reason}</small>}
               </button>
             </li>
           ))}
         </ul>
         {!projects && !error && <p className="muted">正在读取配置…</p>}
-        {projects && visible.length === 0 && <p className="muted">没有可启动的项目</p>}
-        {hiddenCount > 0 && (
-          <p className="muted">{hiddenCount} 个已停用（依赖被挡住）。命令行 list 能看到原因。</p>
-        )}
+        {projects && projects.projects.length === 0 && <p className="muted">配置里没有项目</p>}
         {projects && <p className="config-path">{projects.config_path}</p>}
       </aside>
       <main>
@@ -131,8 +150,13 @@ export function App() {
             <h1>{current?.name ?? "未选择项目"}</h1>
             <p>{status?.root ?? current?.root ?? ""}</p>
           </div>
-          <div className="actions">
-            <button type="button" className="primary" disabled={!selected || busy !== ""} onClick={() => run("start")}>
+          <div className="actions" aria-busy={busy !== ""}>
+            <button
+              type="button"
+              className={busy === "start" ? "primary busy" : "primary"}
+              disabled={!selected || busy !== "" || current?.enabled === false}
+              onClick={() => run("start")}
+            >
               {busy === "start" ? "启动中…" : "启动"}
             </button>
             <button type="button" disabled={!selected || busy !== ""} onClick={() => run("stop")}>
@@ -148,8 +172,20 @@ export function App() {
             >
               刷新状态
             </button>
+            <button type="button" disabled={!page} onClick={() => reveal("page")}>
+              打开页面
+            </button>
           </div>
         </header>
+        {busy === "start" && <p className="banner busy">正在启动… 按钮会在端口或页面就绪后恢复。</p>}
+        {busy === "stop" && <p className="banner busy">正在停止… 按钮会在端口释放后恢复。</p>}
+        {current && !current.enabled && <p className="banner warn">{current.reason}</p>}
+        {status?.port_conflict && (
+          <p className="banner warn">
+            端口 {status.port} 被其他进程占用
+            {status.port_holder ? `：${status.port_holder}` : "。"}
+          </p>
+        )}
         {error && <p className="banner">{error}</p>}
         <section className="status" aria-label="status">
           <Field label="running" value={status ? (status.running ? "true" : "false") : "—"} tone={status?.running ? "up" : "down"} />
@@ -169,7 +205,10 @@ export function App() {
         <section className="log">
           <div className="log-bar">
             <strong>log</strong>
-            <span>{log?.path ?? status?.log_path ?? ""}</span>
+            <span>{logPath}</span>
+            <button type="button" disabled={!canOpenLog} onClick={() => reveal("log")}>
+              打开日志
+            </button>
           </div>
           <pre ref={logRef}>
             {log?.missing
@@ -180,6 +219,14 @@ export function App() {
       </main>
     </div>
   );
+}
+
+function pageUrl(status: Status | null, project: { port: number } | null): string {
+  const probe = status?.login_probe.url.trim() ?? "";
+  if (probe.startsWith("http://") || probe.startsWith("https://")) return probe;
+  const port = status?.port ?? project?.port ?? 0;
+  if (port > 0) return `http://127.0.0.1:${port}/`;
+  return "";
 }
 
 function Field({

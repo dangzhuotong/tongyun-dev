@@ -125,6 +125,10 @@ pub struct StatusJson {
     pub log_path: String,
     pub pid_path: String,
     pub root: String,
+    /// True when the port is taken by a process that is not this project's server.
+    pub port_conflict: bool,
+    /// `pid comm` of the other listener, with a project id when it matches one. Empty if unknown.
+    pub port_holder: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -168,19 +172,43 @@ impl Loaded {
     }
 
     pub fn status(&self, id: &str) -> Result<StatusJson> {
-        Ok(status_of(&self.resolve(id)?))
+        let project = self.resolve(id)?;
+        let peers = self.peer_pids(&project.id);
+        Ok(status_of(&project, &peers))
+    }
+
+    fn peer_pids(&self, current: &str) -> Vec<(String, u32)> {
+        let mut ids: Vec<_> = self.config.projects.keys().cloned().collect();
+        ids.sort();
+        let mut peers = Vec::new();
+        for id in ids {
+            if id == current {
+                continue;
+            }
+            let Ok(other) = self.resolve(&id) else {
+                continue;
+            };
+            if let Some(pid) = read_pid(&other.pid_file) {
+                if process_alive(pid) {
+                    peers.push((other.id, pid));
+                }
+            }
+        }
+        peers
     }
 
     pub fn start(&self, id: &str) -> Result<StatusJson> {
         let project = self.resolve(id)?;
         cmd_start(&project)?;
-        Ok(status_of(&project))
+        let peers = self.peer_pids(&project.id);
+        Ok(status_of(&project, &peers))
     }
 
     pub fn stop(&self, id: &str) -> Result<StatusJson> {
         let project = self.resolve(id)?;
         cmd_stop(&project)?;
-        Ok(status_of(&project))
+        let peers = self.peer_pids(&project.id);
+        Ok(status_of(&project, &peers))
     }
 
     /// Last lines of the catalina log. `missing` is true when the file is not there yet.
@@ -573,16 +601,18 @@ fn server_pids(p: &Resolved) -> Vec<u32> {
     pids
 }
 
-/// Dev servers (Spring / pnpm) own their port. The pid file may be bash, node, or java.
+/// Dev servers (Spring / pnpm) count as running only when the pid file is alive
+/// or a listener is a child of that process. A stranger on the port is a conflict.
 fn dev_pids(p: &Resolved) -> Vec<u32> {
-    let mut pids = Vec::new();
+    let mut roots = Vec::new();
     if let Some(pid) = read_pid(&p.pid_file) {
         if process_alive(pid) {
-            pids.push(pid);
+            roots.push(pid);
         }
     }
+    let mut pids = roots.clone();
     for pid in listener_pids(p.port) {
-        if !pids.contains(&pid) && process_alive(pid) {
+        if !pids.contains(&pid) && process_alive(pid) && belongs_to(pid, &roots) {
             pids.push(pid);
         }
     }
@@ -691,19 +721,98 @@ fn login_probe(url: &str) -> LoginProbe {
     }
 }
 
-fn status_of(p: &Resolved) -> StatusJson {
-    let pid = tracked_pids(p).into_iter().next();
+fn ppid(pid: u32) -> Option<u32> {
+    let text = ps_field(pid, "ppid=")?;
+    let parent = text.trim().parse::<u32>().ok()?;
+    (parent > 0).then_some(parent)
+}
+
+fn belongs_to(pid: u32, roots: &[u32]) -> bool {
+    belongs_to_with(pid, roots, ppid)
+}
+
+fn belongs_to_with(pid: u32, roots: &[u32], mut parent_of: impl FnMut(u32) -> Option<u32>) -> bool {
+    if roots.is_empty() {
+        return false;
+    }
+    if roots.contains(&pid) {
+        return true;
+    }
+    let mut current = pid;
+    for _ in 0..12 {
+        let Some(parent) = parent_of(current) else {
+            return false;
+        };
+        if parent <= 1 || parent == current {
+            return false;
+        }
+        if roots.contains(&parent) {
+            return true;
+        }
+        current = parent;
+    }
+    false
+}
+
+fn describe_holder(pid: u32, peers: &[(String, u32)]) -> String {
+    let raw = ps_field(pid, "comm=").unwrap_or_else(|| "?".into());
+    let comm = raw
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(raw.as_str())
+        .trim();
+    let comm = if comm.is_empty() { "?" } else { comm };
+    match peers
+        .iter()
+        .find(|(_, peer)| belongs_to(pid, &[*peer]))
+        .map(|(id, _)| id.as_str())
+    {
+        Some(id) => format!("{pid} {comm} ({id})"),
+        None => format!("{pid} {comm}"),
+    }
+}
+
+fn port_conflict_of(
+    p: &Resolved,
+    own: &[u32],
+    peers: &[(String, u32)],
+    open: bool,
+) -> (bool, String) {
+    let mut holders = Vec::new();
+    for pid in listener_pids(p.port) {
+        if !process_alive(pid) || belongs_to(pid, own) {
+            continue;
+        }
+        holders.push(describe_holder(pid, peers));
+    }
+    if holders.is_empty() && open && own.is_empty() && p.port != 0 {
+        return (true, String::new());
+    }
+    if holders.is_empty() {
+        (false, String::new())
+    } else {
+        (true, holders.join(", "))
+    }
+}
+
+fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
+    let own = tracked_pids(p);
+    let open = port_open(p.port);
+    let (port_conflict, port_holder) = port_conflict_of(p, &own, peers, open);
+    let pid = own.into_iter().next();
     StatusJson {
         id: p.id.clone(),
         name: p.name.clone(),
         running: pid.is_some(),
         pid,
         port: p.port,
-        port_open: port_open(p.port),
+        port_open: open,
         login_probe: login_probe(&p.login_url),
         log_path: path_to_string(&p.log_file),
         pid_path: path_to_string(&p.pid_file),
         root: path_to_string(&p.root),
+        port_conflict,
+        port_holder,
     }
 }
 
@@ -1181,12 +1290,24 @@ mod tests {
             log_path: "/Users/dev/.tongyun-dev/logs/legacy_app_catalina.out".into(),
             pid_path: "/Users/dev/.tongyun-dev/logs/legacy_app_tomcat.pid".into(),
             root: "/Users/dev/code/acme/legacy-app".into(),
+            port_conflict: false,
+            port_holder: String::new(),
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
-        for key in ["running", "pid", "port", "login_probe", "log_path"] {
+        for key in [
+            "running",
+            "pid",
+            "port",
+            "login_probe",
+            "log_path",
+            "port_conflict",
+            "port_holder",
+        ] {
             assert!(v.get(key).is_some(), "missing {key}");
         }
+        assert_eq!(v["port_conflict"], false);
+        assert_eq!(v["port_holder"], "");
         assert_eq!(v["running"], false);
         assert!(v["pid"].is_null());
         assert_eq!(v["port"], 8080);
@@ -1217,6 +1338,23 @@ mod tests {
         ));
         assert!(!looks_like_server("java", "my-other-app.jar"));
         assert!(!looks_like_server("nginx", "nginx: master process"));
+    }
+
+    #[test]
+    fn listener_belongs_to_our_process_tree() {
+        fn parent(pid: u32) -> Option<u32> {
+            match pid {
+                10 => Some(5),
+                5 => Some(2),
+                2 => Some(1),
+                _ => None,
+            }
+        }
+        assert!(belongs_to_with(10, &[2], parent));
+        assert!(belongs_to_with(2, &[2], parent));
+        assert!(!belongs_to_with(10, &[9], parent));
+        assert!(!belongs_to_with(10, &[], parent));
+        assert!(!belongs_to_with(2, &[10], parent));
     }
 
     #[test]

@@ -30,7 +30,7 @@ npm run tauri dev
 npm run tauri build
 ```
 
-`tauri dev` 打开窗口：左侧项目列表（含 `td_work`），按钮为启动 / 停止 / 刷新状态，状态区显示 `running`、`pid`、`port`、`login_probe`。下方日志区每 1.5 秒重读 catalina 日志尾部（与 CLI 同一条 log 路径）。配置查找与 CLI 相同：`TONGYUN_DEV_CONFIG`，否则从当前目录往上找 `config/projects.toml`。
+`tauri dev` 打开窗口：左侧只列出 `enabled` 的项目（含 `td_work` 和各条产品线），按钮为启动 / 停止 / 刷新状态，状态区显示 `running`、`pid`、`port`、`login_probe`。下方日志区每 1.5 秒重读该项目的日志尾部。`enabled = false` 的项目不进列表；`tongyun-dev list` 仍会打印它们和 `reason`。配置查找与 CLI 相同：`TONGYUN_DEV_CONFIG`，否则从当前目录往上找 `config/projects.toml`。
 
 ## 行为（td_work）
 
@@ -39,6 +39,46 @@ npm run tauri build
 - `stop` 执行 `catalina.sh stop 15 -force`。已经停掉则成功退出。若 20 秒后端口或 Tomcat 仍在，只对 Java/Tomcat 进程发 TERM，再不行发 KILL。非 Java 占用 8080 时不杀，命令失败并写出 pid 与进程名。
 - `status --json` 的 `running` 表示 pid 文件或监听端口上有存活的 Java/Tomcat。`log_path` 是绝对路径。端口没开时不做 HTTP 请求，`login_probe.http_code` 为 `null`。
 - `logs` 打印 catalina 日志；`--follow` 在文件还没生成时会等待，再用 `tail -F` 跟随。
+
+## 配置字段
+
+`config/projects.toml` 里每个 `[projects.<id>]`：
+
+| 字段 | 说明 |
+| --- | --- |
+| `name` / `root` / `port` | 显示名、项目根、端口。启用的项目端口不能为 0 |
+| `enabled` | 缺省 `true`。`false` 时桌面列表隐藏，`start` 直接失败并带上 `reason` |
+| `reason` | `enabled = false` 时必填 |
+| `start` / `stop` | 命令数组。`{{root}}` `{{tomcat}}` `{{log_dir}}` 会替换；`~` 和 `$HOME` 会展开 |
+| `background` | `true` 时把 `mvn` / `pnpm` 放到新进程组，stdout/stderr 追加到日志，pid 写入 pid 文件。Tomcat 的启动脚本会自己退出，保持 `false` |
+| `tomcat` | 只给 Tomcat。`stop` 走 `catalina.sh`，杀进程时只动 Java/Tomcat，不杀占着 8080 的其他程序 |
+| `login_url` | 可选。HTTP 200 / 301 / 302 才算启动完成 |
+| `health_url` | 可选。没有 `login_url` 时用它做同样的探针，状态里仍放在 `login_probe` |
+| 两者都空 | 端口能连上即算就绪。Spring 的 `/` 经常不是 200，所以后端默认不写探针 |
+| `log_dir` / `log_file` / `pid_file` | 可省略。默认 `~/code/_index/logs/<id>.out` 和 `.pid` |
+
+Spring 用 `bash -c` 拉起 sdkman 再 `mvn spring-boot:run -Dspring-boot.run.profiles=dev`。`td_new_toefl` 会在当前 Java 不是 8 时，从 `~/.sdkman/candidates/java/8.*` 里挑一个 `sdk use`。前端用 `fnm exec --using=22` 跑 `pnpm dev`。不用 login shell。
+
+没有 `tomcat` 的项目，`stop` 先跑配置里的 stop（如果有），再对 pid 文件里的进程组发 TERM/KILL，并清掉该端口上的监听（node 或 java 都会停）。
+
+## 已注册项目
+
+| id | 端口 | 根目录 | 说明 |
+| --- | --- | --- | --- |
+| `td_work` | 8080 | `~/code/testdaily/tdprojects` | Tomcat，登录页探针 |
+| `td_new_toefl` | 8034 | `~/code/testdaily/01-new-toefl/td_new_toefl` | Java 8，`profiles=dev` |
+| `td_new_toefl_vue` | 5777 | `~/code/testdaily/01-new-toefl/td-new-toefl-vue` | pnpm / fnm 22 |
+| `td_new_toefl_student_vue` | 5999 | `~/code/testdaily/01-new-toefl/student-vue` | pnpm / fnm 22 |
+| `ap_whitepaper` | 8888 | `~/code/testdaily/02-ap/whitepaper` | Spring |
+| `ap_whitepaper_web` | 7888 | `~/code/testdaily/02-ap/whitepaper-next` | Next，pnpm / fnm 22 |
+| `ap_admin_test_center` | 8110 | `~/code/testdaily/02-ap/admin-test-center` | Spring |
+| `ap_admin_test_center_vue` | 8111 | `~/code/testdaily/02-ap/admin-test-center-vue` | Vue，pnpm / fnm 22 |
+| `testdaily_system_ap_java_backend` | — | `~/code/testdaily/02-ap/testdaily-system-ap-java-backend` | `enabled=false`，私有 Maven 被挡住 |
+| `lj_class_admin_manager` | 8147 | `~/code/testdaily/03-lj-class/lj_class_admin_manager` | Spring |
+| `lj_class_admin_web` | 8146 | `~/code/testdaily/03-lj-class/lj-class-admin-web` | 管理端前端，pnpm / fnm 22 |
+| `ljstudentmanageserver` | — | `~/code/testdaily/03-lj-class/ljstudentmanageserver` | `enabled=false`，`td-job-sdk` 被挡住 |
+
+`02-ap` 里 whitepaper / whitepaper-next / admin-test-center / admin-test-center-vue，以及 `lj-class-admin-web` 的文件夹名是按仓库名写的。本机目录不同时只改 `root`。
 
 ## MVP 验收清单（给运维/产品）
 

@@ -2,6 +2,9 @@ export type Project = {
   id: string;
   name: string;
   root: string;
+  enabled: boolean;
+  port: number;
+  reason: string;
 };
 
 export type ProjectList = {

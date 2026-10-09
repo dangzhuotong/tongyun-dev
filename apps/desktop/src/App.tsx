@@ -30,7 +30,9 @@ export function App() {
       .then((list) => {
         if (cancelled) return;
         setProjects(list);
-        const preferred = list.projects.find((row) => row.id === "td_work") ?? list.projects[0];
+        const preferred =
+          list.projects.find((row) => row.enabled && row.id === "td_work") ??
+          list.projects.find((row) => row.enabled);
         if (preferred) setSelected(preferred.id);
       })
       .catch((err: unknown) => {
@@ -81,7 +83,9 @@ export function App() {
     }
   }
 
-  const current = projects?.projects.find((row) => row.id === selected) ?? null;
+  const visible = projects?.projects.filter((project) => project.enabled) ?? [];
+  const hiddenCount = (projects?.projects.length ?? 0) - visible.length;
+  const current = visible.find((row) => row.id === selected) ?? null;
 
   return (
     <div className="app">
@@ -94,7 +98,7 @@ export function App() {
           </div>
         </div>
         <ul className="projects">
-          {projects?.projects.map((project) => (
+          {visible.map((project) => (
             <li key={project.id}>
               <button
                 type="button"
@@ -107,13 +111,18 @@ export function App() {
                 }}
               >
                 <span>{project.name}</span>
-                <small>{project.id}</small>
+                <small>
+                  {project.id} · {project.port}
+                </small>
               </button>
             </li>
           ))}
         </ul>
         {!projects && !error && <p className="muted">正在读取配置…</p>}
-        {projects && projects.projects.length === 0 && <p className="muted">配置里没有项目</p>}
+        {projects && visible.length === 0 && <p className="muted">没有可启动的项目</p>}
+        {hiddenCount > 0 && (
+          <p className="muted">{hiddenCount} 个已停用（依赖被挡住）。命令行 list 能看到原因。</p>
+        )}
         {projects && <p className="config-path">{projects.config_path}</p>}
       </aside>
       <main>
@@ -159,7 +168,7 @@ export function App() {
         </section>
         <section className="log">
           <div className="log-bar">
-            <strong>catalina log</strong>
+            <strong>log</strong>
             <span>{log?.path ?? status?.log_path ?? ""}</span>
           </div>
           <pre ref={logRef}>

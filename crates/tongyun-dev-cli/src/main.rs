@@ -107,7 +107,14 @@ fn print_list(loaded: &Loaded, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&list.projects)?);
     } else {
         for project in &list.projects {
-            println!("{}\t{}\t{}", project.id, project.name, project.root);
+            if project.enabled {
+                println!("{}\t{}\t{}", project.id, project.name, project.root);
+            } else {
+                println!(
+                    "{}\t{}\t{}\tdisabled\t{}",
+                    project.id, project.name, project.root, project.reason
+                );
+            }
         }
     }
     Ok(())

@@ -1,6 +1,19 @@
-# 本机项目注册。路径用 ~ 或绝对路径。不要写密码。
+# 本机项目注册。路径用 ~ 或绝对路径。不要写口令。
 # CLI 会展开 ~ / $HOME，并替换 {{root}} {{tomcat}} {{log_dir}}。
-# start/stop 会设置 CATALINA_HOME、CATALINA_BASE、CATALINA_PID，不用 login shell。
+#
+# 字段：
+#   enabled     缺省 true。false 时不出现在桌面列表，start 会拒绝并带上 reason。
+#   reason      enabled=false 时必填。
+#   background  true：mvn / pnpm 放后台，日志追加到 log，pid 写入 pid 文件。
+#   login_url   可选。HTTP 200/301/302 才算就绪（td_work 登录页）。
+#   health_url  可选。没写 login_url 时用它做同样的 HTTP 探针。
+#   两者都空    端口能连上即算就绪。
+#   log_file / pid_file / log_dir 可省略，默认 ~/code/_index/logs/<id>.out 与 .pid。
+# Tomcat 项目要写 tomcat 和 stop。Spring / pnpm 的 stop 可省略：按 pid 进程组停，并清掉本端口监听。
+#
+# 目录按 ~/code/testdaily/<产品线>/<仓库>。
+# 02-ap 的 whitepaper、whitepaper-next、admin-test-center、admin-test-center-vue，
+# 以及 03-lj-class 的 lj-class-admin-web，文件夹名按仓库名假定。checkout 不同就只改 root。
 
 [projects.td_work]
 name = "td_work"
@@ -13,3 +26,157 @@ log_file = "{{log_dir}}/td_work_catalina.out"
 pid_file = "{{log_dir}}/td_work_tomcat.pid"
 port = 8080
 login_url = "http://127.0.0.1:8080/td_work/admin/login.html"
+
+[projects.td_new_toefl]
+name = "td_new_toefl"
+root = "~/code/testdaily/01-new-toefl/td_new_toefl"
+port = 8034
+background = true
+start = ["bash", "-c", '''
+set -euo pipefail
+source "$HOME/.sdkman/bin/sdkman-init.sh"
+if ! java -version 2>&1 | grep -Eq '1\.8'; then
+  java_dir="$HOME/.sdkman/candidates/java"
+  if [ ! -d "$java_dir" ]; then
+    echo "sdkman java candidates not found" >&2
+    exit 1
+  fi
+  id=$(find "$java_dir" -mindepth 1 -maxdepth 1 -type d -name '8.*' 2>/dev/null | head -n 1 || true)
+  id=$(basename "$id")
+  if [ -z "$id" ] || [ "$id" = "." ]; then
+    echo "sdkman has no installed Java 8" >&2
+    exit 1
+  fi
+  sdk use java "$id"
+fi
+exec mvn spring-boot:run -Dspring-boot.run.profiles=dev
+''']
+
+[projects.td_new_toefl_vue]
+name = "td-new-toefl-vue"
+root = "~/code/testdaily/01-new-toefl/td-new-toefl-vue"
+port = 5777
+background = true
+health_url = "http://127.0.0.1:5777/"
+start = ["bash", "-c", '''
+set -euo pipefail
+eval "$(fnm env --shell bash)"
+exec fnm exec --using=22 pnpm dev -- --port 5777 --host 127.0.0.1
+''']
+
+[projects.td_new_toefl_student_vue]
+name = "student-vue"
+root = "~/code/testdaily/01-new-toefl/student-vue"
+port = 5999
+background = true
+health_url = "http://127.0.0.1:5999/"
+start = ["bash", "-c", '''
+set -euo pipefail
+eval "$(fnm env --shell bash)"
+exec fnm exec --using=22 pnpm dev -- --port 5999 --host 127.0.0.1
+''']
+
+[projects.ap_whitepaper]
+name = "whitepaper"
+root = "~/code/testdaily/02-ap/whitepaper"
+port = 8888
+background = true
+start = ["bash", "-c", '''
+set -euo pipefail
+if [ -f "$HOME/.sdkman/bin/sdkman-init.sh" ]; then
+  source "$HOME/.sdkman/bin/sdkman-init.sh"
+fi
+exec mvn spring-boot:run -Dspring-boot.run.profiles=dev
+''']
+
+[projects.ap_whitepaper_web]
+name = "whitepaper-next"
+root = "~/code/testdaily/02-ap/whitepaper-next"
+port = 7888
+background = true
+health_url = "http://127.0.0.1:7888/"
+start = ["bash", "-c", '''
+set -euo pipefail
+eval "$(fnm env --shell bash)"
+exec fnm exec --using=22 pnpm dev -- --port 7888
+''']
+
+[projects.ap_admin_test_center]
+name = "admin-test-center"
+root = "~/code/testdaily/02-ap/admin-test-center"
+port = 8110
+background = true
+start = ["bash", "-c", '''
+set -euo pipefail
+if [ -f "$HOME/.sdkman/bin/sdkman-init.sh" ]; then
+  source "$HOME/.sdkman/bin/sdkman-init.sh"
+fi
+exec mvn spring-boot:run -Dspring-boot.run.profiles=dev
+''']
+
+[projects.ap_admin_test_center_vue]
+name = "admin-test-center-vue"
+root = "~/code/testdaily/02-ap/admin-test-center-vue"
+port = 8111
+background = true
+health_url = "http://127.0.0.1:8111/"
+start = ["bash", "-c", '''
+set -euo pipefail
+eval "$(fnm env --shell bash)"
+exec fnm exec --using=22 pnpm dev -- --port 8111 --host 127.0.0.1
+''']
+
+[projects.testdaily_system_ap_java_backend]
+name = "testdaily-system-ap-java-backend"
+enabled = false
+reason = "private Maven repository is blocked"
+root = "~/code/testdaily/02-ap/testdaily-system-ap-java-backend"
+port = 0
+background = true
+start = ["bash", "-c", '''
+set -euo pipefail
+if [ -f "$HOME/.sdkman/bin/sdkman-init.sh" ]; then
+  source "$HOME/.sdkman/bin/sdkman-init.sh"
+fi
+exec mvn spring-boot:run -Dspring-boot.run.profiles=dev
+''']
+
+[projects.lj_class_admin_manager]
+name = "lj_class_admin_manager"
+root = "~/code/testdaily/03-lj-class/lj_class_admin_manager"
+port = 8147
+background = true
+start = ["bash", "-c", '''
+set -euo pipefail
+if [ -f "$HOME/.sdkman/bin/sdkman-init.sh" ]; then
+  source "$HOME/.sdkman/bin/sdkman-init.sh"
+fi
+exec mvn spring-boot:run -Dspring-boot.run.profiles=dev
+''']
+
+[projects.lj_class_admin_web]
+name = "lj-class-admin-web"
+root = "~/code/testdaily/03-lj-class/lj-class-admin-web"
+port = 8146
+background = true
+health_url = "http://127.0.0.1:8146/"
+start = ["bash", "-c", '''
+set -euo pipefail
+eval "$(fnm env --shell bash)"
+exec fnm exec --using=22 pnpm dev -- --port 8146 --host 127.0.0.1
+''']
+
+[projects.ljstudentmanageserver]
+name = "ljstudentmanageserver"
+enabled = false
+reason = "td-job-sdk dependency is blocked"
+root = "~/code/testdaily/03-lj-class/ljstudentmanageserver"
+port = 0
+background = true
+start = ["bash", "-c", '''
+set -euo pipefail
+if [ -f "$HOME/.sdkman/bin/sdkman-init.sh" ]; then
+  source "$HOME/.sdkman/bin/sdkman-init.sh"
+fi
+exec mvn spring-boot:run -Dspring-boot.run.profiles=dev
+''']

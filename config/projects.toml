@@ -11,9 +11,8 @@
 #   log_file / pid_file / log_dir 可省略，默认 ~/code/_index/logs/<id>.out 与 .pid。
 # Tomcat 项目要写 tomcat 和 stop。Spring / pnpm 的 stop 可省略：按 pid 进程组停，并清掉本端口监听。
 #
-# 目录按 ~/code/testdaily/<产品线>/<仓库>。
-# 02-ap 的 whitepaper、whitepaper-next、admin-test-center、admin-test-center-vue，
-# 以及 03-lj-class 的 lj-class-admin-web，文件夹名按仓库名假定。checkout 不同就只改 root。
+# 目录按 2026-10-09 本机 ~/code/testdaily 实勘（见 agy-runs mac-dirs）。
+# checkout 不同只改 root。启动命令未确认的先 enabled=false 并写 reason。
 
 [projects.td_work]
 name = "td_work"
@@ -65,8 +64,8 @@ exec fnm exec --using=22 pnpm dev -- --port 5777 --host 127.0.0.1
 ''']
 
 [projects.td_new_toefl_student_vue]
-name = "student-vue"
-root = "~/code/testdaily/01-new-toefl/student-vue"
+name = "td-new-toefl-student-vue"
+root = "~/code/testdaily/01-new-toefl/td-new-toefl-student-vue"
 port = 5999
 background = true
 health_url = "http://127.0.0.1:5999/"
@@ -77,8 +76,8 @@ exec fnm exec --using=22 pnpm dev -- --port 5999 --host 127.0.0.1
 ''']
 
 [projects.ap_whitepaper]
-name = "whitepaper"
-root = "~/code/testdaily/02-ap/whitepaper"
+name = "td-ap-whitepaper-backend"
+root = "~/code/testdaily/02-ap/td-ap-whitepaper-backend"
 port = 8888
 background = true
 start = ["bash", "-c", '''
@@ -90,8 +89,8 @@ exec mvn spring-boot:run -Dspring-boot.run.profiles=dev
 ''']
 
 [projects.ap_whitepaper_web]
-name = "whitepaper-next"
-root = "~/code/testdaily/02-ap/whitepaper-next"
+name = "td-ap-whitepaper-react"
+root = "~/code/testdaily/02-ap/td-ap-whitepaper-react"
 port = 7888
 background = true
 health_url = "http://127.0.0.1:7888/"
@@ -102,8 +101,8 @@ exec fnm exec --using=22 pnpm dev -- --port 7888
 ''']
 
 [projects.ap_admin_test_center]
-name = "admin-test-center"
-root = "~/code/testdaily/02-ap/admin-test-center"
+name = "td-ap-admin-test-center"
+root = "~/code/testdaily/02-ap/td-ap-admin-test-center"
 port = 8110
 background = true
 start = ["bash", "-c", '''
@@ -116,6 +115,8 @@ exec mvn spring-boot:run -Dspring-boot.run.profiles=dev
 
 [projects.ap_admin_test_center_vue]
 name = "admin-test-center-vue"
+enabled = false
+reason = "本机 02-ap 无独立 admin-test-center-vue 目录（仅有 td-ap-admin-test-center）"
 root = "~/code/testdaily/02-ap/admin-test-center-vue"
 port = 8111
 background = true
@@ -143,7 +144,7 @@ exec mvn spring-boot:run -Dspring-boot.run.profiles=dev
 
 [projects.lj_class_admin_manager]
 name = "lj_class_admin_manager"
-root = "~/code/testdaily/03-lj-class/lj_class_admin_manager"
+root = "~/code/testdaily/03-lj-class/lj-class-admin/lj_class_admin_manager"
 port = 8147
 background = true
 start = ["bash", "-c", '''
@@ -155,8 +156,8 @@ exec mvn spring-boot:run -Dspring-boot.run.profiles=dev
 ''']
 
 [projects.lj_class_admin_web]
-name = "lj-class-admin-web"
-root = "~/code/testdaily/03-lj-class/lj-class-admin-web"
+name = "lj_class_admin_web"
+root = "~/code/testdaily/03-lj-class/lj-class-admin/lj_class_admin_web"
 port = 8146
 background = true
 health_url = "http://127.0.0.1:8146/"
@@ -180,3 +181,111 @@ if [ -f "$HOME/.sdkman/bin/sdkman-init.sh" ]; then
 fi
 exec mvn spring-boot:run -Dspring-boot.run.profiles=dev
 ''']
+
+[projects.lj_student_manage_vue]
+name = "lj_student_manage_vue"
+enabled = false
+reason = "待确认启动命令"
+root = "~/code/testdaily/03-lj-class/lj_student_manage_vue"
+port = 0
+background = true
+start = ["bash", "-c", "echo 'start command TBD' >&2; exit 1"]
+
+[projects.pastpaper_cn]
+name = "pastpaper.cn"
+enabled = false
+reason = "待确认启动命令"
+root = "~/code/testdaily/04-papers/pastpaper.cn"
+port = 0
+background = true
+start = ["bash", "-c", "echo 'start command TBD' >&2; exit 1"]
+
+[projects.td_pastpaper_server]
+name = "td_pastpaper_server"
+enabled = false
+reason = "待确认启动命令"
+root = "~/code/testdaily/04-papers/td_pastpaper_server"
+port = 0
+background = true
+start = ["bash", "-c", "echo 'start command TBD' >&2; exit 1"]
+
+[projects.tdqumokaoserver]
+name = "tdqumokaoserver"
+enabled = false
+reason = "待确认启动命令"
+root = "~/code/testdaily/04-papers/tdqumokaoserver"
+port = 0
+background = true
+start = ["bash", "-c", "echo 'start command TBD' >&2; exit 1"]
+
+[projects.td_wechat]
+name = "td_wechat"
+enabled = false
+reason = "待确认启动命令"
+root = "~/code/testdaily/05-wechat/td_wechat"
+port = 0
+background = true
+start = ["bash", "-c", "echo 'start command TBD' >&2; exit 1"]
+
+[projects.td_youzan_center]
+name = "td_youzan_center"
+enabled = false
+reason = "待确认启动命令"
+root = "~/code/testdaily/05-wechat/td_youzan_center"
+port = 0
+background = true
+start = ["bash", "-c", "echo 'start command TBD' >&2; exit 1"]
+
+[projects.td_wechat_friend_manager]
+name = "td-wechat-friend-manager"
+enabled = false
+reason = "待确认启动命令"
+root = "~/code/testdaily/05-wechat/td-wechat-friend-manager"
+port = 0
+background = true
+start = ["bash", "-c", "echo 'start command TBD' >&2; exit 1"]
+
+[projects.tdwxcenter]
+name = "tdwxcenter"
+enabled = false
+reason = "待确认启动命令"
+root = "~/code/testdaily/05-wechat/tdwxcenter"
+port = 0
+background = true
+start = ["bash", "-c", "echo 'start command TBD' >&2; exit 1"]
+
+[projects.admin_testdaily_cn]
+name = "admin.testdaily.cn"
+enabled = false
+reason = "待确认启动命令"
+root = "~/code/testdaily/06-admin-misc/admin.testdaily.cn"
+port = 0
+background = true
+start = ["bash", "-c", "echo 'start command TBD' >&2; exit 1"]
+
+[projects.td_web_viewer]
+name = "td-web-viewer"
+enabled = false
+reason = "待确认启动命令"
+root = "~/code/testdaily/06-admin-misc/td-web-viewer"
+port = 0
+background = true
+start = ["bash", "-c", "echo 'start command TBD' >&2; exit 1"]
+
+[projects.tdofflinestudent]
+name = "tdofflinestudent"
+enabled = false
+reason = "待确认启动命令"
+root = "~/code/testdaily/06-admin-misc/tdofflinestudent"
+port = 0
+background = true
+start = ["bash", "-c", "echo 'start command TBD' >&2; exit 1"]
+
+[projects.g5_admin_vue]
+name = "TestDaily_system_g5_admin_vue_frontend"
+enabled = false
+reason = "待确认启动命令"
+root = "~/code/testdaily/06-admin-misc/TestDaily_system_g5_admin_vue_frontend"
+port = 0
+background = true
+start = ["bash", "-c", "echo 'start command TBD' >&2; exit 1"]

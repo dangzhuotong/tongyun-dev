@@ -1263,11 +1263,26 @@ port = 9
             "ap_whitepaper",
             "ap_whitepaper_web",
             "ap_admin_test_center",
-            "ap_admin_test_center_vue",
             "lj_class_admin_manager",
             "lj_class_admin_web",
         ];
-        let disabled = ["testdaily_system_ap_java_backend", "ljstudentmanageserver"];
+        let disabled = [
+            "ap_admin_test_center_vue",
+            "testdaily_system_ap_java_backend",
+            "ljstudentmanageserver",
+            "lj_student_manage_vue",
+            "pastpaper_cn",
+            "td_pastpaper_server",
+            "tdqumokaoserver",
+            "td_wechat",
+            "td_youzan_center",
+            "td_wechat_friend_manager",
+            "tdwxcenter",
+            "admin_testdaily_cn",
+            "td_web_viewer",
+            "tdofflinestudent",
+            "g5_admin_vue",
+        ];
         assert_eq!(cfg.projects.len(), enabled.len() + disabled.len());
         for id in enabled {
             let p = resolve_project(id, cfg.projects.get(id).unwrap(), Some(home)).unwrap();
@@ -1331,6 +1346,10 @@ port = 9
         .unwrap();
         assert_eq!(student.port, 5999);
         assert_eq!(student.login_url, "http://127.0.0.1:5999/");
+        assert_eq!(
+            student.root,
+            PathBuf::from("/Users/dev/code/testdaily/01-new-toefl/td-new-toefl-student-vue")
+        );
 
         let paper = resolve_project(
             "ap_whitepaper",
@@ -1340,6 +1359,10 @@ port = 9
         .unwrap();
         assert_eq!(paper.port, 8888);
         assert!(paper.background);
+        assert_eq!(
+            paper.root,
+            PathBuf::from("/Users/dev/code/testdaily/02-ap/td-ap-whitepaper-backend")
+        );
         let web = resolve_project(
             "ap_whitepaper_web",
             cfg.projects.get("ap_whitepaper_web").unwrap(),
@@ -1348,6 +1371,10 @@ port = 9
         .unwrap();
         assert_eq!(web.port, 7888);
         assert_eq!(web.login_url, "http://127.0.0.1:7888/");
+        assert_eq!(
+            web.root,
+            PathBuf::from("/Users/dev/code/testdaily/02-ap/td-ap-whitepaper-react")
+        );
 
         let center = resolve_project(
             "ap_admin_test_center",
@@ -1356,13 +1383,18 @@ port = 9
         )
         .unwrap();
         assert_eq!(center.port, 8110);
+        assert_eq!(
+            center.root,
+            PathBuf::from("/Users/dev/code/testdaily/02-ap/td-ap-admin-test-center")
+        );
         let center_vue = resolve_project(
             "ap_admin_test_center_vue",
             cfg.projects.get("ap_admin_test_center_vue").unwrap(),
             Some(home),
         )
         .unwrap();
-        assert_eq!(center_vue.port, 8111);
+        assert!(!center_vue.enabled);
+        assert!(center_vue.reason.contains("admin-test-center-vue"));
 
         let lj = resolve_project(
             "lj_class_admin_manager",
@@ -1371,6 +1403,12 @@ port = 9
         )
         .unwrap();
         assert_eq!(lj.port, 8147);
+        assert_eq!(
+            lj.root,
+            PathBuf::from(
+                "/Users/dev/code/testdaily/03-lj-class/lj-class-admin/lj_class_admin_manager"
+            )
+        );
         let lj_web = resolve_project(
             "lj_class_admin_web",
             cfg.projects.get("lj_class_admin_web").unwrap(),
@@ -1379,6 +1417,12 @@ port = 9
         .unwrap();
         assert_eq!(lj_web.port, 8146);
         assert!(lj_web.start.join(" ").contains("fnm"));
+        assert_eq!(
+            lj_web.root,
+            PathBuf::from(
+                "/Users/dev/code/testdaily/03-lj-class/lj-class-admin/lj_class_admin_web"
+            )
+        );
 
         let ap_blocked = cfg
             .projects

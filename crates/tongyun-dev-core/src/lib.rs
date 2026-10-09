@@ -2,7 +2,7 @@
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -25,18 +25,39 @@ struct FileConfig {
     projects: HashMap<String, Project>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 struct Project {
     name: String,
     root: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
     start: Vec<String>,
+    #[serde(default)]
     stop: Vec<String>,
+    #[serde(default)]
     tomcat: String,
+    #[serde(default)]
     log_dir: String,
+    #[serde(default)]
     log_file: String,
+    #[serde(default)]
     pid_file: String,
+    #[serde(default)]
     port: u16,
+    #[serde(default)]
     login_url: String,
+    #[serde(default)]
+    health_url: String,
+    /// Long-running dev servers (mvn, pnpm) are detached. Tomcat's start script exits.
+    #[serde(default)]
+    background: bool,
 }
 
 struct Vars {
@@ -48,22 +69,29 @@ struct Vars {
 struct Resolved {
     id: String,
     name: String,
+    enabled: bool,
+    reason: String,
     root: PathBuf,
-    tomcat: PathBuf,
+    tomcat: Option<PathBuf>,
     log_dir: PathBuf,
     log_file: PathBuf,
     pid_file: PathBuf,
     port: u16,
+    /// `login_url` when set, otherwise `health_url`. Empty means ready == port open.
     login_url: String,
+    background: bool,
     start: Vec<String>,
     stop: Vec<String>,
 }
 
 impl Resolved {
     fn catalina_env(&self) -> Vec<(String, String)> {
+        let Some(tomcat) = &self.tomcat else {
+            return Vec::new();
+        };
         vec![
-            ("CATALINA_HOME".into(), path_to_string(&self.tomcat)),
-            ("CATALINA_BASE".into(), path_to_string(&self.tomcat)),
+            ("CATALINA_HOME".into(), path_to_string(tomcat)),
+            ("CATALINA_BASE".into(), path_to_string(tomcat)),
             ("CATALINA_PID".into(), path_to_string(&self.pid_file)),
         ]
     }
@@ -74,6 +102,9 @@ pub struct ProjectRow {
     pub id: String,
     pub name: String,
     pub root: String,
+    pub enabled: bool,
+    pub port: u16,
+    pub reason: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -125,6 +156,9 @@ impl Loaded {
                 id: resolved.id,
                 name: resolved.name,
                 root: path_to_string(&resolved.root),
+                enabled: resolved.enabled,
+                port: resolved.port,
+                reason: resolved.reason,
             });
         }
         Ok(ProjectList {
@@ -319,27 +353,79 @@ fn render_argv(argv: &[String], vars: &Vars, home: Option<&Path>) -> Result<Vec<
     argv.iter().map(|a| render_token(a, vars, home)).collect()
 }
 
+fn default_under_log(id: &str, suffix: &str) -> String {
+    let mut raw = String::from("{{log_dir}}/");
+    raw.push_str(id);
+    raw.push_str(suffix);
+    raw
+}
+
 fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolved> {
-    let root = expand_path("root", &p.root, home)?;
-    let tomcat = expand_path("tomcat", &p.tomcat, home)?;
-    let log_dir = expand_path("log_dir", &p.log_dir, home)?;
-    let vars = Vars {
-        root: path_to_string(&root),
-        tomcat: path_to_string(&tomcat),
-        log_dir: path_to_string(&log_dir),
-    };
-    let log_file = expand_path("log_file", &subst(&p.log_file, &vars), home)?;
-    let pid_file = expand_path("pid_file", &subst(&p.pid_file, &vars), home)?;
-    if p.port == 0 {
+    if p.enabled && p.port == 0 {
         bail!("port must be non-zero");
     }
-    let login_url = p.login_url.trim().to_string();
-    if login_url.is_empty() {
-        bail!("login_url is empty");
+    if !p.enabled && p.reason.trim().is_empty() {
+        bail!("disabled project `{id}` needs a reason");
     }
+    let root = expand_path("root", &p.root, home)?;
+    let tomcat = if p.tomcat.trim().is_empty() {
+        None
+    } else {
+        Some(expand_path("tomcat", &p.tomcat, home)?)
+    };
+    let log_dir_raw = if p.log_dir.trim().is_empty() {
+        "~/.tongyun-dev/logs".to_string()
+    } else {
+        p.log_dir.clone()
+    };
+    let log_dir = expand_path("log_dir", &log_dir_raw, home)?;
+    let vars = Vars {
+        root: path_to_string(&root),
+        tomcat: tomcat
+            .as_ref()
+            .map(|t| path_to_string(t))
+            .unwrap_or_default(),
+        log_dir: path_to_string(&log_dir),
+    };
+    let log_file_raw = if p.log_file.trim().is_empty() {
+        default_under_log(id, ".out")
+    } else {
+        p.log_file.clone()
+    };
+    let pid_file_raw = if p.pid_file.trim().is_empty() {
+        default_under_log(id, ".pid")
+    } else {
+        p.pid_file.clone()
+    };
+    let log_file = expand_path("log_file", &subst(&log_file_raw, &vars), home)?;
+    let pid_file = expand_path("pid_file", &subst(&pid_file_raw, &vars), home)?;
+    let login = p.login_url.trim();
+    let login_url = if login.is_empty() {
+        p.health_url.trim().to_string()
+    } else {
+        login.to_string()
+    };
+    if p.enabled && p.start.is_empty() {
+        bail!("project `{id}` has an empty start command");
+    }
+    if p.enabled && tomcat.is_some() && p.stop.is_empty() {
+        bail!("project `{id}` needs a stop command");
+    }
+    let start = if p.start.is_empty() {
+        Vec::new()
+    } else {
+        render_argv(&p.start, &vars, home)?
+    };
+    let stop = if p.stop.is_empty() {
+        Vec::new()
+    } else {
+        render_argv(&p.stop, &vars, home)?
+    };
     Ok(Resolved {
         id: id.to_string(),
         name: p.name.clone(),
+        enabled: p.enabled,
+        reason: p.reason.trim().to_string(),
         root,
         tomcat,
         log_dir,
@@ -347,8 +433,9 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
         pid_file,
         port: p.port,
         login_url,
-        start: render_argv(&p.start, &vars, home)?,
-        stop: render_argv(&p.stop, &vars, home)?,
+        background: p.background,
+        start,
+        stop,
     })
 }
 
@@ -446,6 +533,9 @@ fn is_server_process(pid: u32) -> bool {
 }
 
 fn listener_pids(port: u16) -> Vec<u32> {
+    if port == 0 {
+        return Vec::new();
+    }
     let out = Command::new("lsof")
         .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
         .stdin(Stdio::null())
@@ -483,7 +573,34 @@ fn server_pids(p: &Resolved) -> Vec<u32> {
     pids
 }
 
+/// Dev servers (Spring / pnpm) own their port. The pid file may be bash, node, or java.
+fn dev_pids(p: &Resolved) -> Vec<u32> {
+    let mut pids = Vec::new();
+    if let Some(pid) = read_pid(&p.pid_file) {
+        if process_alive(pid) {
+            pids.push(pid);
+        }
+    }
+    for pid in listener_pids(p.port) {
+        if !pids.contains(&pid) && process_alive(pid) {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
+fn tracked_pids(p: &Resolved) -> Vec<u32> {
+    if p.tomcat.is_some() {
+        server_pids(p)
+    } else {
+        dev_pids(p)
+    }
+}
+
 fn port_open(port: u16) -> bool {
+    if port == 0 {
+        return false;
+    }
     let addr = format!("127.0.0.1:{port}");
     let Ok(addr) = addr.parse::<SocketAddr>() else {
         return false;
@@ -575,7 +692,7 @@ fn login_probe(url: &str) -> LoginProbe {
 }
 
 fn status_of(p: &Resolved) -> StatusJson {
-    let pid = server_pids(p).into_iter().next();
+    let pid = tracked_pids(p).into_iter().next();
     StatusJson {
         id: p.id.clone(),
         name: p.name.clone(),
@@ -591,7 +708,15 @@ fn status_of(p: &Resolved) -> StatusJson {
 }
 
 fn is_down(p: &Resolved) -> bool {
-    server_pids(p).is_empty() && !port_open(p.port)
+    tracked_pids(p).is_empty() && !port_open(p.port)
+}
+
+fn is_ready(p: &Resolved) -> bool {
+    if p.login_url.is_empty() {
+        port_open(p.port)
+    } else {
+        login_probe(&p.login_url).ok
+    }
 }
 
 fn run_cmd(argv: &[String], dir: Option<&Path>, env: &[(String, String)]) -> Result<()> {
@@ -677,16 +802,63 @@ fn wait_until(timeout: Duration, mut pred: impl FnMut() -> bool) -> bool {
     }
 }
 
+fn spawn_background(p: &Resolved) -> Result<()> {
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&p.log_file)
+        .with_context(|| format!("open log {}", p.log_file.display()))?;
+    let log_err = log
+        .try_clone()
+        .with_context(|| format!("clone log handle {}", p.log_file.display()))?;
+    let mut cmd = Command::new(&p.start[0]);
+    cmd.args(&p.start[1..])
+        .stdin(Stdio::null())
+        .stdout(log)
+        .stderr(log_err)
+        .current_dir(&p.root);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("spawn {}", p.start[0]))?;
+    let pid = child.id();
+    if let Err(err) = std::fs::write(&p.pid_file, format!("{pid}\n")) {
+        signal_pid(pid, "-KILL");
+        return Err(err).with_context(|| format!("write pid {}", p.pid_file.display()));
+    }
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+    eprintln!("  pid {pid}");
+    Ok(())
+}
+
 fn cmd_start(p: &Resolved) -> Result<()> {
+    if !p.enabled {
+        let why = if p.reason.is_empty() {
+            "disabled"
+        } else {
+            p.reason.as_str()
+        };
+        bail!("project `{}` is disabled: {why}", p.id);
+    }
     eprintln!("starting {} …", p.id);
     eprintln!("  root {}", p.root.display());
-    eprintln!(
-        "  script {}",
-        script_tokens(&p.start)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
+    if p.background {
+        eprintln!("  background port {}", p.port);
+    } else {
+        eprintln!(
+            "  script {}",
+            script_tokens(&p.start)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
     eprintln!("  log {}", p.log_file.display());
     if !p.root.is_dir() {
         bail!("project root not found: {}", p.root.display());
@@ -695,22 +867,37 @@ fn cmd_start(p: &Resolved) -> Result<()> {
         bail!("start script not found: {missing}");
     }
     ensure_log_dir(&p.log_dir, current_home().as_deref())?;
-    run_cmd(&p.start, Some(&p.root), &p.catalina_env())?;
+    if p.background && is_ready(p) && !tracked_pids(p).is_empty() {
+        eprintln!("{} already up on port {}", p.id, p.port);
+        return Ok(());
+    }
+    if p.background {
+        spawn_background(p)?;
+    } else {
+        run_cmd(&p.start, Some(&p.root), &p.catalina_env())?;
+    }
     let timeout = start_ready_timeout()?;
-    eprintln!("waiting up to {}s for {}", timeout.as_secs(), p.login_url);
+    if p.login_url.is_empty() {
+        eprintln!("waiting up to {}s for port {}", timeout.as_secs(), p.port);
+    } else {
+        eprintln!("waiting up to {}s for {}", timeout.as_secs(), p.login_url);
+    }
     let started = Instant::now();
-    let st = loop {
-        let st = status_of(p);
-        if st.login_probe.ok || started.elapsed() >= timeout {
-            break st;
+    let ready = loop {
+        if is_ready(p) || started.elapsed() >= timeout {
+            break is_ready(p);
         }
         thread::sleep(Duration::from_secs(1));
     };
-    if !st.login_probe.ok {
+    if !ready {
+        if p.login_url.is_empty() {
+            bail!("port {} not open. log: {}", p.port, p.log_file.display());
+        }
+        let probe = login_probe(&p.login_url);
         bail!(
             "login page not ready at {} (http {:?}). log: {}",
             p.login_url,
-            st.login_probe.http_code,
+            probe.http_code,
             p.log_file.display()
         );
     }
@@ -728,23 +915,47 @@ fn signal_pid(pid: u32, sig: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn terminate_server(pid: u32) -> Result<()> {
+fn signal_group(pid: u32, sig: &str) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    Command::new("kill")
+        .args([sig, "--", &format!("-{pid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn terminate_pid(pid: u32, group: bool) -> Result<()> {
     if pid <= 1 {
         bail!("refusing to signal pid {pid}");
     }
-    let comm = ps_field(pid, "comm=").unwrap_or_else(|| "java".into());
+    let comm = ps_field(pid, "comm=").unwrap_or_else(|| "process".into());
     eprintln!("sending TERM to {pid} ({comm})");
+    if group {
+        signal_group(pid, "-TERM");
+    }
     signal_pid(pid, "-TERM");
     if wait_until(Duration::from_secs(8), || !process_alive(pid)) {
         return Ok(());
     }
     eprintln!("sending KILL to {pid} ({comm})");
+    if group {
+        signal_group(pid, "-KILL");
+    }
     signal_pid(pid, "-KILL");
     if wait_until(Duration::from_secs(3), || !process_alive(pid)) {
         Ok(())
     } else {
         bail!("pid {pid} still alive after KILL");
     }
+}
+
+fn terminate_server(pid: u32) -> Result<()> {
+    terminate_pid(pid, false)
 }
 
 fn listener_hint(port: u16) -> String {
@@ -763,8 +974,19 @@ fn listener_hint(port: u16) -> String {
 }
 
 fn cmd_stop(p: &Resolved) -> Result<()> {
+    if p.tomcat.is_some() {
+        cmd_stop_catalina(p)
+    } else {
+        cmd_stop_dev(p)
+    }
+}
+
+fn cmd_stop_catalina(p: &Resolved) -> Result<()> {
+    let Some(tomcat) = p.tomcat.as_ref() else {
+        bail!("internal: catalina stop without tomcat");
+    };
     eprintln!("stopping {} …", p.id);
-    eprintln!("  catalina {}", p.tomcat.join("bin/catalina.sh").display());
+    eprintln!("  catalina {}", tomcat.join("bin/catalina.sh").display());
     eprintln!("  pid file {}", p.pid_file.display());
     if is_down(p) {
         eprintln!("{} already stopped", p.id);
@@ -772,7 +994,7 @@ fn cmd_stop(p: &Resolved) -> Result<()> {
     }
     if let Some(missing) = first_missing_script(&p.stop) {
         eprintln!("stop script not found: {missing}");
-    } else if let Err(e) = run_cmd(&p.stop, Some(&p.tomcat), &p.catalina_env()) {
+    } else if let Err(e) = run_cmd(&p.stop, Some(tomcat), &p.catalina_env()) {
         eprintln!("catalina stop reported an error: {e}");
     }
     if !wait_until(Duration::from_secs(20), || is_down(p)) {
@@ -786,6 +1008,37 @@ fn cmd_stop(p: &Resolved) -> Result<()> {
         if !wait_until(Duration::from_secs(10), || is_down(p)) {
             bail!("stop did not release the port: {}", listener_hint(p.port));
         }
+    }
+    Ok(())
+}
+
+fn cmd_stop_dev(p: &Resolved) -> Result<()> {
+    eprintln!("stopping {} …", p.id);
+    eprintln!("  pid file {}", p.pid_file.display());
+    eprintln!("  port {}", p.port);
+    if is_down(p) {
+        eprintln!("{} already stopped", p.id);
+        return Ok(());
+    }
+    if !p.stop.is_empty() {
+        if let Some(missing) = first_missing_script(&p.stop) {
+            eprintln!("stop script not found: {missing}");
+        } else if let Err(e) = run_cmd(&p.stop, Some(&p.root), &[]) {
+            eprintln!("stop command reported an error: {e}");
+        }
+    }
+    if let Some(pid) = read_pid(&p.pid_file) {
+        if process_alive(pid) {
+            terminate_pid(pid, true)?;
+        }
+    }
+    for pid in listener_pids(p.port) {
+        if process_alive(pid) {
+            terminate_server(pid)?;
+        }
+    }
+    if !wait_until(Duration::from_secs(10), || is_down(p)) {
+        bail!("stop did not release the port: {}", listener_hint(p.port));
     }
     Ok(())
 }
@@ -850,9 +1103,12 @@ mod tests {
             PathBuf::from("/Users/dev/code/acme/legacy-app")
         );
         assert_eq!(
-            p.tomcat,
-            PathBuf::from("/Users/dev/opt/tomcat-9")
+            p.tomcat.as_deref(),
+            Some(Path::new("/Users/dev/opt/tomcat-9"))
         );
+        assert!(p.enabled);
+        assert!(!p.background);
+        assert!(p.reason.is_empty());
         assert_eq!(
             p.log_file,
             PathBuf::from("/Users/dev/.tongyun-dev/logs/legacy_app_catalina.out")
@@ -889,8 +1145,9 @@ mod tests {
         assert!(!joined.contains('~'));
         assert!(!joined.contains("{{"));
         let env = p.catalina_env();
-        assert!(env.contains(&("CATALINA_HOME".into(), path_to_string(&p.tomcat))));
-        assert!(env.contains(&("CATALINA_BASE".into(), path_to_string(&p.tomcat))));
+        let tomcat = p.tomcat.as_ref().unwrap();
+        assert!(env.contains(&("CATALINA_HOME".into(), path_to_string(tomcat))));
+        assert!(env.contains(&("CATALINA_BASE".into(), path_to_string(tomcat))));
         assert!(env.contains(&("CATALINA_PID".into(), path_to_string(&p.pid_file))));
         assert_eq!(p.port, 8080);
         assert_eq!(
@@ -960,6 +1217,178 @@ mod tests {
         ));
         assert!(!looks_like_server("java", "my-other-app.jar"));
         assert!(!looks_like_server("nginx", "nginx: master process"));
+    }
+
+    #[test]
+    fn enabled_defaults_and_log_paths() {
+        let cfg: FileConfig = toml::from_str(
+            r#"
+[projects.demo]
+name = "demo"
+root = "/tmp/demo"
+start = ["true"]
+port = 9
+"#,
+        )
+        .unwrap();
+        let p = resolve_project(
+            "demo",
+            cfg.projects.get("demo").unwrap(),
+            Some(Path::new("/Users/dev")),
+        )
+        .unwrap();
+        assert!(p.enabled);
+        assert!(!p.background);
+        assert!(p.tomcat.is_none());
+        assert!(p.login_url.is_empty());
+        assert_eq!(
+            p.log_file,
+            PathBuf::from("/Users/dev/.tongyun-dev/logs/demo.out")
+        );
+        assert_eq!(
+            p.pid_file,
+            PathBuf::from("/Users/dev/.tongyun-dev/logs/demo.pid")
+        );
+    }
+
+    #[test]
+    fn registered_lines_resolve() {
+        let home = Path::new("/Users/dev");
+        let cfg = parse_config(PROJECTS_TOML).unwrap();
+        let enabled = [
+            "legacy_app",
+            "demo_exam",
+            "demo_exam_vue",
+            "demo_exam_student_vue",
+            "ap_docs-site",
+            "ap_docs-site_web",
+            "ap_admin_test_center",
+            "ap_admin_test_center_vue",
+            "ops_class_admin_manager",
+            "ops_class_admin_web",
+        ];
+        let disabled = ["acme_system_ap_java_backend", "opsstudentmanageserver"];
+        assert_eq!(cfg.projects.len(), enabled.len() + disabled.len());
+        for id in enabled {
+            let p = resolve_project(id, cfg.projects.get(id).unwrap(), Some(home)).unwrap();
+            assert!(p.enabled, "{id}");
+            assert!(!p.start.is_empty(), "{id}");
+            assert_ne!(p.port, 0, "{id}");
+            assert!(p.root.is_absolute(), "{id}");
+            assert!(!path_to_string(&p.root).contains('~'), "{id}");
+            assert!(!path_to_string(&p.log_file).contains("{{"), "{id}");
+        }
+        for id in disabled {
+            let p = resolve_project(id, cfg.projects.get(id).unwrap(), Some(home)).unwrap();
+            assert!(!p.enabled, "{id}");
+            assert!(!p.reason.is_empty(), "{id}");
+            let err = cmd_start(&p).unwrap_err().to_string();
+            assert!(err.contains("disabled"), "{err}");
+            assert!(err.contains(&p.reason), "{err}");
+        }
+
+        let be = resolve_project(
+            "demo_exam",
+            cfg.projects.get("demo_exam").unwrap(),
+            Some(home),
+        )
+        .unwrap();
+        assert!(be.background);
+        assert!(be.tomcat.is_none());
+        assert_eq!(be.port, 8034);
+        assert!(be.login_url.is_empty());
+        let start = be.start.join(" ");
+        assert!(start.contains("sdkman-init.sh"), "{start}");
+        assert!(start.contains("spring-boot:run"), "{start}");
+        assert!(start.contains("profiles=dev"), "{start}");
+        assert_eq!(
+            be.root,
+            PathBuf::from("/Users/dev/code/acme/01-exam/demo_exam")
+        );
+        assert_eq!(
+            be.log_file,
+            PathBuf::from("/Users/dev/.tongyun-dev/logs/demo_exam.out")
+        );
+
+        let vue = resolve_project(
+            "demo_exam_vue",
+            cfg.projects.get("demo_exam_vue").unwrap(),
+            Some(home),
+        )
+        .unwrap();
+        assert_eq!(vue.port, 5777);
+        assert!(vue.background);
+        let vue_start = vue.start.join(" ");
+        assert!(vue_start.contains("fnm"), "{vue_start}");
+        assert!(vue_start.contains("5777"), "{vue_start}");
+        assert_eq!(vue.login_url, "http://127.0.0.1:5777/");
+
+        let student = resolve_project(
+            "demo_exam_student_vue",
+            cfg.projects.get("demo_exam_student_vue").unwrap(),
+            Some(home),
+        )
+        .unwrap();
+        assert_eq!(student.port, 5999);
+        assert_eq!(student.login_url, "http://127.0.0.1:5999/");
+
+        let paper = resolve_project(
+            "ap_docs-site",
+            cfg.projects.get("ap_docs-site").unwrap(),
+            Some(home),
+        )
+        .unwrap();
+        assert_eq!(paper.port, 8888);
+        assert!(paper.background);
+        let web = resolve_project(
+            "ap_docs-site_web",
+            cfg.projects.get("ap_docs-site_web").unwrap(),
+            Some(home),
+        )
+        .unwrap();
+        assert_eq!(web.port, 7888);
+        assert_eq!(web.login_url, "http://127.0.0.1:7888/");
+
+        let center = resolve_project(
+            "ap_admin_test_center",
+            cfg.projects.get("ap_admin_test_center").unwrap(),
+            Some(home),
+        )
+        .unwrap();
+        assert_eq!(center.port, 8110);
+        let center_vue = resolve_project(
+            "ap_admin_test_center_vue",
+            cfg.projects.get("ap_admin_test_center_vue").unwrap(),
+            Some(home),
+        )
+        .unwrap();
+        assert_eq!(center_vue.port, 8111);
+
+        let ops = resolve_project(
+            "ops_class_admin_manager",
+            cfg.projects.get("ops_class_admin_manager").unwrap(),
+            Some(home),
+        )
+        .unwrap();
+        assert_eq!(ops.port, 8147);
+        let ops_web = resolve_project(
+            "ops_class_admin_web",
+            cfg.projects.get("ops_class_admin_web").unwrap(),
+            Some(home),
+        )
+        .unwrap();
+        assert_eq!(ops_web.port, 8146);
+        assert!(ops_web.start.join(" ").contains("fnm"));
+
+        let ap_blocked = cfg
+            .projects
+            .get("acme_system_ap_java_backend")
+            .unwrap();
+        assert!(!ap_blocked.enabled);
+        assert!(ap_blocked.reason.to_ascii_lowercase().contains("maven"));
+        let ops_blocked = cfg.projects.get("opsstudentmanageserver").unwrap();
+        assert!(!ops_blocked.enabled);
+        assert!(ops_blocked.reason.contains("acme-job-sdk"));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 - 仓库：私有
 - CLI 与桌面壳共用 `tongyun-dev-core`。壳是 Tauri 2 + React，见 [docs/decisions/0001-cli-first.md](docs/decisions/0001-cli-first.md)
-- 第一个项目：`legacy_app`
+- 已注册本机 acme 产品线（桌面列表只显示启用项）：`legacy_app`、示例考试、AP、示例课管。私有 Maven 和 `acme-job-sdk` 被挡住的两项 `enabled=false`
 
 ## Mac 快速开始
 
@@ -52,13 +52,32 @@ export TONGYUN_DEV_CONFIG="$PWD/config/projects.toml"
 ./target/debug/tongyun-dev --config ~/path/to/tongyun-dev/config/projects.toml status legacy_app --json
 ```
 
-`start` 会先跑启动脚本，再等到登录页 `http://127.0.0.1:8080/legacy_app/admin/login.html` 返回 200、301 或 302。默认最多再等 180 秒，可以用 `TONGYUN_DEV_START_TIMEOUT`（秒）改。`status --json` 稳定包含 `running`、`pid`、`port`、`login_probe`、`log_path`（展开后的绝对路径）。
+`legacy_app` 的 `start` 会先跑启动脚本，再等到登录页 `http://127.0.0.1:8080/legacy_app/admin/login.html` 返回 200、301 或 302。默认最多再等 180 秒，可以用 `TONGYUN_DEV_START_TIMEOUT`（秒）改。`status --json` 稳定包含 `running`、`pid`、`port`、`login_probe`、`log_path`（展开后的绝对路径）。
+
+`list` 打印全部项目。`list --json` 每项仍有 `id`、`name`、`root`，并带 `enabled`、`port`、`reason`。停用项在文本模式多两列：`disabled` 和原因。
+
+| id | 端口 | 启用 |
+| --- | --- | --- |
+| `legacy_app` | 8080 | 是 |
+| `demo_exam` | 8034 | 是 |
+| `demo_exam_vue` | 5777 | 是 |
+| `demo_exam_student_vue` | 5999 | 是 |
+| `ap_docs-site` | 8888 | 是 |
+| `ap_docs-site_web` | 7888 | 是 |
+| `ap_admin_test_center` | 8110 | 是 |
+| `ap_admin_test_center_vue` | 8111 | 是 |
+| `acme_system_ap_java_backend` | — | 否，私有 Maven 被挡住 |
+| `ops_class_admin_manager` | 8147 | 是 |
+| `ops_class_admin_web` | 8146 | 是 |
+| `opsstudentmanageserver` | — | 否，`acme-job-sdk` 被挡住 |
+
+路径和启动命令见 [config/projects.toml](config/projects.toml)，字段说明见 [docs/development.md](docs/development.md)。Spring / pnpm 在后台跑，日志默认在 `~/.tongyun-dev/logs/<id>.out`。
 
 验收清单见 [docs/development.md](docs/development.md)。
 
 ## 桌面窗口（Mac）
 
-需要 Node.js 20+ 和 Xcode Command Line Tools。窗口调用同一套 Rust core：项目列表、启动、停止、刷新状态（`running` / `pid` / `port` / `login_probe`），并跟随 catalina 日志。
+需要 Node.js 20+ 和 Xcode Command Line Tools。窗口调用同一套 Rust core：启用中的项目列表、启动、停止、刷新状态（`running` / `pid` / `port` / `login_probe`），并跟随该项目日志。停用项不显示。
 
 ```bash
 cd apps/desktop

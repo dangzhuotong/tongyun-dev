@@ -3,7 +3,7 @@
 本地开发机控制台：注册项目、启停、看状态、跟日志。对标 IDEA 运行面板，**人用终端，AI 读 JSON 状态和日志**。
 
 - 仓库：私有
-- MVP 只有 **Rust CLI**（`tongyun-dev`）。Tauri 2 + React 桌面壳不在这次范围，见 [docs/decisions/0001-cli-first.md](docs/decisions/0001-cli-first.md)
+- CLI 与桌面壳共用 `tongyun-dev-core`。壳是 Tauri 2 + React，见 [docs/decisions/0001-cli-first.md](docs/decisions/0001-cli-first.md)
 - 第一个项目：`td_work`
 
 ## Mac 快速开始
@@ -55,6 +55,25 @@ export TONGYUN_DEV_CONFIG="$PWD/config/projects.toml"
 `start` 会先跑启动脚本，再等到登录页 `http://127.0.0.1:8080/td_work/admin/login.html` 返回 200、301 或 302。默认最多再等 180 秒，可以用 `TONGYUN_DEV_START_TIMEOUT`（秒）改。`status --json` 稳定包含 `running`、`pid`、`port`、`login_probe`、`log_path`（展开后的绝对路径）。
 
 验收清单见 [docs/development.md](docs/development.md)。
+
+## 桌面窗口（Mac）
+
+需要 Node.js 20+ 和 Xcode Command Line Tools。窗口调用同一套 Rust core：项目列表、启动、停止、刷新状态（`running` / `pid` / `port` / `login_probe`），并跟随 catalina 日志。
+
+```bash
+cd apps/desktop
+npm install
+npm run tauri dev
+```
+
+打包：
+
+```bash
+cd apps/desktop
+npm run tauri build
+```
+
+开发时在仓库里运行，窗口会从当前目录往上找到 `config/projects.toml`。也可以先 `export TONGYUN_DEV_CONFIG=/absolute/path/to/config/projects.toml`。不要把密钥写进仓库。
 
 ## 文档
 

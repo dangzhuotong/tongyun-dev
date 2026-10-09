@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/tongyun-dev-cli"]
+members = [
+    "crates/tongyun-dev-core",
+    "crates/tongyun-dev-cli",
+    "apps/desktop/src-tauri",
+]
+default-members = ["crates/tongyun-dev-core", "crates/tongyun-dev-cli"]
 
 [workspace.package]
 edition = "2021"

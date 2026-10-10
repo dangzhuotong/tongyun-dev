@@ -83,6 +83,10 @@ export function stateLabel(
   switch (status.state) {
     case "stopped":
       return "已停止";
+    case "installing": {
+      const secs = status.elapsed_secs ?? 0;
+      return `安装依赖中 · 已 ${secs} 秒`;
+    }
     case "starting": {
       const secs = status.elapsed_secs ?? 0;
       return `启动中 · 已 ${secs} 秒`;
@@ -114,6 +118,10 @@ export function stateShortLabel(
   switch (status.state) {
     case "stopped":
       return "已停止";
+    case "installing": {
+      const secs = status.elapsed_secs ?? 0;
+      return `装依赖 · ${secs}s`;
+    }
     case "starting": {
       const secs = status.elapsed_secs ?? 0;
       return `启动中 · ${secs}s`;

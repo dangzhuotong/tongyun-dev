@@ -38,7 +38,7 @@ export function App() {
   const [allStatuses, setAllStatuses] = useState<Record<string, Status>>({});
   const [log, setLog] = useState<LogTail | null>(null);
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState<"" | "start" | "stop" | "restart">("");
+  const [busy, setBusy] = useState<"" | "start" | "stop" | "restart" | "install">("");
   const busyRef = useRef(busy);
   busyRef.current = busy;
 
@@ -305,6 +305,22 @@ export function App() {
     }
   }
 
+  async function handleInstall() {
+    if (!selected || busyRef.current) return;
+    setBusy("install");
+    setError("");
+    try {
+      const next = await invoke<Status>("install_deps", { id: selected });
+      setStatus(next);
+      setAllStatuses((prev) => ({ ...prev, [next.id]: next }));
+    } catch (err: unknown) {
+      setError(String(err));
+    } finally {
+      await refresh(selected).catch(() => undefined);
+      setBusy("");
+    }
+  }
+
   async function handleRestart() {
     if (!selected || busyRef.current) return;
     setBusy("restart");
@@ -370,6 +386,15 @@ export function App() {
       isReadyOrPortOpenOrFailed
   );
 
+  const canInstall = Boolean(
+    selected &&
+      busy === "" &&
+      current?.enabled &&
+      status?.install_command &&
+      status.state !== "installing" &&
+      status.state !== "starting"
+  );
+
   const isPortOpenOrReady = status?.state === "port_open" || status?.state === "ready";
   const canOpenPage = Boolean(
     selected &&
@@ -383,6 +408,7 @@ export function App() {
     if (!current.configured) return "未配置端口或启动命令";
     if (!current.enabled) return current.reason || "项目已禁用";
     if (status?.state === "stopped") return "服务未启动（端口未通）";
+    if (status?.state === "installing") return "正在装依赖，装完会自动启动";
     if (status?.state === "starting") return "服务启动中，端口尚未通";
     if (status?.state === "failed") return `服务启动失败${status.failure ? `：${status.failure}` : ""}`;
     if (!page) return "未获取到页面地址";
@@ -756,6 +782,20 @@ export function App() {
                       >
                         <FileIcon /> 打开日志文件
                       </button>
+                      {status?.install_command && (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={!canInstall}
+                          title={`在项目目录运行 ${status.install_command}`}
+                          onClick={() => {
+                            setMenu("");
+                            handleInstall();
+                          }}
+                        >
+                          <RefreshIcon /> 安装依赖（{status.install_command}）
+                        </button>
+                      )}
                       <div className="menu-sep" />
                       <button
                         type="button"
@@ -779,6 +819,9 @@ export function App() {
               <DetailStateBar
                 status={status}
                 project={current}
+                canInstall={canInstall}
+                installing={busy === "install"}
+                onInstall={handleInstall}
                 onScrollToLog={() => {
                   document.getElementById("log-panel")?.scrollIntoView({ behavior: "smooth" });
                 }}
@@ -911,10 +954,12 @@ function runLabel(status: Status | null, project: { enabled: boolean; configured
       return "就绪";
     case "port_open":
       return "端口已通";
+    case "installing":
+      return `安装依赖中 · ${status.elapsed_secs ?? 0} 秒`;
     case "starting":
       return `启动中 · ${status.elapsed_secs ?? 0} 秒`;
     case "failed":
-      return "启动失败";
+      return status.deps_missing ? "依赖未安装" : "启动失败";
     default:
       return "已停止";
   }
@@ -927,6 +972,7 @@ function runTone(status: Status | null, project: { enabled: boolean; configured:
     case "ready":
     case "port_open":
       return "ok";
+    case "installing":
     case "starting":
       return "info";
     case "failed":
@@ -994,10 +1040,16 @@ function Highlight({ text, query }: { text: string; query: string }) {
 function DetailStateBar({
   status,
   project,
+  canInstall,
+  installing,
+  onInstall,
   onScrollToLog,
 }: {
   status: Status | null;
   project: { enabled: boolean; configured: boolean };
+  canInstall: boolean;
+  installing: boolean;
+  onInstall: () => void;
   onScrollToLog: () => void;
 }) {
   if (!project.configured || !project.enabled) return null;
@@ -1010,6 +1062,33 @@ function DetailStateBar({
     );
   }
   const state = status.state;
+  const installBtn = (
+    <button type="button" className="btn btn-primary btn-sm" disabled={!canInstall} onClick={onInstall}>
+      {installing ? "安装中…" : "安装依赖"}
+    </button>
+  );
+  if (state === "installing") {
+    const elapsed = status.elapsed_secs ?? 0;
+    return (
+      <div className="state-bar starting installing">
+        <span className="state-dot" />
+        <div className="state-main">
+          <div className="state-line">
+            <span className="state-text">安装依赖中 · 已 {elapsed} 秒</span>
+            <span className="state-tip">
+              缺 node_modules，正在运行 {status.install_command || "install"}，装完会自动启动；输出在下面日志里
+            </span>
+          </div>
+          <div className="progress indeterminate">
+            <div className="progress-bar" />
+          </div>
+        </div>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={onScrollToLog}>
+          看日志
+        </button>
+      </div>
+    );
+  }
   if (state === "starting") {
     const elapsed = status.elapsed_secs ?? 0;
     const timeout = status.timeout_secs || 180;
@@ -1057,6 +1136,7 @@ function DetailStateBar({
       <div className="state-bar failed">
         <span className="state-dot" />
         <span className="state-text">失败 · {status.failure || "服务启动失败"}</span>
+        {status.install_command && (status.deps_missing || (status.failure ?? "").includes("依赖")) && installBtn}
         <button type="button" className="btn btn-ghost btn-sm" onClick={onScrollToLog}>
           看日志
         </button>
@@ -1067,7 +1147,12 @@ function DetailStateBar({
     <div className="state-bar stopped">
       <span className="state-dot" />
       <span className="state-text">已停止</span>
-      <span className="state-tip">点「启动」运行这个项目</span>
+      <span className="state-tip">
+        {status.deps_missing
+          ? `还没装依赖（缺 node_modules），点「启动」会先自动运行 ${status.install_command || "install"}`
+          : "点「启动」运行这个项目"}
+      </span>
+      {status.deps_missing && status.install_command && installBtn}
     </div>
   );
 }

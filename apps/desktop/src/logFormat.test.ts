@@ -129,3 +129,10 @@ describe("stateLabel (各状态文字)", () => {
     expect(stateShortLabel({ state: "failed" })).toBe("失败");
   });
 });
+
+describe("installing（安装依赖中）", () => {
+  it("详情和侧栏都显示装依赖和秒数", () => {
+    expect(stateLabel({ state: "installing", elapsed_secs: 12 })).toBe("安装依赖中 · 已 12 秒");
+    expect(stateShortLabel({ state: "installing", elapsed_secs: 3 })).toBe("装依赖 · 3s");
+  });
+});

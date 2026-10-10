@@ -86,7 +86,12 @@ tongyun-dev open legacy_app --dir        # 打开项目目录
 tongyun-dev add my_web --root ~/code/my_web --start "pnpm dev" --port 5173 --node 22
 tongyun-dev add my_api --root ~/code/my_api --start "mvn spring-boot:run" --port 8090 --java 17.0.10-tem
 tongyun-dev remove my_web             # 只删注册，不动项目文件
+tongyun-dev install my_web            # 装前端依赖（按锁文件选 pnpm / yarn / npm），输出写进项目日志
 ```
+
+**前端依赖**：项目根目录有 `package.json` 但没有 `node_modules` 时，`start`（App、网页控制台、CLI 都一样）会先在项目目录跑一遍安装，状态显示「安装依赖中」，装好自动接着启动；装失败状态是「失败」并写明原因（例如 `pnpm install 退出码 1`），输出都在项目日志里。包管理器按锁文件选：`pnpm-lock.yaml` → `pnpm install`，`yarn.lock` → `yarn install`，其它 → `npm install`，Node 版本和启动时用的一样。不想自动装就给项目写 `auto_install = false`，这时启动会直接提示「依赖未安装（缺 node_modules）」，在 App 状态栏或 ⋯ 菜单点「安装依赖」。
+
+**端口参数**：pnpm 直接带参数，`pnpm dev --port 5173 --host 127.0.0.1`；不要写 `pnpm dev -- --port`，pnpm 会把 `--` 原样传给 vite / vue-cli，后面的 `--port` 就失效了（旧配置里这样写的，启动时会自动去掉这个 `--`）。npm 才需要 `npm run dev -- --port 5173`。
 
 `add` 写入 `config/projects.toml` 时保留原有注释和其他项目的写法；id 已存在会拒绝（先 `remove`）。新加的项目默认后台运行（`background = true`，适合 `pnpm dev` / `mvn spring-boot:run` 这类不退出的命令；只有会自己退出的脚本才加 `--foreground`）。启动命令存成 `["bash", "-lc", "<命令>"]`；声明了 `--node` / `--java` 时存成 `["bash", "-c", ...]`，避免 login shell 重新初始化 fnm / sdkman 把版本切回去。`--login-url` 可选：填了就要求 HTTP 200/301/302 才算启动完成，不填则端口能连上即可。
 

@@ -42,7 +42,7 @@ export function matchesStatus(project: FilterProject, status: FilterStatus, filt
     case "running":
       return state === "ready" || state === "port_open";
     case "starting":
-      return state === "starting";
+      return state === "starting" || state === "installing";
     case "failed":
       return state === "failed";
     default:

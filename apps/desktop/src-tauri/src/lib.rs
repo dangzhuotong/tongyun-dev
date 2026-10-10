@@ -56,6 +56,17 @@ async fn stop_project(id: String) -> Result<StatusJson, String> {
     .await
 }
 
+/// 后台装前端依赖（pnpm / yarn / npm 按锁文件选），立刻返回 installing 状态。
+#[tauri::command]
+async fn install_deps(id: String) -> Result<StatusJson, String> {
+    blocking(move || {
+        tongyun_dev_core::load(None)
+            .and_then(|loaded| loaded.install_deps(&id))
+            .map_err(report)
+    })
+    .await
+}
+
 #[tauri::command]
 async fn restart_project(id: String) -> Result<StatusJson, String> {
     blocking(move || {
@@ -198,6 +209,7 @@ pub fn run() {
             all_status,
             start_project,
             stop_project,
+            install_deps,
             restart_project,
             log_tail,
             open_log,

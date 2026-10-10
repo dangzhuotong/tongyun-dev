@@ -85,6 +85,9 @@ struct Project {
     node_home: Option<String>,
     #[serde(default)]
     shell: Option<String>,
+    /// 缺 node_modules 时启动前自动装依赖。缺省 true。
+    #[serde(default)]
+    auto_install: Option<bool>,
 }
 
 struct Vars {
@@ -93,6 +96,7 @@ struct Vars {
     log_dir: String,
 }
 
+#[derive(Debug, Clone)]
 struct Resolved {
     id: String,
     name: String,
@@ -118,6 +122,7 @@ struct Resolved {
     java_home: Option<PathBuf>,
     node_home: Option<PathBuf>,
     shell: Option<String>,
+    auto_install: bool,
 }
 
 impl Resolved {
@@ -147,7 +152,11 @@ impl Resolved {
     }
 
     pub fn assembled_start(&self) -> Vec<String> {
+        // 旧配置里常见 `pnpm dev -- --port X`：pnpm 会把 `--` 原样交给 vite / vue-cli，端口参数失效。
         self.active_start()
+            .iter()
+            .map(|a| normalize_start_arg(a))
+            .collect()
     }
 }
 
@@ -174,6 +183,8 @@ pub struct ProjectRow {
     pub node_home: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
+    /// 缺 node_modules 时启动前是否自动装依赖（缺省 true）。
+    pub auto_install: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -186,6 +197,8 @@ pub struct ProjectList {
 #[serde(rename_all = "snake_case")]
 pub enum LifeState {
     Stopped,
+    /// 正在装前端依赖（pnpm / yarn / npm install）。
+    Installing,
     Starting,
     PortOpen,
     Ready,
@@ -196,6 +209,7 @@ impl std::fmt::Display for LifeState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LifeState::Stopped => write!(f, "stopped"),
+            LifeState::Installing => write!(f, "installing"),
             LifeState::Starting => write!(f, "starting"),
             LifeState::PortOpen => write!(f, "port_open"),
             LifeState::Ready => write!(f, "ready"),
@@ -294,6 +308,12 @@ pub struct StatusJson {
     pub port_conflict: bool,
     /// `pid comm` of the other listener, with a project id when it matches one. Empty if unknown.
     pub port_holder: String,
+    /// 根目录有 package.json 但没有 node_modules。
+    #[serde(default)]
+    pub deps_missing: bool,
+    /// 装依赖用的命令（例如 `pnpm install`）；不是前端项目时为空。
+    #[serde(default)]
+    pub install_command: String,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -338,6 +358,7 @@ impl Loaded {
                 java_home: resolved.java_home.as_ref().map(|p| path_to_string(p)),
                 node_home: resolved.node_home.as_ref().map(|p| path_to_string(p)),
                 shell: resolved.shell,
+                auto_install: resolved.auto_install,
             });
         }
         Ok(ProjectList {
@@ -382,6 +403,26 @@ impl Loaded {
             };
             bail!("project `{}` is disabled: {why}", project.id);
         }
+        // 正在装依赖：装完会自己接着启动，不重复起。
+        if install_in_progress(&project.pid_file) {
+            return self.status(id);
+        }
+        if deps_missing(&project.root) && !(project.background && is_ready(&project)) {
+            if project.auto_install {
+                let _ = std::fs::remove_file(start_marker_path(&project.pid_file));
+                begin_install(&project, true);
+                return self.status(id);
+            }
+            let _ = clear_install_marker(&project.pid_file);
+            let marker = StartMarker {
+                started_at: current_time_secs(),
+                timeout_secs: start_ready_timeout_secs(&project),
+                error: Some(DEPS_MISSING_MSG.to_string()),
+            };
+            let _ = write_start_marker(&project.pid_file, &marker);
+            return self.status(id);
+        }
+        let _ = clear_install_marker(&project.pid_file);
         if let Err(e) = cmd_start_detached(&project) {
             let err_msg = format!("{e:#}");
             let marker = StartMarker {
@@ -412,6 +453,12 @@ impl Loaded {
         }
 
         let timeout = Duration::from_secs(initial_st.timeout_secs);
+        if initial_st.state == LifeState::Installing {
+            eprintln!(
+                "缺 node_modules，先装依赖：{}（日志 {}）",
+                initial_st.install_command, initial_st.log_path
+            );
+        }
         if project.login_url.is_empty() {
             eprintln!(
                 "waiting up to {}s for port {}",
@@ -459,6 +506,15 @@ impl Loaded {
                         last_log_time = Instant::now();
                     }
                 }
+                LifeState::Installing => {
+                    if last_log_time.elapsed() >= Duration::from_secs(5) {
+                        let elapsed = st
+                            .elapsed_secs
+                            .unwrap_or_else(|| start_time.elapsed().as_secs());
+                        eprintln!("安装依赖中（{}）已 {} 秒", st.install_command, elapsed);
+                        last_log_time = Instant::now();
+                    }
+                }
                 LifeState::Stopped => {
                     bail!("服务已停止");
                 }
@@ -468,9 +524,52 @@ impl Loaded {
 
     pub fn stop(&self, id: &str) -> Result<StatusJson> {
         let project = self.resolve(id)?;
+        cancel_install(&project);
         cmd_stop(&project)?;
         let peers = self.peer_pids(&project.id);
         Ok(status_of(&project, &peers))
+    }
+
+    /// 后台装前端依赖（按锁文件选 pnpm / yarn / npm），日志追加到项目日志，立刻返回（状态 installing）。
+    pub fn install_deps(&self, id: &str) -> Result<StatusJson> {
+        let project = self.resolve(id)?;
+        if detect_package_manager(&project.root).is_none() {
+            bail!(
+                "不是前端项目：{} 下没有 package.json",
+                project.root.display()
+            );
+        }
+        if !install_in_progress(&project.pid_file) {
+            begin_install(&project, false);
+        }
+        self.status(id)
+    }
+
+    /// CLI 用：装完才返回。失败时返回错误（原因同 App 里显示的）。
+    pub fn install_deps_blocking(&self, id: &str) -> Result<StatusJson> {
+        let project = self.resolve(id)?;
+        if detect_package_manager(&project.root).is_none() {
+            bail!(
+                "不是前端项目：{} 下没有 package.json",
+                project.root.display()
+            );
+        }
+        if install_in_progress(&project.pid_file) {
+            bail!("{} 正在装依赖，稍后再试", project.id);
+        }
+        match spawn_install(&project, false) {
+            Ok(handle) => {
+                let _ = handle.join();
+            }
+            Err(e) => {
+                write_install_failure(&project, &format!("{e:#}"));
+            }
+        }
+        let st = self.status(id)?;
+        if st.state == LifeState::Failed {
+            bail!("{}", st.failure.unwrap_or_else(|| "依赖安装失败".into()));
+        }
+        Ok(st)
     }
 
     /// Last lines of the catalina log. `missing` is true when the file is not there yet.
@@ -1004,6 +1103,7 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
         java_home,
         node_home,
         shell,
+        auto_install: p.auto_install.unwrap_or(true),
     })
 }
 
@@ -1403,10 +1503,23 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
         let _ = std::fs::remove_file(start_marker_path(&p.pid_file));
     }
 
-    let elapsed_secs = match state {
-        LifeState::Starting | LifeState::PortOpen | LifeState::Failed | LifeState::Ready => {
-            started_at.map(|st| now.saturating_sub(st))
+    let mut state = state;
+    let mut failure = failure;
+    let mut started_at = started_at;
+    if !matches!(state, LifeState::Ready | LifeState::PortOpen) {
+        if let Some((st, why, at)) = install_overlay(read_install_marker(&p.pid_file)) {
+            state = st;
+            failure = why;
+            started_at = Some(at);
         }
+    }
+
+    let elapsed_secs = match state {
+        LifeState::Installing
+        | LifeState::Starting
+        | LifeState::PortOpen
+        | LifeState::Failed
+        | LifeState::Ready => started_at.map(|st| now.saturating_sub(st)),
         LifeState::Stopped => None,
     };
     let running = matches!(state, LifeState::PortOpen | LifeState::Ready);
@@ -1428,6 +1541,322 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
         root: path_to_string(&p.root),
         port_conflict,
         port_holder,
+        deps_missing: deps_missing(&p.root),
+        install_command: detect_package_manager(&p.root)
+            .map(|pm| pm.install_command().to_string())
+            .unwrap_or_default(),
+    }
+}
+
+// ---------- 前端依赖（node_modules） ----------
+
+pub const DEPS_MISSING_MSG: &str = "依赖未安装（缺 node_modules）";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageManager {
+    Pnpm,
+    Yarn,
+    Npm,
+}
+
+impl PackageManager {
+    pub fn install_command(self) -> &'static str {
+        match self {
+            PackageManager::Pnpm => "pnpm install",
+            PackageManager::Yarn => "yarn install",
+            PackageManager::Npm => "npm install",
+        }
+    }
+}
+
+/// 按锁文件选包管理器：pnpm-lock.yaml → pnpm，yarn.lock → yarn，其它（package-lock.json 或没有锁文件）→ npm。
+/// 根目录没有 package.json 时返回 None（不是前端项目）。
+pub fn detect_package_manager(root: &Path) -> Option<PackageManager> {
+    if !root.join("package.json").is_file() {
+        return None;
+    }
+    if root.join("pnpm-lock.yaml").is_file() {
+        Some(PackageManager::Pnpm)
+    } else if root.join("yarn.lock").is_file() {
+        Some(PackageManager::Yarn)
+    } else {
+        Some(PackageManager::Npm)
+    }
+}
+
+/// 根目录有 package.json 但没有 node_modules 目录。
+pub fn deps_missing(root: &Path) -> bool {
+    root.join("package.json").is_file() && !root.join("node_modules").is_dir()
+}
+
+fn is_pnpm_token(t: &str) -> bool {
+    t == "pnpm" || t.ends_with("/pnpm") || t.eq_ignore_ascii_case("pnpm.cmd")
+}
+
+/// 去掉 `pnpm [run] <script> -- …` 里多余的 `--`。
+/// pnpm 会把脚本名后面的参数原样交给脚本，`--` 也会被传过去，vite / vue-cli 看到 `--` 就不再解析
+/// 后面的 `--port`。npm 的 `npm run dev -- --port` 是对的，不动。
+pub fn normalize_start_arg(arg: &str) -> String {
+    let mut changed = false;
+    let lines: Vec<String> = arg
+        .split('\n')
+        .map(|line| {
+            let toks: Vec<&str> = line.split_whitespace().collect();
+            let mut drop = Vec::new();
+            for (i, t) in toks.iter().enumerate() {
+                if !is_pnpm_token(t) {
+                    continue;
+                }
+                let mut j = i + 1;
+                if toks.get(j) == Some(&"run") {
+                    j += 1;
+                }
+                let Some(script) = toks.get(j) else { continue };
+                if script.starts_with('-') || matches!(*script, "&&" | "||" | ";" | "|") {
+                    continue;
+                }
+                if toks.get(j + 1) == Some(&"--") {
+                    drop.push(j + 1);
+                }
+            }
+            if drop.is_empty() {
+                return line.to_string();
+            }
+            changed = true;
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            let kept: Vec<&str> = toks
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !drop.contains(i))
+                .map(|(_, t)| *t)
+                .collect();
+            format!("{indent}{}", kept.join(" "))
+        })
+        .collect();
+    if changed {
+        lines.join("\n")
+    } else {
+        arg.to_string()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct InstallMarker {
+    pub started_at: u64,
+    /// 等安装进程结束并接着启动的那个进程（App / CLI / 网页控制台）。
+    pub supervisor: u32,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    pub command: String,
+    #[serde(default)]
+    pub then_start: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+pub fn install_marker_path(pid_file: &Path) -> PathBuf {
+    let mut p = pid_file.as_os_str().to_os_string();
+    p.push(".install");
+    PathBuf::from(p)
+}
+
+pub fn read_install_marker(pid_file: &Path) -> Option<InstallMarker> {
+    let text = std::fs::read_to_string(install_marker_path(pid_file)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn write_install_marker(pid_file: &Path, m: &InstallMarker) -> Result<()> {
+    let path = install_marker_path(pid_file);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json = serde_json::to_string(m).context("serialize install marker")?;
+    std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))
+}
+
+fn clear_install_marker(pid_file: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(install_marker_path(pid_file)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        r => r,
+    }
+}
+
+/// 安装标记 → 覆盖到状态上：(状态, 失败原因, 开始时间)。
+fn install_overlay(m: Option<InstallMarker>) -> Option<(LifeState, Option<String>, u64)> {
+    let m = m?;
+    if let Some(err) = m.error {
+        return Some((LifeState::Failed, Some(err), m.started_at));
+    }
+    let child_alive = m.pid.is_some_and(process_alive);
+    if child_alive || process_alive(m.supervisor) {
+        return Some((LifeState::Installing, None, m.started_at));
+    }
+    Some((
+        LifeState::Failed,
+        Some(format!(
+            "依赖安装中断（{} 没跑完），点「安装依赖」重试",
+            m.command
+        )),
+        m.started_at,
+    ))
+}
+
+fn install_in_progress(pid_file: &Path) -> bool {
+    matches!(
+        install_overlay(read_install_marker(pid_file)),
+        Some((LifeState::Installing, _, _))
+    )
+}
+
+fn write_install_failure(p: &Resolved, msg: &str) {
+    let command = detect_package_manager(&p.root)
+        .map(|pm| pm.install_command().to_string())
+        .unwrap_or_default();
+    let m = InstallMarker {
+        started_at: current_time_secs(),
+        supervisor: std::process::id(),
+        pid: None,
+        command,
+        then_start: false,
+        error: Some(format!("依赖安装失败：{msg}")),
+    };
+    let _ = write_install_marker(&p.pid_file, &m);
+}
+
+fn append_log_line(path: &Path, line: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// 起安装；起不来就把原因写进安装标记（状态显示「失败」）。
+fn begin_install(p: &Resolved, then_start: bool) {
+    if let Err(e) = spawn_install(p, then_start) {
+        write_install_failure(p, &format!("{e:#}"));
+    }
+}
+
+/// 在项目根目录后台跑 `pnpm install` / `yarn install` / `npm install`，Node 环境和启动时一样。
+/// 返回等待线程：装好且 `then_start` 时接着启动项目；失败时把原因写进安装标记。
+fn spawn_install(p: &Resolved, then_start: bool) -> Result<thread::JoinHandle<()>> {
+    let pm = detect_package_manager(&p.root)
+        .with_context(|| format!("{} 下没有 package.json", p.root.display()))?;
+    let command = pm.install_command().to_string();
+    let tc_env = toolchain_env(
+        p.java.as_deref(),
+        p.java_home.as_deref(),
+        p.node.as_deref(),
+        p.node_home.as_deref(),
+        &ToolchainRoots::from_env(),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    ensure_log_dir(&p.log_dir, current_home().as_deref())?;
+    if let Some(parent) = p.log_file.parent().filter(|d| !d.as_os_str().is_empty()) {
+        if !parent.is_dir() {
+            ensure_log_dir(parent, current_home().as_deref())?;
+        }
+    }
+    append_log_line(
+        &p.log_file,
+        &format!(
+            "[tongyun-dev] 安装依赖：{command}（目录 {}）",
+            p.root.display()
+        ),
+    );
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&p.log_file)
+        .with_context(|| format!("open log {}", p.log_file.display()))?;
+    let log_err = log.try_clone().context("clone log handle")?;
+    let argv = shell_argv(&command, p.shell.as_deref());
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(log)
+        .stderr(log_err)
+        .current_dir(&p.root);
+    for (k, v) in &tc_env {
+        if !v.is_empty() {
+            cmd.env(k, v);
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("运行 {command} 失败"))?;
+    let marker = InstallMarker {
+        started_at: current_time_secs(),
+        supervisor: std::process::id(),
+        pid: Some(child.id()),
+        command: command.clone(),
+        then_start,
+        error: None,
+    };
+    if let Err(e) = write_install_marker(&p.pid_file, &marker) {
+        let _ = child.kill();
+        return Err(e);
+    }
+    // 上一次「依赖未安装」之类的启动失败不再算数。
+    if read_start_marker(&p.pid_file).is_some_and(|m| m.error.is_some()) {
+        let _ = std::fs::remove_file(start_marker_path(&p.pid_file));
+    }
+    let p = p.clone();
+    Ok(thread::spawn(move || {
+        let result = child.wait();
+        // 被「停止」取消了：标记已删或换成了新的一次安装。
+        let still_ours = read_install_marker(&p.pid_file)
+            .is_some_and(|m| m.pid == marker.pid && m.started_at == marker.started_at);
+        if !still_ours {
+            append_log_line(&p.log_file, "[tongyun-dev] 安装依赖已取消");
+            return;
+        }
+        match result {
+            Ok(status) if status.success() => {
+                append_log_line(&p.log_file, &format!("[tongyun-dev] {command} 完成"));
+                if then_start {
+                    if let Err(e) = cmd_start_detached(&p) {
+                        let marker = StartMarker {
+                            started_at: current_time_secs(),
+                            timeout_secs: start_ready_timeout_secs(&p),
+                            error: Some(format!("{e:#}")),
+                        };
+                        let _ = write_start_marker(&p.pid_file, &marker);
+                    }
+                }
+                let _ = clear_install_marker(&p.pid_file);
+            }
+            other => {
+                let why = match other {
+                    Ok(status) => match status.code() {
+                        Some(code) => format!("{command} 退出码 {code}，详见日志"),
+                        None => format!("{command} 被中断，详见日志"),
+                    },
+                    Err(e) => format!("{command}：{e}"),
+                };
+                append_log_line(&p.log_file, &format!("[tongyun-dev] 依赖安装失败：{why}"));
+                let mut m = marker;
+                m.error = Some(format!("依赖安装失败：{why}"));
+                let _ = write_install_marker(&p.pid_file, &m);
+            }
+        }
+    }))
+}
+
+/// 停止时顺手取消正在跑的安装（整个进程组），并清掉安装标记。
+fn cancel_install(p: &Resolved) {
+    let Some(m) = read_install_marker(&p.pid_file) else {
+        return;
+    };
+    let _ = clear_install_marker(&p.pid_file);
+    if let Some(pid) = m.pid.filter(|&pid| process_alive(pid)) {
+        let _ = terminate_pid_with_grace(pid, true, 3);
     }
 }
 
@@ -1918,6 +2347,9 @@ pub struct NewProject {
     pub enabled: Option<bool>,
     #[serde(default)]
     pub reason: Option<String>,
+    /// 缺 node_modules 时启动前自动装依赖。None / true = 缺省（自动装），false = 不自动装。
+    #[serde(default)]
+    pub auto_install: Option<bool>,
 }
 
 fn non_empty(v: &Option<String>) -> Option<String> {
@@ -1989,7 +2421,7 @@ impl NewProject {
             root,
             enabled,
             reason,
-            start: shell_argv(&start, shell.as_deref()),
+            start: shell_argv(&normalize_start_arg(&start), shell.as_deref()),
             stop: non_empty(&self.stop)
                 .map(|s| shell_argv(&s, shell.as_deref()))
                 .unwrap_or_default(),
@@ -2010,6 +2442,7 @@ impl NewProject {
             java_home,
             node_home,
             shell,
+            auto_install: self.auto_install.filter(|v| !v),
         };
         Ok((id, project))
     }
@@ -2050,6 +2483,9 @@ fn project_table(p: &Project) -> toml_edit::Table {
     }
     if let Some(v) = &p.shell {
         t["shell"] = value(v.as_str());
+    }
+    if p.auto_install == Some(false) {
+        t["auto_install"] = value(false);
     }
     let arr = |argv: &[String]| {
         let mut a = Array::new();
@@ -2106,6 +2542,9 @@ pub struct ProjectEdit {
     pub start_timeout_secs: Option<u64>,
     #[serde(default)]
     pub stop_grace_secs: Option<u64>,
+    /// Some(false) 写 `auto_install = false`；Some(true) 删掉这个键（缺省就是自动装）。
+    #[serde(default)]
+    pub auto_install: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -2127,6 +2566,8 @@ pub struct ProjectDetail {
     pub reason: String,
     pub start_timeout_secs: Option<u64>,
     pub stop_grace_secs: Option<u64>,
+    #[serde(default = "default_true")]
+    pub auto_install: bool,
 }
 
 fn unpack_command(argv: &[String]) -> (String, bool) {
@@ -2209,6 +2650,7 @@ impl Loaded {
             java_home: r.java_home.as_ref().map(|p| path_to_string(p)),
             node_home: r.node_home.as_ref().map(|p| path_to_string(p)),
             shell: r.shell,
+            auto_install: r.auto_install,
         })
     }
 
@@ -2261,6 +2703,7 @@ impl Loaded {
             reason: p.reason.clone(),
             start_timeout_secs: p.start_timeout_secs,
             stop_grace_secs: p.stop_grace_secs,
+            auto_install: p.auto_install.unwrap_or(true),
         })
     }
 
@@ -2321,7 +2764,7 @@ impl Loaded {
             if trimmed.is_empty() {
                 proj_table.remove("start");
             } else {
-                let argv = shell_argv(trimmed, existing.shell.as_deref());
+                let argv = shell_argv(&normalize_start_arg(trimmed), existing.shell.as_deref());
                 let mut a = toml_edit::Array::new();
                 for s in argv {
                     a.push(s.as_str());
@@ -2414,6 +2857,14 @@ impl Loaded {
             }
         }
 
+        if let Some(auto) = edit.auto_install {
+            if auto {
+                proj_table.remove("auto_install");
+            } else {
+                set_table_val(proj_table, "auto_install", toml_edit::Value::from(false));
+            }
+        }
+
         if let Some(grace) = edit.stop_grace_secs {
             if grace == 0 {
                 proj_table.remove("stop_grace_secs");
@@ -2455,6 +2906,7 @@ impl Loaded {
             java_home: r.java_home.as_ref().map(|p| path_to_string(p)),
             node_home: r.node_home.as_ref().map(|p| path_to_string(p)),
             shell: r.shell,
+            auto_install: r.auto_install,
         })
     }
 
@@ -2654,6 +3106,8 @@ mod tests {
             root: "/Users/dev/code/acme/legacy-app".into(),
             port_conflict: false,
             port_holder: String::new(),
+            deps_missing: false,
+            install_command: String::new(),
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
@@ -3242,6 +3696,7 @@ port = 3002
             java_home: fs.java_home.as_ref().map(|p| path_to_string(p)),
             node_home: fs.node_home.as_ref().map(|p| path_to_string(p)),
             shell: fs.shell.clone(),
+            auto_install: fs.auto_install,
         };
         let json_fs: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row_fs).unwrap()).unwrap();
@@ -3263,6 +3718,7 @@ port = 3002
             java_home: none.java_home.as_ref().map(|p| path_to_string(p)),
             node_home: none.node_home.as_ref().map(|p| path_to_string(p)),
             shell: none.shell.clone(),
+            auto_install: none.auto_install,
         };
         let json_none: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row_none).unwrap()).unwrap();
@@ -3977,5 +4433,320 @@ echo starting proj_b
         assert_eq!(detail_b.start_editable, true);
         assert!(detail_b.start.contains("echo starting proj_b"));
         assert_eq!(detail_b.port, 9000);
+    }
+}
+
+#[cfg(test)]
+mod deps_tests {
+    use super::*;
+
+    const PROJECTS_TOML: &str = include_str!("../../../config/projects.toml");
+    const TEMPLATE_TOML: &str = include_str!("../../../config/projects.template.toml");
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("tongyun_dev_deps_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn lockfile_picks_package_manager() {
+        let dir = temp_dir("lock");
+        assert_eq!(
+            detect_package_manager(&dir),
+            None,
+            "no package.json = not a frontend project"
+        );
+        std::fs::write(dir.join("package.json"), "{}").unwrap();
+        assert_eq!(detect_package_manager(&dir), Some(PackageManager::Npm));
+        std::fs::write(dir.join("package-lock.json"), "{}").unwrap();
+        assert_eq!(detect_package_manager(&dir), Some(PackageManager::Npm));
+        std::fs::write(dir.join("yarn.lock"), "").unwrap();
+        assert_eq!(detect_package_manager(&dir), Some(PackageManager::Yarn));
+        std::fs::write(dir.join("pnpm-lock.yaml"), "").unwrap();
+        assert_eq!(detect_package_manager(&dir), Some(PackageManager::Pnpm));
+        assert_eq!(PackageManager::Pnpm.install_command(), "pnpm install");
+        assert_eq!(PackageManager::Yarn.install_command(), "yarn install");
+        assert_eq!(PackageManager::Npm.install_command(), "npm install");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detects_missing_node_modules() {
+        let dir = temp_dir("nm");
+        assert!(
+            !deps_missing(&dir),
+            "backend without package.json never needs node_modules"
+        );
+        std::fs::write(dir.join("package.json"), "{}").unwrap();
+        assert!(deps_missing(&dir));
+        // A file called node_modules is not an install.
+        std::fs::write(dir.join("node_modules"), "").unwrap();
+        assert!(deps_missing(&dir));
+        std::fs::remove_file(dir.join("node_modules")).unwrap();
+        std::fs::create_dir(dir.join("node_modules")).unwrap();
+        assert!(!deps_missing(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn strips_pnpm_double_dash() {
+        let cases = [
+            (
+                "pnpm dev -- --port 8146 --host 127.0.0.1",
+                "pnpm dev --port 8146 --host 127.0.0.1",
+            ),
+            ("exec pnpm dev -- --port 7888", "exec pnpm dev --port 7888"),
+            (
+                "pnpm run dev:antd -- --port 5777",
+                "pnpm run dev:antd --port 5777",
+            ),
+            (
+                "/opt/homebrew/bin/pnpm serve -- --port 1",
+                "/opt/homebrew/bin/pnpm serve --port 1",
+            ),
+            (
+                "cd web && pnpm dev -- --port 3000",
+                "cd web && pnpm dev --port 3000",
+            ),
+        ];
+        for (input, want) in cases {
+            assert_eq!(normalize_start_arg(input), want, "input {input}");
+        }
+        // Left alone: npm needs its `--`, pnpm flags before a script, plain commands.
+        for keep in [
+            "npm run dev -- --port 8146 --host 127.0.0.1",
+            "pnpm dev --port 5173",
+            "pnpm -- dev",
+            "yarn dev --port 3000",
+            "mvn spring-boot:run -Dspring-boot.run.profiles=dev",
+            "pnpm run dev:antd",
+        ] {
+            assert_eq!(normalize_start_arg(keep), keep);
+        }
+        // Multi-line `bash -c` bodies keep their other lines byte-for-byte.
+        let script = "set -euo pipefail\n  exec pnpm dev -- --port 5999  --host 127.0.0.1\n# pnpm dev -- note";
+        assert_eq!(
+            normalize_start_arg(script),
+            "set -euo pipefail\n  exec pnpm dev --port 5999 --host 127.0.0.1\n# pnpm dev note"
+        );
+    }
+
+    #[test]
+    fn shipped_configs_have_no_pnpm_double_dash() {
+        let home = Path::new("/Users/dev");
+        for text in [PROJECTS_TOML, TEMPLATE_TOML] {
+            let cfg = parse_config(text).unwrap();
+            for (id, p) in &cfg.projects {
+                let r = resolve_project(id, p, Some(home)).unwrap();
+                for arg in r.active_start() {
+                    assert_eq!(
+                        normalize_start_arg(&arg),
+                        arg,
+                        "{id} start still has `pnpm <script> --`"
+                    );
+                }
+                assert!(r.auto_install, "{id}: auto_install defaults to true");
+            }
+        }
+        let cfg = parse_config(PROJECTS_TOML).unwrap();
+        let start_of = |id: &str| {
+            resolve_project(id, cfg.projects.get(id).unwrap(), Some(home))
+                .unwrap()
+                .assembled_start()
+                .join(" ")
+        };
+        assert!(
+            start_of("ops_class_admin_web").contains("npm run dev -- --port 8146 --host 127.0.0.1")
+        );
+        assert!(
+            start_of("demo_exam_vue").contains("pnpm run dev:antd --port 5777 --host 127.0.0.1")
+        );
+        assert!(start_of("ap_docs-site_web").contains("npx next dev -p 7888"));
+    }
+
+    #[test]
+    fn old_configs_are_rewritten_at_start_and_auto_install_opt_out() {
+        let text = r#"
+[projects.web]
+root = "/tmp/web"
+port = 5173
+background = true
+start = ["bash", "-c", "exec pnpm dev -- --port 5173"]
+
+[projects.web_manual]
+root = "/tmp/web"
+port = 5174
+auto_install = false
+start = ["pnpm", "dev", "--", "--port", "5174"]
+"#;
+        let cfg = parse_config(text).unwrap();
+        let home = Some(Path::new("/Users/dev"));
+        let web = resolve_project("web", cfg.projects.get("web").unwrap(), home).unwrap();
+        assert_eq!(
+            web.assembled_start(),
+            vec!["bash", "-c", "exec pnpm dev --port 5173"]
+        );
+        assert!(web.auto_install);
+        let manual =
+            resolve_project("web_manual", cfg.projects.get("web_manual").unwrap(), home).unwrap();
+        assert!(!manual.auto_install);
+        // argv form: each token is checked on its own, so `--` as its own element is left
+        // (pnpm only gets it from a shell line in practice).
+        assert_eq!(
+            manual.assembled_start(),
+            vec!["pnpm", "dev", "--", "--port", "5174"]
+        );
+    }
+
+    #[test]
+    fn install_marker_states() {
+        let me = std::process::id();
+        let base = InstallMarker {
+            started_at: 100,
+            supervisor: me,
+            pid: None,
+            command: "pnpm install".into(),
+            then_start: true,
+            error: None,
+        };
+        assert_eq!(install_overlay(None), None);
+        let (st, why, at) = install_overlay(Some(base.clone())).unwrap();
+        assert_eq!((st, why, at), (LifeState::Installing, None, 100));
+
+        let mut failed = base.clone();
+        failed.error = Some("依赖安装失败：pnpm install 退出码 1，详见日志".into());
+        let (st, why, _) = install_overlay(Some(failed)).unwrap();
+        assert_eq!(st, LifeState::Failed);
+        assert!(why.unwrap().contains("退出码 1"));
+
+        // Supervisor and installer both gone without a result: interrupted.
+        let mut orphan = base;
+        orphan.supervisor = 99_999_999;
+        orphan.pid = Some(99_999_998);
+        let (st, why, _) = install_overlay(Some(orphan)).unwrap();
+        assert_eq!(st, LifeState::Failed);
+        assert!(why.unwrap().contains("中断"));
+    }
+
+    #[cfg(unix)]
+    fn fake_toolchain(dir: &Path, npm_body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("nodebin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for (name, body) in [("node", "#!/bin/sh\nexit 0\n"), ("npm", npm_body)] {
+            let p = bin.join(name);
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        bin
+    }
+
+    #[cfg(unix)]
+    fn frontend_config(dir: &Path, bin: &Path, extra: &str) -> PathBuf {
+        let app = dir.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("package.json"), "{}").unwrap();
+        let cfg = format!(
+            r#"[projects.web]
+root = "{root}"
+port = 1
+background = true
+node_home = "{bin}"
+log_dir = "{logs}"
+log_file = "{logs}/web.out"
+pid_file = "{logs}/web.pid"
+start = ["bash", "-c", "echo started > started.txt; exec sleep 30"]
+{extra}
+"#,
+            root = path_to_string(&app),
+            bin = path_to_string(bin),
+            logs = path_to_string(&dir.join("logs")),
+        );
+        let path = dir.join("projects.toml");
+        std::fs::write(&path, cfg).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_installs_missing_deps_then_starts() {
+        let dir = temp_dir("auto");
+        let bin = fake_toolchain(
+            &dir,
+            "#!/bin/sh\necho fake npm \"$@\"\nsleep 1\nmkdir node_modules\n",
+        );
+        let path = frontend_config(&dir, &bin, "");
+        let loaded = load(Some(&path)).unwrap();
+
+        let st = loaded.start_detached("web").unwrap();
+        assert_eq!(st.state, LifeState::Installing, "{st:?}");
+        assert!(st.deps_missing);
+        assert_eq!(st.install_command, "npm install");
+
+        let app = dir.join("app");
+        assert!(wait_until(Duration::from_secs(10), || app
+            .join("started.txt")
+            .is_file()));
+        assert!(app.join("node_modules").is_dir());
+        assert!(wait_until(Duration::from_secs(5), || {
+            read_install_marker(&dir.join("logs/web.pid")).is_none()
+        }));
+        let st = loaded.status("web").unwrap();
+        assert!(!st.deps_missing);
+        assert_ne!(st.state, LifeState::Installing);
+        let log = std::fs::read_to_string(dir.join("logs/web.out")).unwrap();
+        assert!(log.contains("[tongyun-dev] 安装依赖：npm install"), "{log}");
+        assert!(log.contains("fake npm install"), "{log}");
+        loaded.stop("web").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_install_is_reported_and_start_skipped() {
+        let dir = temp_dir("fail");
+        let bin = fake_toolchain(&dir, "#!/bin/sh\necho 'ERR_PNPM boom' >&2\nexit 3\n");
+        let path = frontend_config(&dir, &bin, "");
+        let loaded = load(Some(&path)).unwrap();
+        loaded.start_detached("web").unwrap();
+        assert!(wait_until(Duration::from_secs(10), || {
+            loaded.status("web").unwrap().state == LifeState::Failed
+        }));
+        let st = loaded.status("web").unwrap();
+        let why = st.failure.unwrap();
+        assert!(
+            why.contains("依赖安装失败") && why.contains("退出码 3"),
+            "{why}"
+        );
+        assert!(
+            !dir.join("app/started.txt").exists(),
+            "start must not run after a failed install"
+        );
+        // Stop clears the failure.
+        loaded.stop("web").unwrap();
+        assert!(read_install_marker(&dir.join("logs/web.pid")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auto_install_false_reports_missing_deps() {
+        let dir = temp_dir("manual");
+        let bin = fake_toolchain(&dir, "#!/bin/sh\nmkdir node_modules\n");
+        let path = frontend_config(&dir, &bin, "auto_install = false");
+        let loaded = load(Some(&path)).unwrap();
+        let st = loaded.start_detached("web").unwrap();
+        assert_eq!(st.state, LifeState::Failed);
+        assert_eq!(st.failure.as_deref(), Some(DEPS_MISSING_MSG));
+        assert!(!dir.join("app/started.txt").exists());
+
+        // Manual install (the 「安装依赖」 button / `tongyun-dev install`).
+        let st = loaded.install_deps_blocking("web").unwrap();
+        assert!(!st.deps_missing);
+        assert!(dir.join("app/node_modules").is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -236,6 +236,15 @@ svg {
   animation: pulse-dot 1.2s ease-in-out infinite;
 }
 
+.pill-installing {
+  background: var(--ty-sky-tint);
+  color: var(--ty-sky);
+}
+
+.pill-installing .pill-dot {
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
 .pill-failed {
   background: var(--ty-peach-tint);
   color: var(--ty-peach-text);
@@ -852,6 +861,21 @@ mark {
   border-radius: inherit;
   background: var(--ty-sky);
   transition: width 0.6s ease;
+}
+
+/* 装依赖没有总量：来回滑动的进度条 */
+.progress.indeterminate .progress-bar {
+  width: 35%;
+  animation: progress-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes progress-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress.indeterminate .progress-bar { animation: none; width: 100%; opacity: 0.5; }
 }
 
 .state-bar.ready {

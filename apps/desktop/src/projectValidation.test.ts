@@ -152,3 +152,50 @@ describe("buildEditRequest (只提交改过的字段)", () => {
     ).toEqual({ enabled: true, reason: "", port: 8302 });
   });
 });
+
+describe("buildEditRequest auto_install（缺 node_modules 自动装依赖）", () => {
+  const base: EditBaseline = {
+    name: "web",
+    root: "~/code/web",
+    start: "pnpm dev --port 5173",
+    start_editable: true,
+    stop: "",
+    stop_editable: true,
+    port: 5173,
+    login_url: "",
+    health_url: "",
+    log_file: "",
+    node: "22",
+    java: null,
+    enabled: true,
+    reason: "",
+  };
+  const form: ProjectFormData = {
+    id: "web",
+    name: "web",
+    root: "~/code/web",
+    start: "pnpm dev --port 5173",
+    stop: "",
+    port: 5173,
+    login_url: "",
+    health_url: "",
+    log_file: "",
+    node: "22",
+    java: "",
+    enabled: true,
+    reason: "",
+    start_timeout_secs: "",
+  };
+
+  it("缺省（开着）不提交", () => {
+    expect(buildEditRequest(base, { ...form, auto_install: true })).toEqual({});
+    expect(buildEditRequest(base, form)).toEqual({});
+  });
+
+  it("关掉时提交 false，再打开提交 true", () => {
+    expect(buildEditRequest(base, { ...form, auto_install: false })).toEqual({ auto_install: false });
+    expect(buildEditRequest({ ...base, auto_install: false }, { ...form, auto_install: true })).toEqual({
+      auto_install: true,
+    });
+  });
+});

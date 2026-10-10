@@ -78,3 +78,11 @@ describe("countByFilter", () => {
     expect(countByFilter(projects, statuses, "acme 主")).toEqual({ all: 1, running: 0, starting: 1, failed: 0, unconfigured: 0 });
   });
 });
+
+describe("installing 算启动中", () => {
+  it("装依赖的项目出现在「启动中」筛选里", () => {
+    const p = { id: "web", name: "web", port: 5173, root: "/w", configured: true, enabled: true };
+    expect(matchesStatus(p, { state: "installing" }, "starting")).toBe(true);
+    expect(matchesStatus(p, { state: "installing" }, "running")).toBe(false);
+  });
+});

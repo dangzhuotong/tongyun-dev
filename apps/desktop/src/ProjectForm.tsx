@@ -40,6 +40,7 @@ export function ProjectForm({
       initialDetail?.start_timeout_secs != null
         ? String(initialDetail.start_timeout_secs)
         : "",
+    auto_install: initialDetail?.auto_install ?? true,
   }));
 
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -125,6 +126,7 @@ export function ProjectForm({
           start_timeout_secs: form.start_timeout_secs
             ? Number(form.start_timeout_secs)
             : undefined,
+          auto_install: form.auto_install === false ? false : undefined,
         };
         await invoke<ProjectRow>("add_project", { req: createReq });
       }
@@ -373,6 +375,18 @@ export function ProjectForm({
                 onChange={(e) => handleChange("enabled", e.target.checked)}
               />
               <span>启用此项目</span>
+            </label>
+          </div>
+
+          {/* 前端依赖：缺 node_modules 时先自动装 */}
+          <div className="form-group checkbox-group">
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={form.auto_install !== false}
+                onChange={(e) => handleChange("auto_install", e.target.checked)}
+              />
+              <span>缺 node_modules 时启动前自动装依赖（按锁文件用 pnpm / yarn / npm）</span>
             </label>
           </div>
 

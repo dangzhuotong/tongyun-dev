@@ -1,4 +1,4 @@
-export type LifeState = "stopped" | "starting" | "port_open" | "ready" | "failed";
+export type LifeState = "stopped" | "installing" | "starting" | "port_open" | "ready" | "failed";
 
 export type Project = {
   id: string;
@@ -15,6 +15,8 @@ export type Project = {
   java_home?: string | null;
   node_home?: string | null;
   shell?: string | null;
+  /** 缺 node_modules 时启动前自动装依赖（缺省 true）。 */
+  auto_install?: boolean;
 };
 
 export type ProjectRow = Project;
@@ -34,7 +36,7 @@ export type Status = {
   id: string;
   name: string;
   running: boolean;
-  state: "stopped" | "starting" | "port_open" | "ready" | "failed";
+  state: LifeState;
   elapsed_secs: number | null;
   timeout_secs: number;
   failure: string | null;
@@ -47,6 +49,10 @@ export type Status = {
   root: string;
   port_conflict: boolean;
   port_holder: string;
+  /** 根目录有 package.json 但没有 node_modules。 */
+  deps_missing?: boolean;
+  /** 装依赖的命令，例如 "pnpm install"；不是前端项目时为空。 */
+  install_command?: string;
 };
 
 export type LogTail = {
@@ -79,6 +85,7 @@ export type ProjectDetail = {
   reason: string;
   start_timeout_secs?: number | null;
   stop_grace_secs?: number | null;
+  auto_install?: boolean;
 };
 
 export type NewProjectReq = {
@@ -97,6 +104,7 @@ export type NewProjectReq = {
   reason?: string | null;
   start_timeout_secs?: number | null;
   stop_grace_secs?: number | null;
+  auto_install?: boolean;
 };
 
 export type ProjectEditReq = {
@@ -114,5 +122,5 @@ export type ProjectEditReq = {
   reason?: string | null;
   start_timeout_secs?: number | null;
   stop_grace_secs?: number | null;
+  auto_install?: boolean;
 };
-

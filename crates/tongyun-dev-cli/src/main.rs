@@ -36,6 +36,8 @@ enum Cmd {
     },
     /// Stop a project and wait until its port is free
     Stop { id: String },
+    /// Install frontend dependencies (pnpm / yarn / npm picked by lockfile); output goes to the project log
+    Install { id: String },
     /// Show status (process + port + login probe). Without ID, shows all projects.
     Status {
         id: Option<String>,
@@ -101,6 +103,9 @@ enum Cmd {
         /// Run the start command in the foreground (only for scripts that exit by themselves)
         #[arg(long)]
         foreground: bool,
+        /// Do not install node_modules automatically before the first start
+        #[arg(long)]
+        no_auto_install: bool,
     },
     /// Remove a registered project (project files are not touched)
     Remove { id: String },
@@ -119,8 +124,9 @@ fn print_status(st: &StatusJson, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(st)?);
     } else {
         println!(
-            "{id}  running={running}  pid={pid}  port={port} open={open}  login={code:?} ok={ok}",
+            "{id}  state={state}  running={running}  pid={pid}  port={port} open={open}  login={code:?} ok={ok}",
             id = st.id,
+            state = st.state,
             running = st.running,
             pid = st.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
             port = st.port,
@@ -128,6 +134,15 @@ fn print_status(st: &StatusJson, json: bool) -> Result<()> {
             code = st.login_probe.http_code,
             ok = st.login_probe.ok
         );
+        if let Some(why) = &st.failure {
+            println!("  failure {why}");
+        }
+        if st.deps_missing {
+            println!(
+                "  deps missing (node_modules); run `tongyun-dev install {}` ({})",
+                st.id, st.install_command
+            );
+        }
         println!("  log {}", st.log_path);
         println!("  root {}", st.root);
         if st.port_conflict {
@@ -178,6 +193,30 @@ fn main() -> Result<()> {
                 return Err(e);
             }
         },
+        Cmd::Install { id } => {
+            let st = loaded.status(&id)?;
+            eprintln!(
+                "安装依赖：{}（输出写到 {}）",
+                if st.install_command.is_empty() {
+                    "?"
+                } else {
+                    &st.install_command
+                },
+                st.log_path
+            );
+            match loaded.install_deps_blocking(&id) {
+                Ok(st) => {
+                    eprintln!("依赖装好了");
+                    print_status(&st, false)?;
+                }
+                Err(e) => {
+                    if let Ok(tail) = loaded.log_tail(&id, 20) {
+                        eprint!("{}", tail.text);
+                    }
+                    return Err(e);
+                }
+            }
+        }
         Cmd::Stop { id } => {
             loaded.stop(&id)?;
             print_status(&loaded.status(&id)?, false)?;
@@ -235,6 +274,7 @@ fn main() -> Result<()> {
             node_home,
             shell,
             foreground,
+            no_auto_install,
         } => {
             let row = loaded.add_project(NewProject {
                 id,
@@ -252,6 +292,7 @@ fn main() -> Result<()> {
                 node_home,
                 shell,
                 background: Some(!foreground),
+                auto_install: no_auto_install.then_some(false),
                 ..Default::default()
             })?;
             println!(
@@ -322,6 +363,9 @@ mod tests {
                 json: false
             })
         ));
+
+        let cli = Cli::try_parse_from(["tongyun-dev", "install", "ops_class_admin_web"]).unwrap();
+        assert!(matches!(cli.cmd, Some(Cmd::Install { ref id }) if id == "ops_class_admin_web"));
 
         let cli = Cli::try_parse_from(["tongyun-dev"]).unwrap();
         assert!(

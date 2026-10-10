@@ -13,6 +13,8 @@ export interface ProjectFormData {
   enabled: boolean;
   reason: string;
   start_timeout_secs: number | string;
+  /** 缺 node_modules 时启动前自动装依赖（缺省 true）。 */
+  auto_install?: boolean;
 }
 
 export function validateProjectForm(
@@ -71,6 +73,7 @@ export interface EditBaseline {
   enabled: boolean;
   reason: string;
   start_timeout_secs?: number | null;
+  auto_install?: boolean;
 }
 
 /**
@@ -105,5 +108,8 @@ export function buildEditRequest(
   }
   const timeout = form.start_timeout_secs === "" ? 0 : Number(form.start_timeout_secs);
   if (timeout !== (base.start_timeout_secs ?? 0)) out.start_timeout_secs = timeout;
+  if (form.auto_install !== undefined && form.auto_install !== (base.auto_install ?? true)) {
+    out.auto_install = form.auto_install;
+  }
   return out;
 }

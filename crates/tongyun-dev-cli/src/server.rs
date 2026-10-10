@@ -284,7 +284,7 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
             }
         }
         "POST" => {
-            let action = ["start", "stop", "open", "open-dir"]
+            let action = ["start", "stop", "install", "open", "open-dir"]
                 .into_iter()
                 .find_map(|a| project_route(path, a).map(|id| (a, id)));
             let Some((action, id)) = action else {
@@ -293,6 +293,7 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
             let res: Result<Value> = match action {
                 "start" => loaded.start_detached(id).map(|st| json!({"status": st})),
                 "stop" => loaded.stop(id).map(|st| json!({"status": st})),
+                "install" => loaded.install_deps(id).map(|st| json!({"status": st})),
                 "open" => loaded
                     .page_url(id)
                     .and_then(|u| tongyun_dev_core::open_url(&u).map(|_| json!({"url": u}))),
@@ -750,7 +751,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       if (!isConfigured(p) || p.enabled === false) return false;
       const st = p.state || 'stopped';
       if (f === 'running') return st === 'ready' || st === 'port_open';
-      if (f === 'starting') return st === 'starting';
+      if (f === 'starting') return st === 'starting' || st === 'installing';
       if (f === 'failed') return st === 'failed';
       return true;
     }
@@ -825,6 +826,10 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         } else if (!enabled) {
           stateText = '已停用';
           badgeClass = 'badge-stopped';
+        } else if (state === 'installing') {
+          badgeClass = 'badge-starting';
+          const n = p.elapsed_secs != null ? p.elapsed_secs : 0;
+          stateText = `安装依赖中 ${n} 秒`;
         } else if (state === 'starting') {
           badgeClass = 'badge-starting';
           const n = p.elapsed_secs != null ? p.elapsed_secs : 0;
@@ -837,14 +842,14 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
           stateText = '就绪';
         } else if (state === 'failed') {
           badgeClass = 'badge-failed';
-          stateText = p.failure ? '启动失败' : '失败：未知原因';
+          stateText = p.failure && p.failure.indexOf('依赖') !== -1 ? '依赖问题' : (p.failure ? '启动失败' : '失败：未知原因');
         } else {
           badgeClass = 'badge-stopped';
           stateText = '已停止';
         }
 
         const canStart = enabled && configured && (state === 'stopped' || state === 'failed');
-        const canStop = enabled && (state === 'starting' || state === 'port_open' || state === 'ready' || state === 'failed');
+        const canStop = enabled && (state === 'installing' || state === 'starting' || state === 'port_open' || state === 'ready' || state === 'failed');
         const canOpenPage = enabled && (state === 'port_open' || state === 'ready');
 
         let actionBtns = '';
@@ -857,6 +862,9 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         } else {
           if (canStart) {
             actionBtns += `<button class="btn-start" onclick="startProject('${p.id}')"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l12-7.5z"/></svg>启动</button>`;
+          }
+          if (p.deps_missing && state !== 'installing') {
+            actionBtns += `<button class="btn-secondary" onclick="installDeps('${p.id}')" title="${escapeHtml(p.install_command || '')}">安装依赖</button>`;
           }
           if (canStop) {
             actionBtns += `<button class="btn-stop" onclick="stopProject('${p.id}')"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>停止</button>`;
@@ -912,6 +920,10 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
 
     function startProject(id) {
       return runAction(id, '启动中…', 'start', '启动失败');
+    }
+
+    function installDeps(id) {
+      return runAction(id, '安装依赖中…', 'install', '安装依赖失败');
     }
 
     function stopProject(id) {

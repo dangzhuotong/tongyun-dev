@@ -18,6 +18,8 @@
 #   start_windows / stop_windows  可选，Windows 上优先使用的启动 / 停止命令数组
 #   log_file    日志文件路径（可选，默认 ~/.tongyun-dev/logs/<id>.out）
 #   pid_file    PID 文件路径（可选，默认 ~/.tongyun-dev/logs/<id>.pid）
+#   auto_install  可选，缺省 true。根目录有 package.json 但缺 node_modules 时，启动前先自动装依赖（按锁文件选 pnpm / yarn / npm）；false 时只提示「依赖未安装」
+#   前端端口参数：pnpm 直接写 ["pnpm", "dev", "--port", "3000"]（不要加 `--`）；npm 写 ["npm", "run", "dev", "--", "--port", "3000"]
 
 [projects.example_app]
 name = "示例项目"
@@ -25,4 +27,4 @@ root = "~/code/example-app"
 port = 3000
 enabled = false
 reason = "示例项目配置模板，请修改 root 与 start 后启用"
-start = ["pnpm", "dev"]
+start = ["pnpm", "dev", "--port", "3000", "--host", "127.0.0.1"]

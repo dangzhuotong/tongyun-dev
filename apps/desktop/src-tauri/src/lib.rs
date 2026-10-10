@@ -38,7 +38,7 @@ async fn project_status(id: String) -> Result<StatusJson, String> {
 async fn start_project(id: String) -> Result<StatusJson, String> {
     blocking(move || {
         tongyun_dev_core::load(None)
-            .and_then(|loaded| loaded.start(&id))
+            .and_then(|loaded| loaded.start_detached(&id))
             .map_err(report)
     })
     .await
@@ -50,6 +50,16 @@ async fn stop_project(id: String) -> Result<StatusJson, String> {
         tongyun_dev_core::load(None)
             .and_then(|loaded| loaded.stop(&id))
             .map_err(report)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn restart_project(id: String) -> Result<StatusJson, String> {
+    blocking(move || {
+        let loaded = tongyun_dev_core::load(None).map_err(report)?;
+        let _ = loaded.stop(&id);
+        loaded.start_detached(&id).map_err(report)
     })
     .await
 }
@@ -116,6 +126,7 @@ pub fn run() {
             project_status,
             start_project,
             stop_project,
+            restart_project,
             log_tail,
             open_log,
             open_page,

@@ -53,6 +53,26 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 - `status --json` 的 `running` 表示 pid 文件或监听端口上有存活的 Java/Tomcat。`log_path` 是绝对路径。端口没开时不做 HTTP 请求，`login_probe.http_code` 为 `null`。`port_conflict` 为真表示端口上的进程不是本项目的服务；`port_holder` 是 `pid` 和进程名，能对上其他项目的 pid 文件时带上那个 id。Spring / pnpm 只有 pid 文件（或其子进程）才算 `running`，别人占着端口算冲突，不算已启动。
 - `logs` 打印 catalina 日志；`--follow` 在文件还没生成时会等待，再用 `tail -F` 跟随。
 
+## 启动状态
+
+`tongyun-dev` 采用核心启停状态机（`LifeState`），Status JSON 中的 `state` 包含五个状态：
+
+| 状态 | 说明 |
+| --- | --- |
+| `stopped` | 已停止。服务未启动或已完全停止，无存活进程且未监听端口 |
+| `starting` | 启动中。进程已拉起或正在启动，端口尚未连通；无启动标记但检测到进程存活且端口未通也归为此状态（`running = false`） |
+| `port_open` | 端口已通。服务端口已可连接，但配置了 `login_url` / `health_url` 探针且探针尚未返回就绪状态（200 / 301 / 302） |
+| `ready` | 就绪。端口已通且探针成功（或未配置探针时端口连通即就绪）。此时前端/控制台可打开页面 |
+| `failed` | 失败。启动命令报错、启动标记记录超时仍未就绪、或启动后进程过早退出。包含 `failure` 失败原因说明 |
+
+**状态规则与兼容性：**
+- `running` 语义：仅当 `state` 为 `port_open` 或 `ready` 时才为 `true`。进程存活但端口未通时为 `starting`，`running = false`。
+- 端口被其他程序占用（`port_conflict = true`）不算本项目 `ready` / `port_open`。
+
+**超时与宽限配置：**
+- **启动超时**（就绪等待超时）：优先级为 项目字段 `start_timeout_secs` > 环境变量 `TONGYUN_DEV_START_TIMEOUT` > 默认值 `180` 秒。
+- **停止宽限**（`stop_grace_secs`）：优先级为 项目字段 `stop_grace_secs` > 默认值 `8` 秒。停止时先向 pid 对应的进程组发送 TERM 信号，超过宽限期仍存活则向进程组发送 KILL 强制终止。
+
 ## 配置字段
 
 `config/projects.toml` 里每个 `[projects.<id>]`：
@@ -70,6 +90,8 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 | 两者都空 | 端口能连上即算就绪。Spring 的 `/` 经常不是 200，所以后端默认不写探针 |
 | `node` | 可选（如 `"20"`）。CLI 启动时自动加 `fnm exec --using=<v> --`，缺失时给出可读报错 |
 | `java` | 可选（如 `"17"`）。CLI 启动时经 `bash -lc` 执行 `sdk use java <v>` 切换，缺失时给出可读报错 |
+| `start_timeout_secs` | 可选（如 `30`）。启动就绪等待超时秒数，优先级高于环境变量 `TONGYUN_DEV_START_TIMEOUT` 与默认 180 秒 |
+| `stop_grace_secs` | 可选（如 `5`）。停止等待 TERM 宽限秒数，超时后发送 KILL，默认 8 秒 |
 | `log_dir` / `log_file` / `pid_file` | 可省略。默认 `~/.tongyun-dev/logs/<id>.out` 和 `.pid` |
 
 Spring 用 `bash -c` 拉起 sdkman 再 `mvn spring-boot:run -Dspring-boot.run.profiles=dev`。`demo_exam` 会在当前 Java 不是 8 时，从 `~/.sdkman/candidates/java/8.*` 里挑一个 `sdk use`。前端用 `fnm exec --using=22` 跑 `pnpm dev`。不用 login shell。

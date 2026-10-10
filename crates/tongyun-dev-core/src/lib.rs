@@ -2531,6 +2531,22 @@ mod tests {
                 expected_state: LifeState::Failed,
                 expected_failure: Some("超过 10 秒仍未就绪"),
             },
+            Case {
+                desc: "12. 无启动标记 + 进程活着 + 端口不通 -> Starting",
+                input: StateInput {
+                    process_alive: true,
+                    port_open: false,
+                    port_conflict: false,
+                    has_probe: false,
+                    probe_ok: false,
+                    started_at: None,
+                    now: 100,
+                    timeout_secs: 10,
+                    start_error: None,
+                },
+                expected_state: LifeState::Starting,
+                expected_failure: None,
+            },
         ];
 
         for c in cases {
@@ -2542,6 +2558,10 @@ mod tests {
                 "Case '{}' failed on failure",
                 c.desc
             );
+            let running = matches!(state, LifeState::PortOpen | LifeState::Ready);
+            if state == LifeState::Starting {
+                assert!(!running, "Starting state must have running = false");
+            }
         }
     }
 

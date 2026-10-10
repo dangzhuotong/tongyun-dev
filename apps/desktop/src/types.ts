@@ -1,3 +1,5 @@
+export type LifeState = "stopped" | "starting" | "port_open" | "ready" | "failed";
+
 export type Project = {
   id: string;
   name: string;
@@ -5,12 +7,16 @@ export type Project = {
   enabled: boolean;
   port: number;
   reason: string;
+  start_timeout_secs?: number;
+  stop_grace_secs?: number;
   node?: string | null;
   java?: string | null;
   java_home?: string | null;
   node_home?: string | null;
   shell?: string | null;
 };
+
+export type ProjectRow = Project;
 
 export type ProjectList = {
   config_path: string;
@@ -27,6 +33,10 @@ export type Status = {
   id: string;
   name: string;
   running: boolean;
+  state: "stopped" | "starting" | "port_open" | "ready" | "failed";
+  elapsed_secs: number | null;
+  timeout_secs: number;
+  failure: string | null;
   pid: number | null;
   port: number;
   port_open: boolean;
@@ -49,4 +59,3 @@ export type ConfigInfo = {
   source: string;
   default_path: string;
 };
-

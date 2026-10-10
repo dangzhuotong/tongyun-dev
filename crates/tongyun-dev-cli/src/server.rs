@@ -290,7 +290,7 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                 return err_json(404, "not found");
             };
             let res: Result<Value> = match action {
-                "start" => loaded.start(id).map(|st| json!({"status": st})),
+                "start" => loaded.start_detached(id).map(|st| json!({"status": st})),
                 "stop" => loaded.stop(id).map(|st| json!({"status": st})),
                 "open" => loaded
                     .page_url(id)
@@ -449,10 +449,14 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
       padding: 4px 9px;
       border-radius: 12px;
     }
-    .badge-running { background: var(--success-bg); color: #34d399; }
+    .badge-running, .badge-ready { background: var(--success-bg); color: #34d399; }
+    .badge-starting { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
+    .badge-failed { background: var(--danger-bg); color: #f87171; }
     .badge-stopped { background: rgba(148, 163, 184, 0.1); color: #94a3b8; }
     .dot { width: 7px; height: 7px; border-radius: 50%; }
-    .badge-running .dot { background: #10b981; box-shadow: 0 0 8px #10b981; }
+    .badge-running .dot, .badge-ready .dot { background: #10b981; box-shadow: 0 0 8px #10b981; }
+    .badge-starting .dot { background: #f59e0b; box-shadow: 0 0 8px #f59e0b; }
+    .badge-failed .dot { background: #ef4444; box-shadow: 0 0 8px #ef4444; }
     .badge-stopped .dot { background: #64748b; }
 
     .meta-list { display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: #cbd5e1; }
@@ -663,15 +667,47 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
         const conflict = p.port_conflict
           ? `<div class="warn">⚠ 端口 ${p.port} 被占用${p.port_holder ? '：' + escapeHtml(p.port_holder) : '（非本项目进程）'}</div>`
           : '';
-        let primary;
+
+        const state = p.state || (isRunning ? 'ready' : 'stopped');
+        let badgeClass = 'badge-stopped';
+        let stateText = '已停止';
         if (!enabled) {
-          primary = `<button class="btn-start" disabled title="${escapeHtml(p.reason)}">▶ 启动</button>`;
-        } else if (busy) {
-          primary = `<button class="btn-secondary" disabled>${busy}</button>`;
-        } else if (isRunning) {
-          primary = `<button class="btn-stop" onclick="stopProject('${p.id}')">⏹ 停止</button>`;
+          stateText = '已停用';
+          badgeClass = 'badge-stopped';
+        } else if (state === 'starting') {
+          badgeClass = 'badge-starting';
+          const n = p.elapsed_secs != null ? p.elapsed_secs : 0;
+          stateText = `启动中 ${n} 秒`;
+        } else if (state === 'port_open') {
+          badgeClass = 'badge-starting';
+          stateText = '端口已通（等登录页）';
+        } else if (state === 'ready') {
+          badgeClass = 'badge-ready';
+          stateText = '就绪';
+        } else if (state === 'failed') {
+          badgeClass = 'badge-failed';
+          stateText = `失败：${escapeHtml(p.failure || '未知原因')}`;
         } else {
-          primary = `<button class="btn-start" onclick="startProject('${p.id}')">▶ 启动</button>`;
+          badgeClass = 'badge-stopped';
+          stateText = '已停止';
+        }
+
+        const canStart = enabled && (state === 'stopped' || state === 'failed');
+        const canStop = enabled && (state === 'starting' || state === 'port_open' || state === 'ready' || state === 'failed');
+        const canOpenPage = enabled && (state === 'port_open' || state === 'ready');
+
+        let actionBtns = '';
+        if (!enabled) {
+          actionBtns = `<button class="btn-start" disabled title="${escapeHtml(p.reason)}">▶ 启动</button>`;
+        } else if (busy) {
+          actionBtns = `<button class="btn-secondary" disabled>${busy}</button>`;
+        } else {
+          if (canStart) {
+            actionBtns += `<button class="btn-start" onclick="startProject('${p.id}')">▶ 启动</button>`;
+          }
+          if (canStop) {
+            actionBtns += `<button class="btn-stop" onclick="stopProject('${p.id}')">⏹ 停止</button>`;
+          }
         }
 
         return `
@@ -681,9 +717,9 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
                 <h3>${escapeHtml(p.name)}</h3>
                 <code>${escapeHtml(p.id)}</code>
               </div>
-              <div class="badge ${isRunning ? 'badge-running' : 'badge-stopped'}">
+              <div class="badge ${badgeClass}">
                 <span class="dot"></span>
-                <span>${!enabled ? '已停用' : (isRunning ? '运行中' : '未启动')}</span>
+                <span>${stateText}</span>
               </div>
             </div>
             ${!enabled ? `<div class="reason">停用原因：${escapeHtml(p.reason)}</div>` : ''}
@@ -710,8 +746,8 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
             </div>
 
             <div class="card-actions">
-              ${primary}
-              <button class="btn-outline" onclick="openProjectInBrowser('${p.id}')" title="在系统浏览器打开登录/访问页面">🌐 页面</button>
+              ${actionBtns}
+              <button class="btn-outline" ${canOpenPage ? `onclick="openProjectInBrowser('${p.id}')"` : 'disabled'} title="在系统浏览器打开登录/访问页面">🌐 页面</button>
               <button class="btn-outline" onclick="openProjectDir('${p.id}')" title="在系统文件管理器中打开源码目录">📁 目录</button>
               <button class="btn-outline" onclick="openLogModal('${p.id}', '${escapeHtml(p.name)}')">📜 日志</button>
               <button class="btn-danger-text" onclick="deleteProject('${p.id}')" title="删除项目注册">🗑</button>
@@ -837,8 +873,23 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
 
     // 初始加载与轮询刷新
     fetchProjects();
-    setInterval(fetchProjects, 3000);
+    setInterval(fetchProjects, 1500);
   </script>
 </body>
 </html>
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn home_html_contains_starting_and_port_open_branches() {
+        assert!(UI_HTML.contains("starting"));
+        assert!(UI_HTML.contains("port_open"));
+        assert!(UI_HTML.contains("端口已通（等登录页）"));
+        assert!(UI_HTML.contains("启动中"));
+        assert!(UI_HTML.contains("就绪"));
+        assert!(UI_HTML.contains("已停止"));
+    }
+}

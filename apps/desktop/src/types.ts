@@ -5,6 +5,8 @@ export type Project = {
   enabled: boolean;
   port: number;
   reason: string;
+  node?: string | null;
+  java?: string | null;
 };
 
 export type ProjectList = {

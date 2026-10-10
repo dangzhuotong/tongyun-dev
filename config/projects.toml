@@ -4,6 +4,8 @@
 # 字段：
 #   enabled     缺省 true。false 时桌面列表变灰并显示 reason，start 会拒绝。
 #   reason      enabled=false 时必填。
+#   node        可选（如 "20"）。CLI start 时在启动命令前加 fnm（fnm exec --using=<v> --）
+#   java        可选（如 "17"）。CLI start 时在启动命令前加 sdkman（sdk use java <v> 经 bash -lc）
 #   background  true：mvn / pnpm 放后台，日志追加到 log，pid 写入 pid 文件。
 #   login_url   可选。HTTP 200/301/302 才算就绪（td_work 登录页）。
 #   health_url  可选。没写 login_url 时用它做同样的 HTTP 探针。

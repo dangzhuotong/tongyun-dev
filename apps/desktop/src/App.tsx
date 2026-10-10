@@ -115,30 +115,40 @@ export function App() {
           </div>
         </div>
         <ul className="projects">
-          {projects?.projects.map((project) => (
-            <li key={project.id}>
-              <button
-                type="button"
-                className={[project.id === selected ? "active" : "", project.enabled ? "" : "disabled"]
-                  .filter(Boolean)
-                  .join(" ")}
-                disabled={busy !== ""}
-                onClick={() => {
-                  setError("");
-                  setStatus(null);
-                  setLog(null);
-                  setSelected(project.id);
-                }}
-              >
-                <span>{project.name}</span>
-                <small>
-                  {project.id}
-                  {project.port > 0 ? ` · ${project.port}` : ""}
-                </small>
-                {!project.enabled && <small className="reason">{project.reason}</small>}
-              </button>
-            </li>
-          ))}
+          {projects?.projects.map((project) => {
+            const toolchain = [
+              project.node ? `Node ${project.node}` : null,
+              project.java ? `Java ${project.java}` : null,
+            ]
+              .filter(Boolean)
+              .join(" · ");
+
+            return (
+              <li key={project.id}>
+                <button
+                  type="button"
+                  className={[project.id === selected ? "active" : "", project.enabled ? "" : "disabled"]
+                    .filter(Boolean)
+                    .join(" ")}
+                  disabled={busy !== ""}
+                  onClick={() => {
+                    setError("");
+                    setStatus(null);
+                    setLog(null);
+                    setSelected(project.id);
+                  }}
+                >
+                  <span>{project.name}</span>
+                  <small>
+                    {project.id}
+                    {project.port > 0 ? ` · ${project.port}` : ""}
+                  </small>
+                  {toolchain && <small className="toolchain">{toolchain}</small>}
+                  {!project.enabled && <small className="reason">{project.reason}</small>}
+                </button>
+              </li>
+            );
+          })}
         </ul>
         {!projects && !error && <p className="muted">正在读取配置…</p>}
         {projects && projects.projects.length === 0 && <p className="muted">配置里没有项目</p>}

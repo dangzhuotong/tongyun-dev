@@ -75,6 +75,17 @@ export TONGYUN_DEV_CONFIG="$PWD/config/projects.toml"
 
 路径和启动命令见 [config/projects.toml](config/projects.toml)，字段说明见 [docs/development.md](docs/development.md)。Spring / pnpm 在后台跑，日志默认在 `~/code/_index/logs/<id>.out`。
 
+### 工具链版本（node / java）
+
+在 `config/projects.toml` 中，每个项目可声明可选的 `node` 与 `java` 字段：
+
+| 字段 | 示例 | 行为说明 |
+| --- | --- | --- |
+| `node` | `"20"` | CLI start 时在启动命令前加 `fnm exec --using=<v> --` 切换；未安装 `fnm` 时给出可读报错 |
+| `java` | `"17"` | CLI start 时经 `bash -lc` 运行 `sdk use java <v>` 切换；未安装 `sdkman` 时给出可读报错 |
+
+桌面 App 的项目列表会在各条目中展示声明的版本（如 `Node 20`、`Java 17`；未声明则不显示）。
+
 验收清单见 [docs/development.md](docs/development.md)。
 
 ## 桌面窗口（Mac）

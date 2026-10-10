@@ -859,7 +859,9 @@ export function App() {
                   icon={<DoorIcon />}
                   label="登录页"
                   value={
-                    !status
+                    !current.configured || !current.port
+                      ? "未配置"
+                      : !status
                       ? "—"
                       : status.login_probe.ok
                         ? `正常 · ${status.login_probe.http_code ?? ""}`.trim()
@@ -867,7 +869,7 @@ export function App() {
                           ? `异常 · ${status.login_probe.http_code}`
                           : "未响应"
                   }
-                  detail={status?.login_probe.url}
+                  detail={current.configured && current.port ? status?.login_probe.url : undefined}
                   tone={status?.login_probe.ok ? "ok" : status?.login_probe.http_code ? "danger" : "muted"}
                 />
               </section>

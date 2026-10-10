@@ -1,0 +1,98 @@
+/*
+ * 橦云设计令牌 Tongyun design tokens v1 (2026-10-10)
+ * 取自 tongyun-planner（橦云手帐）的配色与质感：暖奶茶底、抹茶绿主操作、蜜桃红强调/危险。
+ * 同一份文件同步放在 tongyun-git、tongyun-dev（桌面端 + 网页控制台）。改值时几处一起改，
+ * 不要在单个页面里另起一套同义变量。
+ */
+:root {
+  /* 表面 */
+  --ty-bg: #f6f1e9;            /* 奶茶底：窗口/页面背景 */
+  --ty-surface: #fffdf9;       /* 卡片、面板 */
+  --ty-surface-raised: #f0e9de;/* 工具条、悬停、分段控件底 */
+  --ty-surface-sunken: #efe7da;/* 输入框底、代码/日志区浅色版 */
+  --ty-border: #e6dccb;
+  --ty-border-strong: #d6c8b1;
+
+  /* 文字 */
+  --ty-text: #2d323a;          /* 暖碳灰正文 */
+  --ty-text-muted: #6b6257;    /* 次要文字（在 --ty-bg 上 ≈5.6:1） */
+  --ty-text-subtle: #978b7c;   /* 占位、元信息，只用于非关键文字 */
+
+  /* 抹茶绿：主操作、选中、成功 */
+  --ty-matcha: #4d7c5d;
+  --ty-matcha-hover: #3f684c;
+  --ty-matcha-soft: #c4d7b2;
+  --ty-matcha-tint: #edf3e7;
+  --ty-on-matcha: #ffffff;
+
+  /* 蜜桃红：强调、危险、删除 */
+  --ty-peach: #c2593f;
+  --ty-peach-text: #a34e36;
+  --ty-peach-soft: #f5dfdb;
+  --ty-peach-tint: #fcf2f0;
+
+  /* 辅助色 */
+  --ty-honey: #8b6e3c;         /* 警告/待处理文字 */
+  --ty-honey-tint: #faf1dd;
+  --ty-sky: #3e6f9e;           /* 信息/修改 */
+  --ty-sky-tint: #eaf1f7;
+
+  /* 形状 */
+  --ty-radius-xs: 6px;
+  --ty-radius-sm: 8px;
+  --ty-radius-md: 12px;        /* 卡片、窗口圆角 */
+  --ty-radius-lg: 16px;
+  --ty-radius-pill: 999px;
+
+  /* 阴影：暖灰，弱 */
+  --ty-shadow-card: 0 1px 2px rgba(120, 110, 95, 0.06), 0 6px 16px -8px rgba(154, 142, 128, 0.18);
+  --ty-shadow-pop: 0 14px 34px -12px rgba(120, 110, 95, 0.28), 0 2px 6px rgba(120, 110, 95, 0.08);
+  --ty-focus-ring: 0 0 0 3px rgba(77, 124, 93, 0.28);
+
+  /* 间距 */
+  --ty-space-1: 4px;
+  --ty-space-2: 8px;
+  --ty-space-3: 12px;
+  --ty-space-4: 16px;
+  --ty-space-5: 24px;
+  --ty-space-6: 32px;
+
+  /* 字体 */
+  --ty-font-sans: "Plus Jakarta Sans", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --ty-font-mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --ty-font-size-xs: 11px;
+  --ty-font-size-sm: 12px;
+  --ty-font-size-md: 13px;
+  --ty-font-size-lg: 15px;
+  --ty-font-size-xl: 20px;
+}
+
+/* 暗色：只在应用本身支持暗色时使用（取自手帐暗色） */
+:root[data-theme="dark"],
+:root.dark {
+  --ty-bg: #17181b;
+  --ty-surface: #1c1d21;
+  --ty-surface-raised: #23252b;
+  --ty-surface-sunken: #141518;
+  --ty-border: #33353a;
+  --ty-border-strong: #44464d;
+  --ty-text: #ece7e0;
+  --ty-text-muted: #a8a096;
+  --ty-text-subtle: #7d766d;
+  --ty-matcha: #6fad84;
+  --ty-matcha-hover: #7fcc9a;
+  --ty-matcha-soft: #3f684c;
+  --ty-matcha-tint: #1f2b23;
+  --ty-on-matcha: #10140f;
+  --ty-peach: #e06d53;
+  --ty-peach-text: #e8866f;
+  --ty-peach-soft: #4a2c27;
+  --ty-peach-tint: #2d1f1c;
+  --ty-honey: #d9b46a;
+  --ty-honey-tint: #2c2619;
+  --ty-sky: #8fb3d6;
+  --ty-sky-tint: #1d2630;
+  --ty-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 6px 16px -8px rgba(0, 0, 0, 0.5);
+  --ty-shadow-pop: 0 14px 34px -12px rgba(0, 0, 0, 0.6);
+  --ty-focus-ring: 0 0 0 3px rgba(111, 173, 132, 0.35);
+}

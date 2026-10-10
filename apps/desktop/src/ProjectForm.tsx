@@ -149,7 +149,7 @@ export function ProjectForm({
     >
       <div className="modal-container">
         <div className="modal-header">
-          <h2>{isEditing ? `编辑项目：${form.id}` : "新增项目"}</h2>
+          <h2>{isEditing ? `项目设置 · ${initialDetail?.name || form.id}` : "新增项目"}</h2>
           <button
             type="button"
             className="modal-close"

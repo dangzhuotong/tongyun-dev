@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { LogTail } from "./types";
 import { findMatches, getLogLevel } from "./logFormat";
+import { ArrowDownIcon, ChevronDownIcon, ChevronUpIcon, FileIcon, PauseIcon, SearchIcon, XIcon } from "./icons";
 
 export type LogPanelProps = {
   log: LogTail | null;
@@ -34,9 +35,18 @@ export function LogPanel({
 
   const matches = useMemo(() => findMatches(lines, query), [lines, query]);
 
-  // Reset active match when search query or lines change
+  // Reset active match when search query changes; clamp when the log shrinks
   useEffect(() => {
     setActiveMatchIndex(0);
+  }, [query]);
+  useEffect(() => {
+    if (activeMatchIndex >= matches.length && matches.length > 0) {
+      setActiveMatchIndex(matches.length - 1);
+    }
+  }, [matches.length, activeMatchIndex]);
+  // 搜索时暂停自动滚动，免得新日志把定位冲走
+  useEffect(() => {
+    if (query) setAutoScroll(false);
   }, [query]);
 
   // When active match changes, scroll to it
@@ -128,49 +138,60 @@ export function LogPanel({
     <section className="log" id="log-panel" aria-label="log panel">
       <div className="log-bar">
         <div className="log-bar-left">
-          <strong>实时日志</strong>
+          <span className="log-title">
+            <span className={`log-live${autoScroll ? "" : " paused"}`} />
+            实时日志
+          </span>
           <span className="log-path" title={logPath}>
             {logPath}
           </span>
         </div>
         <div className="log-bar-actions">
-          <div className="log-search-box">
+          <label className={`log-search-box${query ? " has-query" : ""}${query && matches.length === 0 ? " no-match" : ""}`}>
+            <SearchIcon className="log-search-icon" />
             <input
               type="text"
-              placeholder="搜索日志 (回车/上下箭头切换)"
+              placeholder="搜索日志"
+              aria-label="搜索日志"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={handleSearchKeyDown}
+              title="Enter 下一个 · Shift+Enter 上一个 · Esc 清空"
             />
             {query && (
-              <span className="match-counter">
-                {matches.length > 0 ? `${activeMatchIndex + 1}/${matches.length}` : "0/0"}
+              <span className="match-counter" aria-live="polite">
+                {matches.length > 0 ? `${activeMatchIndex + 1}/${matches.length}` : "无结果"}
               </span>
             )}
             {query && (
-              <div className="search-nav-buttons">
+              <span className="search-nav-buttons">
                 <button
                   type="button"
-                  title="上一个 (Shift+Enter, ↑)"
+                  title="上一个 (Shift+Enter)"
+                  aria-label="上一个"
                   disabled={matches.length === 0}
                   onClick={handlePrevMatch}
                 >
-                  ↑
+                  <ChevronUpIcon />
                 </button>
                 <button
                   type="button"
-                  title="下一个 (Enter, ↓)"
+                  title="下一个 (Enter)"
+                  aria-label="下一个"
                   disabled={matches.length === 0}
                   onClick={handleNextMatch}
                 >
-                  ↓
+                  <ChevronDownIcon />
                 </button>
-              </div>
+                <button type="button" title="清空 (Esc)" aria-label="清空" onClick={() => setQuery("")}>
+                  <XIcon />
+                </button>
+              </span>
             )}
-          </div>
+          </label>
           <button
             type="button"
-            className="log-toggle-scroll"
+            className="log-btn"
             onClick={() => {
               if (autoScroll) {
                 setAutoScroll(false);
@@ -178,16 +199,20 @@ export function LogPanel({
                 scrollToBottom();
               }
             }}
+            title={autoScroll ? "暂停自动滚动" : "恢复自动滚动并回到底部"}
           >
+            {autoScroll ? <PauseIcon /> : <ArrowDownIcon />}
             {autoScroll ? "暂停滚动" : "自动滚动"}
           </button>
           <button
             type="button"
+            className="log-btn"
             disabled={!canOpenLog}
             onClick={onOpenLog}
             title={canOpenLog ? "使用系统默认程序打开日志文件" : "日志文件不存在"}
           >
-            打开日志文件
+            <FileIcon />
+            打开文件
           </button>
         </div>
       </div>
@@ -196,11 +221,12 @@ export function LogPanel({
         <pre ref={containerRef} onScroll={handleScroll} className="log-pre">
           {log?.missing ? (
             <div className="log-placeholder missing">
-              还没有日志：{logPath || "未配置日志路径"}
+              还没有日志
+              <small>{logPath || "未配置日志路径"}</small>
             </div>
           ) : lines.length === 0 ? (
             <div className="log-placeholder">
-              {selected ? "日志是空的。" : "未选择项目"}
+              {selected ? "日志是空的，启动后会实时显示在这里" : "未选择项目"}
             </div>
           ) : (
             lines.map((line, lineIndex) => {

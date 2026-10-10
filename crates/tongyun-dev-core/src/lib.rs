@@ -2111,12 +2111,12 @@ port = 9
             "ap_admin_test_center",
             "ops_class_admin_manager",
             "ops_class_admin_web",
+            "ops_student_manage_vue",
         ];
         let disabled = [
             "ap_admin_test_center_vue",
             "acme_system_ap_java_backend",
             "opsstudentmanageserver",
-            "ops_student_manage_vue",
             "papers_cn",
             "acme_papers_server",
             "tdmockserver",

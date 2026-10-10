@@ -4,7 +4,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tongyun_dev_cli::server::{start_ui_server, DEFAULT_UI_PORT};
-use tongyun_dev_core::{Loaded, NewProject, StatusJson, DEFAULT_ADD_PORT};
+use tongyun_dev_core::{
+    Loaded, NewProject, ScanReport, StatusJson, DEFAULT_ADD_PORT, DEFAULT_SCAN_DEPTH,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -58,9 +60,9 @@ enum Cmd {
         #[arg(long)]
         dir: bool,
     },
-    /// Register a new project in config/projects.toml (comments are kept)
+    /// Register a new project in your config file (comments are kept)
     Add {
-        /// Project id (letters, digits, `_`, `-`; e.g. acme_frontend)
+        /// Project id (letters, digits, `_`, `-`; e.g. my_web)
         id: String,
         /// Display name (defaults to the id)
         #[arg(long)]
@@ -109,6 +111,20 @@ enum Cmd {
     },
     /// Remove a registered project (project files are not touched)
     Remove { id: String },
+    /// Find projects under a folder (Spring Boot, Tomcat WAR, Vite/Vue/React, vue-cli,
+    /// Next, Nuxt, npm start, Django/FastAPI/Flask). Read-only unless --apply.
+    Scan {
+        /// Folder to scan, e.g. ~/code
+        dir: String,
+        /// How many folder levels below DIR to look at
+        #[arg(long, default_value_t = DEFAULT_SCAN_DEPTH)]
+        depth: usize,
+        /// Add the new candidates to the config (existing ids / roots are skipped)
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Start the web console and open it in the browser
     Ui {
         #[arg(long, default_value_t = DEFAULT_UI_PORT)]
@@ -162,6 +178,15 @@ fn main() -> Result<()> {
         port: DEFAULT_UI_PORT,
         no_open: false,
     });
+    if let Cmd::Scan {
+        dir,
+        depth,
+        apply,
+        json,
+    } = &cmd
+    {
+        return run_scan(cli.config.as_deref(), dir, *depth, *apply, *json);
+    }
     let mut loaded = match tongyun_dev_core::load(cli.config.as_deref()) {
         Ok(l) => l,
         Err(e) => {
@@ -311,8 +336,114 @@ fn main() -> Result<()> {
             drop(loaded);
             start_ui_server(path, port, !no_open)?;
         }
+        Cmd::Scan { .. } => unreachable!("handled above"),
     }
     Ok(())
+}
+
+/// `scan`: works before any config exists. With `--apply` and no config yet, the
+/// default config (~/.config/tongyun-dev/projects.toml) is created first.
+fn run_scan(
+    config: Option<&std::path::Path>,
+    dir: &str,
+    depth: usize,
+    apply: bool,
+    json: bool,
+) -> Result<()> {
+    let loaded = match tongyun_dev_core::load(config) {
+        Ok(l) => l,
+        Err(e) if config.is_none() => {
+            let path =
+                tongyun_dev_core::create_default_config().with_context(|| format!("{e:#}"))?;
+            if !json {
+                eprintln!("还没有配置文件，已新建 {}", path.display());
+            }
+            tongyun_dev_core::load(Some(&path))?
+        }
+        Err(e) => return Err(e),
+    };
+    let mut loaded = loaded;
+    let report = loaded.scan(dir, depth)?;
+    if !apply {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            print_scan(&report);
+            let new = report
+                .candidates
+                .iter()
+                .filter(|c| c.existing_id.is_none())
+                .count();
+            if new > 0 {
+                println!(
+                    "\n加 --apply 把 {new} 个新项目写进 {}",
+                    loaded.path().display()
+                );
+            }
+        }
+        return Ok(());
+    }
+    let items: Vec<NewProject> = report
+        .candidates
+        .iter()
+        .filter(|c| c.existing_id.is_none())
+        .map(|c| c.to_new_project())
+        .collect();
+    let out = loaded.import_scanned(items)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        print_scan(&report);
+        println!();
+        for row in &out.added {
+            println!("已添加 `{}`（{}）", row.id, row.root);
+        }
+        for s in &out.skipped {
+            println!("跳过 `{}`：{}", s.id, s.reason);
+        }
+        println!("写入 {}", loaded.path().display());
+    }
+    Ok(())
+}
+
+fn print_scan(report: &ScanReport) {
+    println!(
+        "扫描 {}（深度 {}，看了 {} 个目录{}）：找到 {} 个项目",
+        report.root,
+        report.depth,
+        report.dirs_visited,
+        if report.truncated {
+            "，目录太多已截断"
+        } else {
+            ""
+        },
+        report.candidates.len()
+    );
+    for c in &report.candidates {
+        let port = match (c.port, c.port_guessed) {
+            (0, _) => "端口?".to_string(),
+            (p, true) => format!(":{p}(猜)"),
+            (p, false) => format!(":{p}"),
+        };
+        let mut tool = String::new();
+        if let Some(v) = &c.java {
+            tool.push_str(&format!(" java {v}"));
+        }
+        if let Some(v) = &c.node {
+            tool.push_str(&format!(" node {v}"));
+        }
+        let state = match &c.existing_id {
+            Some(id) => format!("  [已注册为 {id}]"),
+            None => String::new(),
+        };
+        println!(
+            "\n  {}  {}  {:?}  {}{}{}\n    {}\n    启动：{}",
+            c.id, c.label, c.confidence, port, tool, state, c.root, c.start
+        );
+        for w in &c.why {
+            println!("    · {w}");
+        }
+    }
 }
 
 fn print_list(loaded: &Loaded, json: bool) -> Result<()> {
@@ -347,12 +478,12 @@ mod tests {
         let cli = Cli::try_parse_from(["tongyun-dev", "list", "--json"]).unwrap();
         assert!(matches!(cli.cmd, Some(Cmd::List { json: true })));
 
-        let cli = Cli::try_parse_from(["tongyun-dev", "start", "legacy_app", "--open"]).unwrap();
-        assert!(matches!(cli.cmd, Some(Cmd::Start { ref id, open: true }) if id == "legacy_app"));
+        let cli = Cli::try_parse_from(["tongyun-dev", "start", "my_api", "--open"]).unwrap();
+        assert!(matches!(cli.cmd, Some(Cmd::Start { ref id, open: true }) if id == "my_api"));
 
-        let cli = Cli::try_parse_from(["tongyun-dev", "status", "legacy_app", "--json"]).unwrap();
+        let cli = Cli::try_parse_from(["tongyun-dev", "status", "my_api", "--json"]).unwrap();
         assert!(
-            matches!(cli.cmd, Some(Cmd::Status { id: Some(ref id), json: true }) if id == "legacy_app")
+            matches!(cli.cmd, Some(Cmd::Status { id: Some(ref id), json: true }) if id == "my_api")
         );
 
         let cli = Cli::try_parse_from(["tongyun-dev", "status"]).unwrap();
@@ -364,8 +495,8 @@ mod tests {
             })
         ));
 
-        let cli = Cli::try_parse_from(["tongyun-dev", "install", "ops_class_admin_web"]).unwrap();
-        assert!(matches!(cli.cmd, Some(Cmd::Install { ref id }) if id == "ops_class_admin_web"));
+        let cli = Cli::try_parse_from(["tongyun-dev", "install", "my_web"]).unwrap();
+        assert!(matches!(cli.cmd, Some(Cmd::Install { ref id }) if id == "my_web"));
 
         let cli = Cli::try_parse_from(["tongyun-dev"]).unwrap();
         assert!(
@@ -380,6 +511,33 @@ mod tests {
             Some(Cmd::Ui {
                 port: 9100,
                 no_open: true
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_scan_arguments() {
+        let cli = Cli::try_parse_from(["tongyun-dev", "scan", "~/code"]).unwrap();
+        assert!(
+            matches!(cli.cmd, Some(Cmd::Scan { ref dir, depth: 3, apply: false, json: false }) if dir == "~/code")
+        );
+        let cli = Cli::try_parse_from([
+            "tongyun-dev",
+            "scan",
+            ".",
+            "--depth",
+            "5",
+            "--apply",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Scan {
+                depth: 5,
+                apply: true,
+                json: true,
+                ..
             })
         ));
     }

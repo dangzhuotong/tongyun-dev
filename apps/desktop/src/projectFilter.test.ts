@@ -9,7 +9,7 @@ const projects = [
   P("acme-admin", "ACME 管理后台", 8080),
   P("acme-api", "ACME 主服务", 8081),
   P("acme-ap", "AP 采购平台", 8090, "/Users/a/work/ap"),
-  P("acme-ops", "OPS 物流看板", 0, "/Users/a/code/ops", false),
+  P("acme-ops", "运维看板", 0, "/Users/a/code/ops", false),
   P("acme-legacy", "旧版报表", 9000, "/Users/a/code/legacy", true, false),
 ];
 const statuses = {

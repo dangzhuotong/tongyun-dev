@@ -10,7 +10,10 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub mod scan;
 pub mod toolchain;
+
+pub use scan::{Candidate, Confidence, ScanReport, DEFAULT_SCAN_DEPTH};
 pub use toolchain::{
     format_home, resolve_java_home, resolve_node_bin, shell_argv, shell_argv_with_os,
     toolchain_env, HostOs, ToolchainError, ToolchainRoots,
@@ -19,6 +22,8 @@ pub use toolchain::{
 const START_READY_DEFAULT_SECS: u64 = 180;
 /// 有启动标记、进程却找不到时，先等这么多秒再判定「进程已退出」。
 const START_EXIT_GRACE_SECS: u64 = 3;
+/// Where logs / pid files go when a project sets no `log_dir`.
+pub const DEFAULT_LOG_DIR: &str = "~/.tongyun-dev/logs";
 const LOG_TAIL_MAX_LINES: usize = 500;
 const LOG_TAIL_WINDOW: u64 = 512 * 1024;
 
@@ -30,6 +35,7 @@ pub struct Loaded {
 
 #[derive(Debug, serde::Deserialize)]
 struct FileConfig {
+    #[serde(default)]
     projects: HashMap<String, Project>,
 }
 
@@ -980,7 +986,7 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
         Some(expand_path("tomcat", &p.tomcat, home)?)
     };
     let log_dir_raw = if p.log_dir.trim().is_empty() {
-        "~/.tongyun-dev/logs".to_string()
+        DEFAULT_LOG_DIR.to_string()
     } else {
         p.log_dir.clone()
     };
@@ -2350,6 +2356,9 @@ pub struct NewProject {
     /// 缺 node_modules 时启动前自动装依赖。None / true = 缺省（自动装），false = 不自动装。
     #[serde(default)]
     pub auto_install: Option<bool>,
+    /// Tomcat 安装目录（WAR 项目用；写了就必须有 stop）。
+    #[serde(default)]
+    pub tomcat: Option<String>,
 }
 
 fn non_empty(v: &Option<String>) -> Option<String> {
@@ -2427,7 +2436,7 @@ impl NewProject {
                 .unwrap_or_default(),
             start_windows: Vec::new(),
             stop_windows: Vec::new(),
-            tomcat: String::new(),
+            tomcat: non_empty(&self.tomcat).unwrap_or_default(),
             log_dir: String::new(),
             log_file: non_empty(&self.log_file).unwrap_or_default(),
             pid_file: String::new(),
@@ -2484,6 +2493,9 @@ fn project_table(p: &Project) -> toml_edit::Table {
     if let Some(v) = &p.shell {
         t["shell"] = value(v.as_str());
     }
+    if !p.tomcat.is_empty() {
+        t["tomcat"] = value(p.tomcat.as_str());
+    }
     if p.auto_install == Some(false) {
         t["auto_install"] = value(false);
     }
@@ -2508,6 +2520,45 @@ fn project_table(p: &Project) -> toml_edit::Table {
         }
     }
     t
+}
+
+/// Result of [`Loaded::import_scanned`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ImportReport {
+    pub added: Vec<ProjectRow>,
+    pub skipped: Vec<SkippedImport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SkippedImport {
+    pub id: String,
+    pub reason: String,
+}
+
+fn canonical_or_self(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Scan without a config file (first run): nothing is registered yet.
+pub fn scan_without_config(root: &str, depth: usize) -> Result<ScanReport> {
+    scan::scan(&scan_root_path(root)?, depth, &Default::default())
+}
+
+/// `~/code`, `$HOME/code`, `/abs/path` or a path relative to the current dir.
+fn scan_root_path(raw: &str) -> Result<PathBuf> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        bail!("scan directory is required");
+    }
+    let expanded = expand_tilde_with(raw, current_home().as_deref())?;
+    let mut p = PathBuf::from(expanded);
+    if !p.is_absolute() && !is_windows_absolute(&path_to_string(&p)) {
+        p = std::env::current_dir()?.join(p);
+    }
+    if !p.is_dir() {
+        bail!("not a directory: {}", p.display());
+    }
+    Ok(canonical_or_self(&p))
 }
 
 /// Project updates applied via `Loaded::update_project`.
@@ -2670,6 +2721,74 @@ impl Loaded {
         write_doc(&self.path, &doc)?;
         self.config.projects.remove(id);
         Ok(())
+    }
+
+    /// Absolute, canonical roots of registered projects -> id (for scan dedupe).
+    fn registered_roots(&self) -> HashMap<PathBuf, String> {
+        let home = current_home();
+        let mut out = HashMap::new();
+        for (id, p) in &self.config.projects {
+            if let Ok(root) = expand_path("root", &p.root, home.as_deref()) {
+                out.insert(canonical_or_self(&root), id.clone());
+            }
+        }
+        out
+    }
+
+    /// Scan a folder for projects (read-only). Candidates whose root is already
+    /// registered carry `existing_id`; suggested ids never clash with the config.
+    pub fn scan(&self, root: &str, depth: usize) -> Result<scan::ScanReport> {
+        let dir = scan_root_path(root)?;
+        let taken: std::collections::HashSet<String> =
+            self.config.projects.keys().cloned().collect();
+        let mut report = scan::scan(&dir, depth, &taken)?;
+        let roots = self.registered_roots();
+        let home = current_home();
+        for c in &mut report.candidates {
+            if let Ok(p) = expand_path("root", &c.root, home.as_deref()) {
+                c.existing_id = roots.get(&canonical_or_self(&p)).cloned();
+                if let Some(id) = &c.existing_id {
+                    c.id = id.clone();
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// Add scanned (and possibly user-edited) projects. Never overwrites: an id that
+    /// already exists or a root that is already registered is skipped with a reason.
+    /// Each project is validated and written on its own, so one bad row does not
+    /// block the rest.
+    pub fn import_scanned(&mut self, items: Vec<NewProject>) -> Result<ImportReport> {
+        let home = current_home();
+        let mut report = ImportReport::default();
+        for item in items {
+            let id = item.id.trim().to_string();
+            if self.config.projects.contains_key(&id) {
+                report.skipped.push(SkippedImport {
+                    reason: format!("id `{id}` 已存在"),
+                    id,
+                });
+                continue;
+            }
+            if let Ok(p) = expand_path("root", item.root.trim(), home.as_deref()) {
+                if let Some(other) = self.registered_roots().get(&canonical_or_self(&p)) {
+                    report.skipped.push(SkippedImport {
+                        id,
+                        reason: format!("这个目录已经注册为 `{other}`"),
+                    });
+                    continue;
+                }
+            }
+            match self.add_project(item) {
+                Ok(row) => report.added.push(row),
+                Err(e) => report.skipped.push(SkippedImport {
+                    id,
+                    reason: format!("{e:#}"),
+                }),
+            }
+        }
+        Ok(report)
     }
 
     /// Detailed information about a registered project, suitable for filling the edit form.
@@ -2984,11 +3103,31 @@ pub fn open_path(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    const PROJECTS_TOML: &str = include_str!("../../../config/projects.toml");
+    const EXAMPLE_TOML: &str = include_str!("../../../config/projects.example.toml");
+    const TEMPLATE_TOML: &str = include_str!("../../../config/projects.template.toml");
+    const LEGACY_TOML: &str = r#"
+[projects.legacy_app]
+name = "legacy_app"
+root = "~/code/acme/legacy-app"
+java = "8"
+start = ["bash", "{{root}}/scripts/start-legacy.sh"]
+stop = ["bash", "{{tomcat}}/bin/catalina.sh", "stop", "15", "-force"]
+tomcat = "~/opt/tomcat-9"
+log_dir = "~/.tongyun-dev/logs"
+log_file = "{{log_dir}}/legacy_app_catalina.out"
+pid_file = "{{log_dir}}/legacy_app_tomcat.pid"
+port = 8080
+login_url = "http://127.0.0.1:8080/legacy_app/admin/login.html"
+"#;
 
     fn legacy_app(home: &Path) -> Resolved {
-        let cfg = parse_config(PROJECTS_TOML).unwrap();
-        resolve_project("legacy_app", cfg.projects.get("legacy_app").unwrap(), Some(home)).unwrap()
+        let cfg = parse_config(LEGACY_TOML).unwrap();
+        resolve_project(
+            "legacy_app",
+            cfg.projects.get("legacy_app").unwrap(),
+            Some(home),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2999,7 +3138,11 @@ mod tests {
             "/Users/dev/code/acme/legacy-app"
         );
         assert_eq!(
-            expand_tilde_with("$HOME/.tongyun-dev/logs/legacy_app_catalina.out", Some(home)).unwrap(),
+            expand_tilde_with(
+                "$HOME/.tongyun-dev/logs/legacy_app_catalina.out",
+                Some(home)
+            )
+            .unwrap(),
             "/Users/dev/.tongyun-dev/logs/legacy_app_catalina.out"
         );
         assert_eq!(
@@ -3011,12 +3154,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_app_paths_resolve_without_tilde() {
+    fn legacy_paths_resolve_without_tilde() {
         let p = legacy_app(Path::new("/Users/dev"));
-        assert_eq!(
-            p.root,
-            PathBuf::from("/Users/dev/code/acme/legacy-app")
-        );
+        assert_eq!(p.root, PathBuf::from("/Users/dev/code/acme/legacy-app"));
         assert_eq!(
             p.tomcat.as_deref(),
             Some(Path::new("/Users/dev/opt/tomcat-9"))
@@ -3073,14 +3213,16 @@ mod tests {
 
     #[test]
     fn config_has_no_secret_material() {
-        let lower = PROJECTS_TOML.to_ascii_lowercase();
-        for bad in ["password", "secret", "token", "jdbc", "api_key", "apikey"] {
-            assert!(!lower.contains(bad), "{bad} appeared in projects.toml");
+        for text in [EXAMPLE_TOML, TEMPLATE_TOML] {
+            let lower = text.to_ascii_lowercase();
+            for bad in ["password", "secret", "token", "jdbc", "api_key", "apikey"] {
+                assert!(!lower.contains(bad), "{bad} appeared in a shipped config");
+            }
+            assert!(!text.contains("sdkman-init"));
+            assert!(!text.contains("sdk use"));
+            assert!(!text.contains("fnm env"));
+            assert!(!text.contains("fnm exec"));
         }
-        assert!(!PROJECTS_TOML.contains("sdkman-init"));
-        assert!(!PROJECTS_TOML.contains("sdk use"));
-        assert!(!PROJECTS_TOML.contains("fnm env"));
-        assert!(!PROJECTS_TOML.contains("fnm exec"));
     }
 
     #[test]
@@ -3434,189 +3576,67 @@ port = 9
     }
 
     #[test]
-    fn registered_lines_resolve() {
+    fn example_config_resolves() {
         let home = Path::new("/Users/dev");
-        let cfg = parse_config(PROJECTS_TOML).unwrap();
-        let enabled = [
-            "legacy_app",
-            "demo_exam",
-            "demo_exam_vue",
-            "demo_exam_student_vue",
-            "ap_docs-site",
-            "ap_docs-site_web",
-            "ap_admin_test_center",
-            "ops_class_admin_manager",
-            "ops_class_admin_web",
-            "ops_student_manage_vue",
-        ];
-        let disabled = [
-            "ap_admin_test_center_vue",
-            "acme_system_ap_java_backend",
-            "opsstudentmanageserver",
-            "papers_cn",
-            "acme_papers_server",
-            "tdmockserver",
-            "acme_wechat",
-            "acme_shop_center",
-            "acme_wechat_friend_manager",
-            "wxcenter",
-            "admin_acme_cn",
-            "acme_web_viewer",
-            "offlinestudent",
-            "g5_admin_vue",
-        ];
-        assert_eq!(cfg.projects.len(), enabled.len() + disabled.len());
-        for id in enabled {
+        let cfg = parse_config(EXAMPLE_TOML).unwrap();
+        let mut ids: Vec<_> = cfg.projects.keys().cloned().collect();
+        ids.sort();
+        assert_eq!(ids, vec!["demo_api", "demo_legacy", "demo_web"]);
+        for id in ["demo_api", "demo_web"] {
             let p = resolve_project(id, cfg.projects.get(id).unwrap(), Some(home)).unwrap();
             assert!(p.enabled, "{id}");
+            assert!(p.background, "{id}");
             assert!(!p.start.is_empty(), "{id}");
             assert_ne!(p.port, 0, "{id}");
             assert!(p.root.is_absolute(), "{id}");
             assert!(!path_to_string(&p.root).contains('~'), "{id}");
             assert!(!path_to_string(&p.log_file).contains("{{"), "{id}");
         }
-        for id in disabled {
-            let p = resolve_project(id, cfg.projects.get(id).unwrap(), Some(home)).unwrap();
-            assert!(!p.enabled, "{id}");
-            assert!(!p.reason.is_empty(), "{id}");
-            let err = cmd_start(&p).unwrap_err().to_string();
-            assert!(err.contains("disabled"), "{err}");
-            assert!(err.contains(&p.reason), "{err}");
-        }
-
-        let be = resolve_project(
-            "demo_exam",
-            cfg.projects.get("demo_exam").unwrap(),
+        let api = resolve_project(
+            "demo_api",
+            cfg.projects.get("demo_api").unwrap(),
             Some(home),
         )
         .unwrap();
-        assert!(be.background);
-        assert!(be.tomcat.is_none());
-        assert_eq!(be.port, 8034);
-        assert!(be.login_url.is_empty());
-        assert_eq!(be.java.as_deref(), Some("8"));
-        let start = be.start.join(" ");
-        assert!(start.contains("spring-boot:run"), "{start}");
-        assert!(start.contains("profiles=dev"), "{start}");
+        assert_eq!(api.java.as_deref(), Some("17"));
+        assert_eq!(api.port, 8081);
+        assert!(api.start.join(" ").contains("spring-boot:run"));
+        assert_eq!(api.root, PathBuf::from("/Users/dev/code/demo/demo-api"));
         assert_eq!(
-            be.root,
-            PathBuf::from("/Users/dev/code/acme/01-exam/demo_exam")
-        );
-        assert_eq!(
-            be.log_file,
-            PathBuf::from("/Users/dev/.tongyun-dev/logs/demo_exam.out")
-        );
-
-        let vue = resolve_project(
-            "demo_exam_vue",
-            cfg.projects.get("demo_exam_vue").unwrap(),
-            Some(home),
-        )
-        .unwrap();
-        assert_eq!(vue.port, 5777);
-        assert!(vue.background);
-        assert_eq!(vue.node.as_deref(), Some("22"));
-        let vue_start = vue.start.join(" ");
-        assert!(vue_start.contains("5777"), "{vue_start}");
-        assert_eq!(vue.login_url, "http://127.0.0.1:5777/");
-
-        let student = resolve_project(
-            "demo_exam_student_vue",
-            cfg.projects.get("demo_exam_student_vue").unwrap(),
-            Some(home),
-        )
-        .unwrap();
-        assert_eq!(student.port, 5999);
-        assert_eq!(student.node.as_deref(), Some("22"));
-        assert_eq!(student.login_url, "http://127.0.0.1:5999/");
-        assert_eq!(
-            student.root,
-            PathBuf::from("/Users/dev/code/acme/01-exam/demo-exam-student-vue")
-        );
-
-        let paper = resolve_project(
-            "ap_docs-site",
-            cfg.projects.get("ap_docs-site").unwrap(),
-            Some(home),
-        )
-        .unwrap();
-        assert_eq!(paper.port, 8888);
-        assert!(paper.background);
-        assert_eq!(
-            paper.root,
-            PathBuf::from("/Users/dev/code/acme/02-ap/acme-ap-docs-site-backend")
+            api.log_file,
+            PathBuf::from("/Users/dev/.tongyun-dev/logs/demo_api.out")
         );
         let web = resolve_project(
-            "ap_docs-site_web",
-            cfg.projects.get("ap_docs-site_web").unwrap(),
+            "demo_web",
+            cfg.projects.get("demo_web").unwrap(),
             Some(home),
         )
         .unwrap();
-        assert_eq!(web.port, 7888);
-        assert_eq!(web.node.as_deref(), Some("22"));
-        assert_eq!(web.login_url, "http://127.0.0.1:7888/");
-        assert_eq!(
-            web.root,
-            PathBuf::from("/Users/dev/code/acme/02-ap/acme-ap-docs-site-react")
-        );
+        assert_eq!(web.node.as_deref(), Some("20"));
+        assert_eq!(web.login_url, "http://127.0.0.1:5173/");
 
-        let center = resolve_project(
-            "ap_admin_test_center",
-            cfg.projects.get("ap_admin_test_center").unwrap(),
+        let legacy = resolve_project(
+            "demo_legacy",
+            cfg.projects.get("demo_legacy").unwrap(),
             Some(home),
         )
         .unwrap();
-        assert_eq!(center.port, 8110);
+        assert!(!legacy.enabled);
+        assert!(!legacy.reason.is_empty());
         assert_eq!(
-            center.root,
-            PathBuf::from("/Users/dev/code/acme/02-ap/acme-ap-admin-test-center")
+            legacy.tomcat.as_deref(),
+            Some(Path::new("/Users/dev/opt/tomcat-9"))
         );
-        let center_vue = resolve_project(
-            "ap_admin_test_center_vue",
-            cfg.projects.get("ap_admin_test_center_vue").unwrap(),
-            Some(home),
-        )
-        .unwrap();
-        assert!(!center_vue.enabled);
-        assert!(center_vue.reason.contains("admin-test-center-vue"));
+        let err = cmd_start(&legacy).unwrap_err().to_string();
+        assert!(err.contains("disabled"), "{err}");
+        assert!(err.contains(&legacy.reason), "{err}");
+    }
 
-        let ops = resolve_project(
-            "ops_class_admin_manager",
-            cfg.projects.get("ops_class_admin_manager").unwrap(),
-            Some(home),
-        )
-        .unwrap();
-        assert_eq!(ops.port, 8147);
-        assert_eq!(
-            ops.root,
-            PathBuf::from(
-                "/Users/dev/code/acme/03-ops-class/ops-class-admin/ops_class_admin_manager"
-            )
-        );
-        let ops_web = resolve_project(
-            "ops_class_admin_web",
-            cfg.projects.get("ops_class_admin_web").unwrap(),
-            Some(home),
-        )
-        .unwrap();
-        assert_eq!(ops_web.port, 8146);
-        assert_eq!(ops_web.node.as_deref(), Some("22"));
-        assert_eq!(
-            ops_web.root,
-            PathBuf::from(
-                "/Users/dev/code/acme/03-ops-class/ops-class-admin/ops_class_admin_web"
-            )
-        );
-
-        let ap_blocked = cfg
-            .projects
-            .get("acme_system_ap_java_backend")
-            .unwrap();
-        assert!(!ap_blocked.enabled);
-        assert!(ap_blocked.reason.to_ascii_lowercase().contains("maven"));
-        let ops_blocked = cfg.projects.get("opsstudentmanageserver").unwrap();
-        assert!(!ops_blocked.enabled);
-        assert!(ops_blocked.reason.contains("acme-job-sdk"));
+    #[test]
+    fn default_template_has_no_projects() {
+        let cfg = parse_config(TEMPLATE_TOML).unwrap();
+        assert!(cfg.projects.is_empty());
+        assert!(TEMPLATE_TOML.contains("scan"));
     }
 
     #[test]
@@ -4440,7 +4460,7 @@ echo starting proj_b
 mod deps_tests {
     use super::*;
 
-    const PROJECTS_TOML: &str = include_str!("../../../config/projects.toml");
+    const EXAMPLE_TOML: &str = include_str!("../../../config/projects.example.toml");
     const TEMPLATE_TOML: &str = include_str!("../../../config/projects.template.toml");
 
     fn temp_dir(tag: &str) -> PathBuf {
@@ -4495,13 +4515,13 @@ mod deps_tests {
     fn strips_pnpm_double_dash() {
         let cases = [
             (
-                "pnpm dev -- --port 8146 --host 127.0.0.1",
-                "pnpm dev --port 8146 --host 127.0.0.1",
+                "pnpm dev -- --port 4001 --host 127.0.0.1",
+                "pnpm dev --port 4001 --host 127.0.0.1",
             ),
-            ("exec pnpm dev -- --port 7888", "exec pnpm dev --port 7888"),
+            ("exec pnpm dev -- --port 4004", "exec pnpm dev --port 4004"),
             (
-                "pnpm run dev:antd -- --port 5777",
-                "pnpm run dev:antd --port 5777",
+                "pnpm run dev:antd -- --port 4002",
+                "pnpm run dev:antd --port 4002",
             ),
             (
                 "/opt/homebrew/bin/pnpm serve -- --port 1",
@@ -4517,7 +4537,7 @@ mod deps_tests {
         }
         // Left alone: npm needs its `--`, pnpm flags before a script, plain commands.
         for keep in [
-            "npm run dev -- --port 8146 --host 127.0.0.1",
+            "npm run dev -- --port 4001 --host 127.0.0.1",
             "pnpm dev --port 5173",
             "pnpm -- dev",
             "yarn dev --port 3000",
@@ -4527,17 +4547,17 @@ mod deps_tests {
             assert_eq!(normalize_start_arg(keep), keep);
         }
         // Multi-line `bash -c` bodies keep their other lines byte-for-byte.
-        let script = "set -euo pipefail\n  exec pnpm dev -- --port 5999  --host 127.0.0.1\n# pnpm dev -- note";
+        let script = "set -euo pipefail\n  exec pnpm dev -- --port 4003  --host 127.0.0.1\n# pnpm dev -- note";
         assert_eq!(
             normalize_start_arg(script),
-            "set -euo pipefail\n  exec pnpm dev --port 5999 --host 127.0.0.1\n# pnpm dev note"
+            "set -euo pipefail\n  exec pnpm dev --port 4003 --host 127.0.0.1\n# pnpm dev note"
         );
     }
 
     #[test]
     fn shipped_configs_have_no_pnpm_double_dash() {
         let home = Path::new("/Users/dev");
-        for text in [PROJECTS_TOML, TEMPLATE_TOML] {
+        for text in [EXAMPLE_TOML, TEMPLATE_TOML] {
             let cfg = parse_config(text).unwrap();
             for (id, p) in &cfg.projects {
                 let r = resolve_project(id, p, Some(home)).unwrap();
@@ -4551,20 +4571,15 @@ mod deps_tests {
                 assert!(r.auto_install, "{id}: auto_install defaults to true");
             }
         }
-        let cfg = parse_config(PROJECTS_TOML).unwrap();
+        let cfg = parse_config(EXAMPLE_TOML).unwrap();
         let start_of = |id: &str| {
             resolve_project(id, cfg.projects.get(id).unwrap(), Some(home))
                 .unwrap()
                 .assembled_start()
                 .join(" ")
         };
-        assert!(
-            start_of("ops_class_admin_web").contains("npm run dev -- --port 8146 --host 127.0.0.1")
-        );
-        assert!(
-            start_of("demo_exam_vue").contains("pnpm run dev:antd --port 5777 --host 127.0.0.1")
-        );
-        assert!(start_of("ap_docs-site_web").contains("npx next dev -p 7888"));
+        assert!(start_of("demo_web").contains("pnpm dev --port 5173 --host 127.0.0.1"));
+        assert!(start_of("demo_api").contains("mvn spring-boot:run"));
     }
 
     #[test]
@@ -4748,5 +4763,114 @@ start = ["bash", "-c", "echo started > started.txt; exec sleep 30"]
         assert!(!st.deps_missing);
         assert!(dir.join("app/node_modules").is_dir());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod scan_import_tests {
+    use super::*;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("tongyun_scan_import_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write(p: &Path, body: &str) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    #[test]
+    fn scan_marks_registered_roots_and_import_never_overwrites() {
+        let d = tmp("dedupe");
+        let code = d.join("code");
+        let vite =
+            r#"{"name":"web","scripts":{"dev":"vite --port 5174"},"devDependencies":{"vite":"5"}}"#;
+        write(&code.join("web/package.json"), vite);
+        write(
+            &code.join("shop/package.json"),
+            &vite.replace("\"web\"", "\"shop\"").replace("5174", "5175"),
+        );
+        let cfg = d.join("projects.toml");
+        write(
+            &cfg,
+            &format!(
+                "# my projects\n[projects.web]\nroot = \"{}\"\nport = 5174\nstart = [\"pnpm\", \"dev\"]\n",
+                path_to_string(&code.join("web"))
+            ),
+        );
+        let mut loaded = load(Some(&cfg)).unwrap();
+        let report = loaded.scan(&path_to_string(&code), 3).unwrap();
+        assert_eq!(report.candidates.len(), 2);
+        let web = report
+            .candidates
+            .iter()
+            .find(|c| c.root.ends_with("/web"))
+            .unwrap();
+        assert_eq!(web.existing_id.as_deref(), Some("web"));
+        assert_eq!(
+            web.id, "web",
+            "already-registered rows show their registered id"
+        );
+        let shop = report
+            .candidates
+            .iter()
+            .find(|c| c.root.ends_with("/shop"))
+            .unwrap();
+        assert!(shop.existing_id.is_none());
+
+        let items: Vec<NewProject> = report
+            .candidates
+            .iter()
+            .map(|c| c.to_new_project())
+            .collect();
+        let out = loaded.import_scanned(items).unwrap();
+        assert_eq!(out.added.len(), 1);
+        assert_eq!(out.added[0].id, "shop");
+        assert_eq!(out.added[0].port, 5175);
+        assert_eq!(out.skipped.len(), 1);
+        assert!(out.skipped[0].reason.contains("web"), "{:?}", out.skipped);
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert!(text.starts_with("# my projects"), "comments kept: {text}");
+        assert!(text.contains("[projects.shop]"));
+        // Re-import is a no-op.
+        let again = loaded.scan(&path_to_string(&code), 3).unwrap();
+        assert!(again.candidates.iter().all(|c| c.existing_id.is_some()));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn import_into_empty_default_template_and_tomcat_row() {
+        let d = tmp("empty");
+        let cfg = d.join("projects.toml");
+        std::fs::write(&cfg, DEFAULT_CONFIG_TEMPLATE).unwrap();
+        let mut loaded = load(Some(&cfg)).unwrap();
+        assert!(loaded.list().unwrap().projects.is_empty());
+        write(
+            &d.join("legacy/pom.xml"),
+            "<project><artifactId>legacy</artifactId><packaging>war</packaging></project>",
+        );
+        let report = loaded.scan(&path_to_string(&d), 2).unwrap();
+        assert_eq!(report.candidates.len(), 1);
+        let mut req = report.candidates[0].to_new_project();
+        // User filled in Tomcat in the scan list -> enabled.
+        req.tomcat = Some("/opt/tomcat".into());
+        req.enabled = Some(true);
+        req.reason = None;
+        let out = loaded.import_scanned(vec![req]).unwrap();
+        assert_eq!(out.added.len(), 1, "{:?}", out.skipped);
+        let r = loaded.resolve("legacy").unwrap();
+        assert_eq!(r.tomcat.as_deref(), Some(Path::new("/opt/tomcat")));
+        assert!(r.active_start()[2].contains("/opt/tomcat/webapps/legacy.war"));
+        assert!(!r.stop.is_empty());
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert!(
+            text.contains("tongyun-dev 项目配置"),
+            "template header kept"
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

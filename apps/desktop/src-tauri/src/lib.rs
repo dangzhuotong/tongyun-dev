@@ -1,6 +1,7 @@
 use std::path::Path;
 use tongyun_dev_core::{
-    LogTail, NewProject, ProjectDetail, ProjectEdit, ProjectList, ProjectRow, StatusJson,
+    ImportReport, LogTail, NewProject, ProjectDetail, ProjectEdit, ProjectList, ProjectRow,
+    ScanReport, StatusJson,
 };
 
 fn report(err: impl std::fmt::Display) -> String {
@@ -196,6 +197,34 @@ async fn remove_project(id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn scan_dir(dir: String, depth: Option<usize>) -> Result<ScanReport, String> {
+    blocking(move || {
+        let depth = depth.unwrap_or(tongyun_dev_core::DEFAULT_SCAN_DEPTH);
+        match tongyun_dev_core::load(None) {
+            Ok(loaded) => loaded.scan(&dir, depth).map_err(report),
+            // No config yet: scan anyway, nothing can clash.
+            Err(_) => tongyun_dev_core::scan_without_config(&dir, depth).map_err(report),
+        }
+    })
+    .await
+}
+
+#[tauri::command]
+async fn import_scanned(items: Vec<NewProject>) -> Result<ImportReport, String> {
+    blocking(move || {
+        let mut loaded = match tongyun_dev_core::load(None) {
+            Ok(l) => l,
+            Err(_) => {
+                let path = tongyun_dev_core::create_default_config().map_err(report)?;
+                tongyun_dev_core::load(Some(&path)).map_err(report)?
+            }
+        };
+        loaded.import_scanned(items).map_err(report)
+    })
+    .await
+}
+
+#[tauri::command]
 async fn pick_folder() -> Result<Option<String>, String> {
     let picked = rfd::AsyncFileDialog::new().pick_folder().await;
     Ok(picked.map(|h| h.path().to_string_lossy().to_string()))
@@ -222,7 +251,9 @@ pub fn run() {
             add_project,
             update_project,
             remove_project,
-            pick_folder
+            pick_folder,
+            scan_dir,
+            import_scanned
         ])
         .run(tauri::generate_context!())
         .expect("error while running tongyun-dev");

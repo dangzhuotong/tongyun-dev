@@ -267,6 +267,47 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
             }
             err_json(404, "not found")
         }
+        "POST" if path == "/api/scan" => {
+            #[derive(serde::Deserialize)]
+            struct ScanReq {
+                dir: String,
+                #[serde(default)]
+                depth: Option<usize>,
+            }
+            let r: ScanReq = match serde_json::from_slice(&req.body) {
+                Ok(r) => r,
+                Err(e) => return err_json(400, format!("bad payload: {e}")),
+            };
+            match loaded.scan(
+                &r.dir,
+                r.depth.unwrap_or(tongyun_dev_core::DEFAULT_SCAN_DEPTH),
+            ) {
+                Ok(report) => json_body(200, json!({"ok": true, "report": report})),
+                Err(e) => err_json(400, format!("{e:#}")),
+            }
+        }
+        "POST" if path == "/api/scan/import" => {
+            #[derive(serde::Deserialize)]
+            struct ImportReq {
+                items: Vec<NewProject>,
+            }
+            let r: ImportReq = match serde_json::from_slice(&req.body) {
+                Ok(r) => r,
+                Err(e) => return err_json(400, format!("bad payload: {e}")),
+            };
+            let _guard = state.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut loaded = match load(state) {
+                Ok(l) => l,
+                Err(e) => return err_json(500, format!("{e:#}")),
+            };
+            match loaded.import_scanned(r.items) {
+                Ok(out) => json_body(
+                    200,
+                    json!({"ok": true, "added": out.added, "skipped": out.skipped}),
+                ),
+                Err(e) => err_json(400, format!("{e:#}")),
+            }
+        }
         "POST" if path == "/api/projects" => {
             let new: NewProject = match serde_json::from_slice(&req.body) {
                 Ok(n) => n,
@@ -595,6 +636,29 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
     .log-box .ll.err { color: #f2a48f; background: rgba(224,109,83,.12); box-shadow: inset 2px 0 0 #e06d53; }
     .log-box .ll.warn { color: #e8c983; background: rgba(217,180,106,.08); box-shadow: inset 2px 0 0 #d9b46a; }
     @media (max-width: 720px) { .search { width: 100%; } .summary { display: none; } }
+    .empty-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+    .scan-bar { display: flex; gap: 8px; align-items: center; }
+    .scan-bar #scanDir { flex: 1; }
+    .scan-depth { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ty-text-muted); white-space: nowrap; }
+    .scan-depth input { width: 56px; }
+    .scan-hint { margin: 10px 0 8px; font-size: 13px; color: var(--ty-text-muted); }
+    .scan-list { max-height: 52vh; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+    .scan-empty { padding: 24px; text-align: center; color: var(--ty-text-muted); }
+    .scan-row { display: flex; gap: 10px; padding: 12px; border: 1px solid var(--ty-border); border-radius: var(--ty-radius-md); background: var(--ty-surface); }
+    .scan-row.done { opacity: 0.6; }
+    .scan-pick { padding-top: 2px; }
+    .scan-main { flex: 1; min-width: 0; }
+    .scan-title { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .scan-root { font-family: var(--ty-font-mono); font-size: 12px; color: var(--ty-text-muted); margin: 4px 0 8px; word-break: break-all; }
+    .scan-fields { display: grid; grid-template-columns: 1fr 1fr 2fr 90px; gap: 8px; }
+    .scan-fields label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--ty-text-muted); }
+    .scan-fields input { width: 100%; box-sizing: border-box; }
+    .scan-why { margin-top: 6px; font-size: 12px; color: var(--ty-text-muted); }
+    .scan-why ul { margin: 4px 0 0 18px; padding: 0; }
+    .chip.conf-high { background: var(--ty-matcha-tint); color: var(--ty-matcha); }
+    .chip.conf-medium { background: var(--ty-sky-tint); color: var(--ty-sky); }
+    .chip.conf-low { background: var(--ty-honey-tint); color: var(--ty-honey); }
+    @media (max-width: 720px) { .scan-fields { grid-template-columns: 1fr 1fr; } }
   </style>
 </head>
 <body>
@@ -609,6 +673,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       </div>
       <div class="header-actions">
         <button class="btn-secondary" onclick="fetchProjects()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-15.5 6.2M3 12A9 9 0 0 1 18.5 5.8"/><path d="M21 4v5h-5M3 20v-5h5"/></svg>刷新</button>
+        <button class="btn-secondary" onclick="openScanModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/><path d="M8 11h6M11 8v6"/></svg>扫描目录…</button>
         <button class="btn-primary" onclick="openAddModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>新增项目</button>
       </div>
     </header>
@@ -638,7 +703,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       </div>
       <div class="form-group">
         <label>项目 ID（英文，如 student_web）</label>
-        <input id="addId" placeholder="例如：acme_fe" required />
+        <input id="addId" placeholder="例如：my_web" required />
       </div>
       <div class="form-group">
         <label>显示名称（可选，默认同 ID）</label>
@@ -646,7 +711,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       </div>
       <div class="form-group">
         <label>项目根路径</label>
-        <input id="addRoot" placeholder="例如：~/code/acme/student-web" required />
+        <input id="addRoot" placeholder="例如：~/code/my-web" required />
       </div>
       <div class="form-group">
         <label>启动命令</label>
@@ -665,16 +730,37 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         <input id="addUrl" placeholder="例如：http://127.0.0.1:3000/login" />
       </div>
       <div class="form-group">
-        <label>Node 版本（可选，走 fnm，如 22）</label>
+        <label>Node 版本（可选，如 22；自动找 fnm / nvm 装的版本）</label>
         <input id="addNode" placeholder="例如：22" />
       </div>
       <div class="form-group">
-        <label>Java 版本（可选，走 sdkman，如 17.0.10-tem）</label>
-        <input id="addJava" placeholder="例如：17.0.10-tem" />
+        <label>Java 版本（可选，如 17；自动找 sdkman / Adoptium / Zulu 装的 JDK）</label>
+        <input id="addJava" placeholder="例如：17" />
       </div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="closeAddModal()">取消</button>
         <button class="btn-primary" onclick="submitAddProject()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scan Modal -->
+  <div class="modal-backdrop" id="scanModal">
+    <div class="modal modal-wide">
+      <div class="modal-head">
+        <h3>扫描目录</h3>
+        <button class="btn-icon" onclick="closeScanModal()" aria-label="关闭">×</button>
+      </div>
+      <div class="scan-bar">
+        <input id="scanDir" placeholder="要扫描的目录，例如 ~/code" />
+        <label class="scan-depth">深度 <input id="scanDepth" type="number" min="1" max="8" value="3" /></label>
+        <button class="btn-primary" id="scanGo" onclick="runScan()">扫描</button>
+      </div>
+      <div class="scan-hint" id="scanHint">只读不改：先列出找到的项目，勾选、改好再添加。已注册过的目录不会重复添加。</div>
+      <div class="scan-list" id="scanList"></div>
+      <div class="modal-actions">
+        <button class="btn-secondary" onclick="closeScanModal()">取消</button>
+        <button class="btn-primary" id="scanAdd" onclick="importScan()" disabled>添加选中</button>
       </div>
     </div>
   </div>
@@ -695,6 +781,93 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
   </div>
 
   <script>
+    let scanRows = [];
+    function openScanModal() {
+      document.getElementById('scanModal').classList.add('show');
+      const d = document.getElementById('scanDir');
+      if (!d.value) d.value = '~/code';
+      d.focus();
+    }
+    function closeScanModal() { document.getElementById('scanModal').classList.remove('show'); }
+    async function runScan() {
+      const dir = document.getElementById('scanDir').value.trim();
+      const depth = parseInt(document.getElementById('scanDepth').value, 10) || 3;
+      const list = document.getElementById('scanList');
+      const hint = document.getElementById('scanHint');
+      if (!dir) { hint.textContent = '先填一个目录'; return; }
+      list.innerHTML = '<div class="scan-empty">扫描中…</div>';
+      try {
+        const data = await postJson('/api/scan', { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dir, depth }) });
+        const r = data.report;
+        scanRows = r.candidates.map(c => Object.assign({}, c, { picked: !c.existing_id }));
+        const fresh = scanRows.filter(c => !c.existing_id).length;
+        hint.textContent = `在 ${r.root} 下看了 ${r.dirs_visited} 个目录，找到 ${r.candidates.length} 个项目，其中 ${fresh} 个是新的` + (r.truncated ? '（目录太多，已截断，可以换个更小的目录）' : '');
+        renderScan();
+      } catch (e) {
+        list.innerHTML = '';
+        hint.textContent = '扫描失败：' + e.message;
+      }
+    }
+    function scanField(i, key, value) {
+      const row = scanRows[i];
+      row[key] = key === 'port' ? (parseInt(value, 10) || 0) : value;
+      if (key === 'picked') row.picked = value;
+      syncScanButton();
+    }
+    function syncScanButton() {
+      const n = scanRows.filter(r => r.picked && !r.existing_id).length;
+      const b = document.getElementById('scanAdd');
+      b.disabled = n === 0;
+      b.textContent = n ? `添加选中（${n}）` : '添加选中';
+    }
+    function renderScan() {
+      const list = document.getElementById('scanList');
+      if (!scanRows.length) {
+        list.innerHTML = '<div class="scan-empty">没找到项目。试试上一级目录，或者把深度调大。</div>';
+        syncScanButton();
+        return;
+      }
+      const conf = { high: '把握大', medium: '大概率', low: '猜的' };
+      list.innerHTML = scanRows.map((c, i) => {
+        const done = !!c.existing_id;
+        const tools = [c.java ? 'Java ' + escapeHtml(c.java) : '', c.node ? 'Node ' + escapeHtml(c.node) : ''].filter(Boolean).map(t => `<span class="chip">${t}</span>`).join('');
+        return `<div class="scan-row ${done ? 'done' : ''}">
+          <label class="scan-pick"><input type="checkbox" ${c.picked && !done ? 'checked' : ''} ${done ? 'disabled' : ''} onchange="scanField(${i}, 'picked', this.checked)" /></label>
+          <div class="scan-main">
+            <div class="scan-title"><strong>${escapeHtml(c.label)}</strong><span class="chip conf-${c.confidence}">${conf[c.confidence] || c.confidence}</span>${tools}${done ? `<span class="chip">已注册为 ${escapeHtml(c.existing_id)}</span>` : ''}${c.needs_tomcat ? '<span class="chip">需要 Tomcat</span>' : ''}</div>
+            <div class="scan-root">${escapeHtml(c.root)}</div>
+            <div class="scan-fields">
+              <label>ID<input value="${escapeHtml(c.id)}" ${done ? 'disabled' : ''} oninput="scanField(${i}, 'id', this.value)" /></label>
+              <label>名称<input value="${escapeHtml(c.name)}" ${done ? 'disabled' : ''} oninput="scanField(${i}, 'name', this.value)" /></label>
+              <label class="wide">启动命令<input value="${escapeHtml(c.start)}" ${done ? 'disabled' : ''} oninput="scanField(${i}, 'start', this.value)" /></label>
+              <label class="narrow">端口<input type="number" value="${c.port || ''}" placeholder="?" ${done ? 'disabled' : ''} oninput="scanField(${i}, 'port', this.value)" /></label>
+            </div>
+            <details class="scan-why"><summary>为什么这么猜</summary><ul>${c.why.map(w => `<li>${escapeHtml(w)}</li>`).join('')}</ul></details>
+          </div>
+        </div>`;
+      }).join('');
+      syncScanButton();
+    }
+    async function importScan() {
+      const picked = scanRows.filter(r => r.picked && !r.existing_id);
+      if (!picked.length) return;
+      const items = picked.map(c => ({
+        id: c.id, name: c.name, root: c.root, start: c.start, stop: c.stop || null,
+        port: c.port || null, health_url: c.health_url || null, login_url: c.login_url || null,
+        node: c.node || null, java: c.java || null, background: c.background,
+        enabled: c.needs_tomcat ? false : null,
+        reason: c.needs_tomcat ? 'Tomcat WAR：先填 Tomcat 安装目录（tomcat 字段）再启用' : null,
+      }));
+      try {
+        const data = await postJson('/api/scan/import', { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items }) });
+        const msg = [`已添加 ${data.added.length} 个项目`].concat(data.skipped.map(s => `跳过 ${s.id}：${s.reason}`));
+        closeScanModal();
+        if (data.skipped.length) alert(msg.join('\n'));
+        fetchProjects();
+      } catch (e) {
+        alert('添加失败：' + e.message);
+      }
+    }
     let currentLogId = null;
     let lastProjects = [];
     const busyIds = {};
@@ -795,7 +968,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       const grid = document.getElementById('projectGrid');
       renderFilters(projects);
       if (!projects.length) {
-        grid.innerHTML = '<div class="empty"><strong>还没有项目</strong><span>先新增一个本机项目，填好目录、启动命令和端口。</span><button class="btn-primary" onclick="openAddModal()">新增项目</button></div>';
+        grid.innerHTML = '<div class="empty"><strong>还没有项目</strong><span>选一个放代码的目录（比如 ~/code），自动认出里面的 Spring Boot、Vite、Vue、Next 等项目；也可以手动新增。</span><div class="empty-actions"><button class="btn-primary" onclick="openScanModal()">扫描一个目录</button><button class="btn-secondary" onclick="openAddModal()">手动新增</button></div></div>';
         return;
       }
       const visible = projects.filter(p => matchesQuery(p, query) && matchesStatus(p, statusFilter));

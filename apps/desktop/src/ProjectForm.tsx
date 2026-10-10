@@ -178,7 +178,7 @@ export function ProjectForm({
                 value={form.id}
                 readOnly={isEditing}
                 disabled={isEditing}
-                placeholder="英文标识，如 legacy_app"
+                placeholder="英文标识，如 my_api"
                 onChange={(e) => handleChange("id", e.target.value)}
                 className={errors.id ? "invalid" : ""}
               />

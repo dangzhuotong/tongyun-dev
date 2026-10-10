@@ -12,7 +12,8 @@ static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn temp_dir(tag: &str) -> PathBuf {
     let count = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("tongyun_it_{tag}_{}_{}", std::process::id(), count));
+    let dir =
+        std::env::temp_dir().join(format!("tongyun_it_{tag}_{}_{}", std::process::id(), count));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("logs")).unwrap();
     dir
@@ -303,7 +304,10 @@ log_dir = "{d}/logs"
     let stop_st = loaded.stop("worker").unwrap();
     assert_eq!(stop_st.state, tongyun_dev_core::LifeState::Stopped);
 
-    assert!(!is_process_alive(parent_pid), "parent pid {parent_pid} must be gone");
+    assert!(
+        !is_process_alive(parent_pid),
+        "parent pid {parent_pid} must be gone"
+    );
     for child in &group_pids {
         assert!(
             !is_process_alive(*child),
@@ -356,7 +360,10 @@ log_dir = "{d}/logs"
     let stop_st = loaded.stop("trapped").unwrap();
     assert_eq!(stop_st.state, tongyun_dev_core::LifeState::Stopped);
 
-    assert!(!is_process_alive(parent_pid), "parent pid {parent_pid} must be killed");
+    assert!(
+        !is_process_alive(parent_pid),
+        "parent pid {parent_pid} must be killed"
+    );
     for child in &group_pids {
         assert!(
             !is_process_alive(*child),

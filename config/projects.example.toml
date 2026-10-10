@@ -1,0 +1,42 @@
+# tongyun-dev 示例配置（虚构项目，仅作参考）。
+#
+# 真实配置不放仓库：默认在 ~/.config/tongyun-dev/projects.toml。
+# 最快的办法是让 App 自己找：
+#   tongyun-dev scan ~/code --apply        # CLI
+#   桌面 App / 网页控制台 →「扫描目录…」     # 勾选后写进你的配置
+# 字段说明见 config/projects.template.toml 和 docs/development.md。
+
+# Spring Boot 后端（Maven），Java 17，后台运行。
+[projects.demo_api]
+name = "Demo API"
+root = "~/code/demo/demo-api"
+port = 8081
+background = true
+java = "17"
+health_url = "http://127.0.0.1:8081/actuator/health"
+start = ["bash", "-c", "exec mvn spring-boot:run"]
+
+# Vite 前端（pnpm），Node 20。pnpm 直接带端口参数，不要写 `--`。
+[projects.demo_web]
+name = "Demo Web"
+root = "~/code/demo/demo-web"
+port = 5173
+background = true
+node = "20"
+health_url = "http://127.0.0.1:5173/"
+start = ["bash", "-c", "exec pnpm dev --port 5173 --host 127.0.0.1"]
+
+# 老式 Tomcat WAR 项目：写 tomcat 和 stop。填好路径后把 enabled 改成 true。
+[projects.demo_legacy]
+name = "Demo Legacy (Tomcat)"
+enabled = false
+reason = "示例：先在本机装好 Tomcat 并改 tomcat / root 路径"
+root = "~/code/demo/demo-legacy"
+java = "8"
+tomcat = "~/opt/tomcat-9"
+start = ["bash", "{{root}}/scripts/start.sh"]
+stop = ["bash", "{{tomcat}}/bin/catalina.sh", "stop", "15", "-force"]
+log_file = "{{log_dir}}/demo_legacy_catalina.out"
+pid_file = "{{log_dir}}/demo_legacy_tomcat.pid"
+port = 8080
+login_url = "http://127.0.0.1:8080/demo/login.html"

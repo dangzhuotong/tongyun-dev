@@ -94,8 +94,8 @@ describe("validateProjectForm (项目表单校验)", () => {
 
 describe("buildEditRequest (只提交改过的字段)", () => {
   const base: EditBaseline = {
-    name: "legacy_app",
-    root: "~/code/demo",
+    name: "my_api",
+    root: "~/code/my-api",
     start: "set -e\n./start.sh\n",
     start_editable: true,
     stop: "",
@@ -111,7 +111,7 @@ describe("buildEditRequest (只提交改过的字段)", () => {
     start_timeout_secs: null,
   };
   const form = (over: Partial<ProjectFormData> = {}): ProjectFormData => ({
-    id: "legacy_app",
+    id: "my_api",
     name: base.name,
     root: base.root,
     start: base.start,

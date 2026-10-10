@@ -16,5 +16,6 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tongyun-dev-core = { path = "../tongyun-dev-core" }

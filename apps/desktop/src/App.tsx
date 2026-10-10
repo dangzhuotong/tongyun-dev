@@ -4,6 +4,7 @@ import type { ConfigInfo, LogTail, ProjectDetail, ProjectList, Status } from "./
 import { LogPanel } from "./LogPanel";
 import { stateShortLabel } from "./logFormat";
 import { ProjectForm } from "./ProjectForm";
+import { ScanDialog } from "./ScanDialog";
 import { countByFilter, filterProjects, STATUS_FILTERS, type StatusFilter } from "./projectFilter";
 import logoUrl from "./assets/logo.svg";
 import {
@@ -48,6 +49,7 @@ export function App() {
     detail: ProjectDetail | null;
   }>({ open: false, mode: "create", detail: null });
 
+  const [scanOpen, setScanOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [menu, setMenu] = useState<"" | "settings" | "more">("");
@@ -123,9 +125,7 @@ export function App() {
       setMissingConfig(false);
       setSelected((prev) => {
         if (prev && list.projects.some((p) => p.id === prev)) return prev;
-        const preferred =
-          list.projects.find((row) => row.enabled && row.id === "legacy_app") ??
-          list.projects.find((row) => row.enabled);
+        const preferred = list.projects.find((row) => row.enabled);
         return preferred?.id ?? "";
       });
     } catch (err: unknown) {
@@ -220,6 +220,22 @@ export function App() {
     } catch (err: unknown) {
       setError(String(err));
     }
+  }
+
+  async function handleOpenScan() {
+    setError("");
+    if (missingConfig) {
+      // First run: create ~/.config/tongyun-dev/projects.toml so the scan has somewhere to write.
+      try {
+        const info = await invoke<ConfigInfo>("create_default_config");
+        setConfigInfo(info);
+        await loadProjects();
+      } catch (err: unknown) {
+        setError(String(err));
+        return;
+      }
+    }
+    setScanOpen(true);
   }
 
   function handleOpenCreate() {
@@ -581,8 +597,11 @@ export function App() {
         {projects && projectList.length === 0 && (
           <div className="sidebar-empty">
             <p>还没有项目</p>
-            <button type="button" className="btn btn-secondary btn-sm" onClick={handleOpenCreate}>
-              <PlusIcon /> 新增项目
+            <button type="button" className="btn btn-primary btn-sm" onClick={handleOpenScan}>
+              <SearchIcon /> 扫描目录…
+            </button>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={handleOpenCreate}>
+              <PlusIcon /> 手动新增
             </button>
           </div>
         )}
@@ -599,6 +618,15 @@ export function App() {
         <div className="sidebar-footer">
           <button type="button" className="btn btn-secondary btn-block" disabled={missingConfig} onClick={handleOpenCreate}>
             <PlusIcon /> 新增项目
+          </button>
+          <button
+            type="button"
+            className="btn icon-btn"
+            onClick={handleOpenScan}
+            title="扫描目录：自动找出项目"
+            aria-label="扫描目录"
+          >
+            <SearchIcon />
           </button>
           <div className="menu-anchor">
             <button
@@ -663,14 +691,19 @@ export function App() {
         {missingConfig ? (
           <div className="empty-config">
             <img src={logoUrl} alt="" width={56} height={64} />
-            <h2>还没有项目配置</h2>
-            <p className="empty-desc">选一个已有的 projects.toml，或者在默认位置新建一份：</p>
+            <h2>还没有项目</h2>
+            <p className="empty-desc">
+              选一个放代码的目录，自动认出里面的项目；配置会写到：
+            </p>
             <p className="config-default-path">
               <code>{configInfo?.default_path ?? "~/.config/tongyun-dev/projects.toml"}</code>
             </p>
             <div className="actions">
-              <button type="button" className="btn btn-primary" onClick={handleCreateDefault}>
-                新建默认配置
+              <button type="button" className="btn btn-primary" onClick={handleOpenScan}>
+                <SearchIcon /> 扫描一个目录
+              </button>
+              <button type="button" className="btn btn-secondary" onClick={handleCreateDefault}>
+                新建空配置
               </button>
               <button type="button" className="btn btn-secondary" onClick={handlePickConfig}>
                 选择配置文件…
@@ -681,8 +714,27 @@ export function App() {
         ) : !current ? (
           <div className="empty-config">
             <img src={logoUrl} alt="" width={56} height={64} />
-            <h2>{projects ? "选一个项目" : "正在读取…"}</h2>
-            {projects && <p className="empty-desc">在左边选一个项目，或者新增一个。</p>}
+            {projects && projects.projects.length === 0 ? (
+              <>
+                <h2>还没有项目</h2>
+                <p className="empty-desc">
+                  扫描一个目录（比如 ~/code），自动认出 Spring Boot、Vite、Vue、Next 等项目；也可以手动新增。
+                </p>
+                <div className="actions empty-actions">
+                  <button type="button" className="btn btn-primary" onClick={handleOpenScan}>
+                    <SearchIcon /> 扫描一个目录
+                  </button>
+                  <button type="button" className="btn btn-secondary" onClick={handleOpenCreate}>
+                    <PlusIcon /> 手动新增
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h2>{projects ? "选一个项目" : "正在读取…"}</h2>
+                {projects && <p className="empty-desc">在左边选一个项目，或者新增一个。</p>}
+              </>
+            )}
             {error && <p className="banner danger">{error}</p>}
           </div>
         ) : (
@@ -928,6 +980,15 @@ export function App() {
           </>
         )}
       </main>
+      {scanOpen && (
+        <ScanDialog
+          onClose={() => setScanOpen(false)}
+          onImported={async (firstId) => {
+            await loadProjects();
+            if (firstId) setSelected(firstId);
+          }}
+        />
+      )}
       {formModal.open && (
         <ProjectForm
           mode={formModal.mode}

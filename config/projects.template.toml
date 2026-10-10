@@ -1,4 +1,8 @@
-# tongyun-dev 项目配置模板
+# tongyun-dev 项目配置
+#
+# 还没有项目？在 App 里点「扫描目录…」，或运行 `tongyun-dev scan ~/code --apply`，
+# 会自动认出 Spring Boot / Tomcat / Vite / Vue / Next / Nuxt / Python 等项目并写到这里。
+# 也可以照 config/projects.example.toml 手写。
 #
 # 字段说明：
 #   name        显示名（例如 "示例应用"）
@@ -12,7 +16,7 @@
 #   login_url   就绪探针 URL（可选；HTTP 200/301/302 视为就绪）
 #   health_url  健康探针 URL（可选；未配置 login_url 时使用）
 #   java        Java 版本（可选，如 "8"、"17"）。App 会自动找到对应版本并设置 JAVA_HOME / PATH，不需要 sdkman/fnm 命令。
-#   node        Node 版本（可选，如 "22"）。App 会自动找到对应版本并设置 JAVA_HOME / PATH，不需要 sdkman/fnm 命令。
+#   node        Node 版本（可选，如 "22"）。App 会自动找到对应版本并设置 PATH，不需要 sdkman/fnm 命令。
 #   java_home / node_home  可选，显式指定安装目录（Windows 或特殊安装时用）
 #   shell       可选，单条命令用哪个 shell 执行：bash（macOS/Linux 默认）、sh、cmd（Windows 默认）、powershell
 #   start_windows / stop_windows  可选，Windows 上优先使用的启动 / 停止命令数组
@@ -21,10 +25,4 @@
 #   auto_install  可选，缺省 true。根目录有 package.json 但缺 node_modules 时，启动前先自动装依赖（按锁文件选 pnpm / yarn / npm）；false 时只提示「依赖未安装」
 #   前端端口参数：pnpm 直接写 ["pnpm", "dev", "--port", "3000"]（不要加 `--`）；npm 写 ["npm", "run", "dev", "--", "--port", "3000"]
 
-[projects.example_app]
-name = "示例项目"
-root = "~/code/example-app"
-port = 3000
-enabled = false
-reason = "示例项目配置模板，请修改 root 与 start 后启用"
-start = ["pnpm", "dev", "--port", "3000", "--host", "127.0.0.1"]
+[projects]

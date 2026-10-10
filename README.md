@@ -1,194 +1,116 @@
 # tongyun-dev
 
-本地开发机控制台：注册项目、启停、看状态、跟日志。对标 IDEA 运行面板，**人用终端，AI 读 JSON 状态和日志**。
+本地开发机控制台：把电脑上的各个开发项目（Spring Boot、Tomcat WAR、Vite / Vue / React、Next、Nuxt、Python……）登记到一处，一键启停、看状态、跟日志。对标 IDEA 的运行面板，**人用桌面 App 或网页，AI 读 JSON 状态和日志**。
 
-- 仓库：私有
-- CLI、网页控制台（:9099）与桌面壳共用 `tongyun-dev-core`。桌面壳是 Tauri 2 + React，见 [docs/decisions/0001-cli-first.md](docs/decisions/0001-cli-first.md)
-- 已注册本机 acme 产品线：`legacy_app`、示例考试、AP、示例课管。私有 Maven 和 `acme-job-sdk` 被挡住的两项在桌面列表里变灰，并带上原因。
+- CLI、网页控制台（:9099）与桌面 App（Tauri 2 + React）共用同一个 Rust core：`crates/tongyun-dev-core`
+- 项目不用手写：**扫描一个目录**，自动认出里面的项目、端口、启动命令和 Java / Node 版本
+- 你的项目清单只存在本机 `~/.config/tongyun-dev/projects.toml`，不进仓库
 
 ## 三个入口，一个 core
 
-所有启停 / 状态 / 日志 / 注册逻辑都在 `crates/tongyun-dev-core`，三种入口调同一套代码、读同一份 `config/projects.toml`：
-
 | 入口 | 怎么开 | 适合 |
 | --- | --- | --- |
-| 网页控制台 | `cargo run -p tongyun-dev-cli`（无参数）或 `-- ui`，默认 `http://127.0.0.1:9099` | 浏览器里点，支持注册/移除项目 |
-| 桌面窗口 | `apps/desktop`（Tauri 2），见下文「桌面窗口（Mac）」 | 常驻窗口，跟日志 |
+| 桌面 App | `apps/desktop`（Tauri 2），见下文「桌面 App」 | 常驻窗口，跟日志 |
+| 网页控制台 | `tongyun-dev`（无参数）或 `tongyun-dev ui`，默认 `http://127.0.0.1:9099` | 浏览器里点 |
 | CLI | `tongyun-dev <命令>`，`--json` 给 Agent | 终端、脚本、AI |
 
-### 网页控制台（:9099）
+## 快速开始
+
+需要 Git 和 Rust 1.85+（用 [rustup](https://rustup.rs) 装 stable）。macOS / Linux 自带的 `bash`、`curl`、`tail`、`lsof`、`ps` 即可。
 
 ```bash
-cargo run -p tongyun-dev-cli                      # 无参数 = ui，自动打开浏览器
-cargo run -p tongyun-dev-cli -- ui --port 9100 --no-open
-bash scripts/run.sh                                # 同上，包了一层 cargo run
-```
-
-只监听 `127.0.0.1`；9099 被占时自动往后找（最多 +20）。卡片每 3 秒刷新：运行状态、pid、端口、探针、根目录；停用项变灰并显示原因、启动按钮不可点；端口被别的进程占用时显示占用者；声明了 `node` / `java` 的项目显示版本。按钮：启动 / 停止（进行中显示「启动中…」并锁定）、打开页面、打开目录、看日志、移除注册。「＋ 注册项目」可填 Node / Java 版本。每个请求都重新读配置，所以和 CLI、桌面窗口的改动互相可见。只接受本机 Host 和同源请求，别的网页不能借浏览器调它。
-
-## Mac 快速开始
-
-需要 macOS、Git、Rust 1.85+（用 [rustup](https://rustup.rs) 装 stable，提供 `cargo`）。`bash`、`curl`、`tail`、`lsof`、`ps` 用系统自带的即可。在已经能跑 `java -version` 的终端里执行，CLI 会继承当前环境里的 `PATH` / `JAVA_HOME`。
-
-```bash
-git clone git@github.com:dangzhuotong/tongyun-dev.git
-cd tongyun-dev
+git clone <this repo> tongyun-dev && cd tongyun-dev
 cargo build -p tongyun-dev-cli
-cargo test -p tongyun-dev-core -p tongyun-dev-cli
+./target/debug/tongyun-dev scan ~/code          # 先看看能找到哪些项目（只读）
+./target/debug/tongyun-dev scan ~/code --apply  # 写进 ~/.config/tongyun-dev/projects.toml
+./target/debug/tongyun-dev                      # 打开网页控制台
 ```
 
-`config/projects.toml` 里 `legacy_app` 的默认路径（只写路径，不要写密码、Token、数据库口令）：
+第一次运行还没有配置时，`scan --apply`、桌面 App 的「扫描一个目录」都会先在 `~/.config/tongyun-dev/projects.toml` 新建一份空配置。
 
-| 项 | 路径 |
-| --- | --- |
-| 项目根 | `~/code/acme/legacy-app` |
-| 启动脚本 | `~/code/acme/legacy-app/scripts/start-legacy.sh` |
-| 停止 | `~/opt/tomcat-9/bin/catalina.sh stop 15 -force` |
-| 日志 | `~/.tongyun-dev/logs/legacy_app_catalina.out` |
-| PID | `~/.tongyun-dev/logs/legacy_app_tomcat.pid` |
+## 扫描目录
+
+`tongyun-dev scan <目录> [--depth N] [--apply] [--json]`，桌面 App 和网页控制台里是「扫描目录…」按钮（App 可以用系统对话框选目录）。
+
+- 默认往下看 3 层（`--depth`，最多 8）；跳过 `node_modules`、`.git` 等隐藏目录、`target`、`dist`、`build`、`vendor` 等。
+- 每个结果带类型、把握（high / medium / low）、建议的 id / 名称 / 启动命令 / 端口 / Java / Node 版本，以及「为什么这么猜」。
+- 已经登记过的目录（按 root 判断）标成「已注册」，不会重复添加，也不会改动已有项目；建议的 id 不会和已有 id 冲突。
+- 写配置用 toml_edit，原有注释和格式都保留。
+
+| 类型 | 怎么认 | 启动命令 | 端口 / 版本从哪来 |
+| --- | --- | --- | --- |
+| Spring Boot（Maven） | `pom.xml` 里有 spring-boot | `mvn spring-boot:run`（有 `mvnw` 用 `./mvnw`） | `src/main/resources/application*.yml/properties` 的 `server.port`，默认 8080；Java 来自 `.sdkmanrc` / `.java-version` / `java.version` / `maven.compiler.*` |
+| Spring Boot（Gradle） | `build.gradle(.kts)` 用了 `org.springframework.boot` | `./gradlew bootRun` | 同上；Java 来自 toolchain / `sourceCompatibility` |
+| Tomcat WAR | `pom.xml` `<packaging>war</packaging>` | `mvn package` → 拷 war 到 `{{tomcat}}/webapps` → `catalina.sh run` | 默认 8080；需要填 Tomcat 目录，不填就先加成停用 |
+| Vite（Vue / React） | 依赖里有 `vite` | `pnpm dev` / `yarn dev` / `npm run dev`（按锁文件） | 脚本里的 `--port` / `-p`，或 `vite.config.*` 的 `server.port`，默认 5173；Node 来自 `.nvmrc` / `.node-version` / `engines.node` |
+| Vue CLI | `@vue/cli-service` | `… serve` | 脚本或 `vue.config.js` 的 `devServer.port`，默认 8080 |
+| Next.js / Nuxt | `next` / `nuxt` | `… dev` | `-p` / `--port` 或 `nuxt.config`，默认 3000 |
+| React（CRA）、普通 Node | `react-scripts` / 只有 `start` 脚本 | `npm start` 等 | 脚本里的端口；找不到要手动填 |
+| Django / FastAPI / Flask | `manage.py`、依赖里的 fastapi / uvicorn / flask | `runserver` / `uvicorn` / `flask run`（有 `.venv` 就用它） | 8000 / 8000 / 5000 |
+
+Maven 父工程（有 `<modules>`）、npm workspaces 根、Gradle 多项目根只当容器，继续往下找子项目。
+
+## CLI
 
 ```bash
-cargo run -p tongyun-dev-cli -- status legacy_app --json
-cargo run -p tongyun-dev-cli -- start legacy_app
-cargo run -p tongyun-dev-cli -- logs legacy_app
-cargo run -p tongyun-dev-cli -- logs legacy_app --follow
-cargo run -p tongyun-dev-cli -- stop legacy_app
-cargo run -p tongyun-dev-cli -- list
+tongyun-dev list [--json]
+tongyun-dev status [id] [--json]       # 不带 id：全部项目
+tongyun-dev start <id> [--open]        # 等到端口通 / 探针成功；--open 就绪后打开页面
+tongyun-dev stop <id>
+tongyun-dev logs <id> [--follow] [--lines N]
+tongyun-dev open <id> [--dir]          # 打开页面（login_url / health_url / http://127.0.0.1:<port>/）或目录
+tongyun-dev install <id>               # 装前端依赖（按锁文件选 pnpm / yarn / npm）
+tongyun-dev scan <dir> [--depth N] [--apply] [--json]
+tongyun-dev add my_web --root ~/code/my-web --start "pnpm dev" --port 5173 --node 20
+tongyun-dev add my_api --root ~/code/my-api --start "mvn spring-boot:run" --port 8081 --java 17
+tongyun-dev remove my_web              # 只删登记，不动项目文件
+tongyun-dev ui [--port 9099] [--no-open]
 ```
 
-编译完成后也可以：
+`status --json` 稳定包含 `running`、`state`（`stopped` / `installing` / `starting` / `port_open` / `ready` / `failed`）、`elapsed_secs`、`failure`、`pid`、`port`、`login_probe`、`log_path`、`port_conflict`、`port_holder`。
 
-```bash
-./target/debug/tongyun-dev status legacy_app --json
-./target/debug/tongyun-dev start legacy_app
-./target/debug/tongyun-dev stop legacy_app
-./target/debug/tongyun-dev logs legacy_app --follow
-```
+配置查找顺序：1) `--config`；2) 环境变量 `TONGYUN_DEV_CONFIG`；3) `~/.config/tongyun-dev/settings.json` 记住的路径（App 里「换一个配置文件」）；4) `~/.config/tongyun-dev/projects.toml`；5) 从当前目录往上找 `config/projects.toml`（只给开发调试用，已被 `.gitignore`）。
 
-配置查找顺序：1) 显式 `--config` 参数；2) 环境变量 `TONGYUN_DEV_CONFIG`；3) `~/.config/tongyun-dev/settings.json` 记住的路径；4) `~/.config/tongyun-dev/projects.toml`；5) 从当前目录往上找 `config/projects.toml`。
+配置格式见 [config/projects.example.toml](config/projects.example.toml)（虚构示例）和 [docs/development.md](docs/development.md)。
 
-不在仓库根目录时，可指定配置（`~` 可用）：
+**前端依赖**：根目录有 `package.json` 但没有 `node_modules` 时，`start` 会先按锁文件装依赖（状态「安装依赖中」），装好接着启动。不想自动装就写 `auto_install = false`。
 
-```bash
-export TONGYUN_DEV_CONFIG="$PWD/config/projects.toml"
-./target/debug/tongyun-dev --config ~/path/to/tongyun-dev/config/projects.toml status legacy_app --json
-```
+**端口参数**：pnpm 直接带参数（`pnpm dev --port 5173`）；不要写 `pnpm dev -- --port`，旧配置里这样写的启动时会自动去掉 `--`。npm 才需要 `npm run dev -- --port 5173`。
 
-`legacy_app` 的 `start` 会先跑启动脚本，再等到登录页 `http://127.0.0.1:8080/legacy_app/admin/login.html` 返回 200、301 或 302。默认最多再等 180 秒，可以用 `TONGYUN_DEV_START_TIMEOUT`（秒）改。`status --json` 稳定包含 `running`、`pid`、`port`、`login_probe`、`log_path`（展开后的绝对路径）。
+## Java / Node 版本
 
-其他命令：
+项目里写 `java = "17"` / `node = "20"`，启动前由 core 直接找到对应 JDK / Node，注入 `JAVA_HOME` 和 `PATH`，不 source sdkman / fnm 的初始化脚本：
 
-```bash
-tongyun-dev status                    # 不带 id：全部项目
-tongyun-dev start legacy_app --open      # 就绪后用浏览器打开登录页
-tongyun-dev open legacy_app              # 打开页面（login_url / health_url / http://127.0.0.1:<port>/）
-tongyun-dev open legacy_app --dir        # 打开项目目录
-tongyun-dev add my_web --root ~/code/my_web --start "pnpm dev" --port 5173 --node 22
-tongyun-dev add my_api --root ~/code/my_api --start "mvn spring-boot:run" --port 8090 --java 17.0.10-tem
-tongyun-dev remove my_web             # 只删注册，不动项目文件
-tongyun-dev install my_web            # 装前端依赖（按锁文件选 pnpm / yarn / npm），输出写进项目日志
-```
+- Java：`java_home` 显式路径优先；macOS / Linux 找 `~/.sdkman/candidates/java/<版本>*`（`1.8` 视同 `8`）和 `/Library/Java/JavaVirtualMachines`；Windows 找 `Program Files` 下的 Zulu / Eclipse Adoptium / Java。
+- Node：`node_home` 优先；macOS / Linux 找 fnm（`FNM_DIR`、`~/.local/share/fnm`、`~/Library/Application Support/fnm`）和 nvm；Windows 找 fnm 和 nvm-windows。
+- 找不到就直接提示「缺 Java 8」这类原因，不会拿错的版本硬跑。
+- GUI App 的 PATH 很短，core 会补上常见目录（`/opt/homebrew/bin`、`/usr/local/bin`、sdkman 的 maven / gradle、`~/.local/bin` 等）。
+- 项目自带的启动脚本不要 `source sdkman-init.sh`（在 `set -u` 下会报 `SDKMAN_CANDIDATES_API: unbound variable`），直接调用 `mvn` / `java` 即可。
 
-**前端依赖**：项目根目录有 `package.json` 但没有 `node_modules` 时，`start`（App、网页控制台、CLI 都一样）会先在项目目录跑一遍安装，状态显示「安装依赖中」，装好自动接着启动；装失败状态是「失败」并写明原因（例如 `pnpm install 退出码 1`），输出都在项目日志里。包管理器按锁文件选：`pnpm-lock.yaml` → `pnpm install`，`yarn.lock` → `yarn install`，其它 → `npm install`，Node 版本和启动时用的一样。不想自动装就给项目写 `auto_install = false`，这时启动会直接提示「依赖未安装（缺 node_modules）」，在 App 状态栏或 ⋯ 菜单点「安装依赖」。
+## 桌面 App
 
-**端口参数**：pnpm 直接带参数，`pnpm dev --port 5173 --host 127.0.0.1`；不要写 `pnpm dev -- --port`，pnpm 会把 `--` 原样传给 vite / vue-cli，后面的 `--port` 就失效了（旧配置里这样写的，启动时会自动去掉这个 `--`）。npm 才需要 `npm run dev -- --port 5173`。
-
-`add` 写入 `config/projects.toml` 时保留原有注释和其他项目的写法；id 已存在会拒绝（先 `remove`）。新加的项目默认后台运行（`background = true`，适合 `pnpm dev` / `mvn spring-boot:run` 这类不退出的命令；只有会自己退出的脚本才加 `--foreground`）。启动命令存成 `["bash", "-lc", "<命令>"]`；声明了 `--node` / `--java` 时存成 `["bash", "-c", ...]`，避免 login shell 重新初始化 fnm / sdkman 把版本切回去。`--login-url` 可选：填了就要求 HTTP 200/301/302 才算启动完成，不填则端口能连上即可。
-
-`list` 打印全部项目。`list --json` 每项仍有 `id`、`name`、`root`，并带 `enabled`、`port`、`reason`。停用项在文本模式多两列：`disabled` 和原因。
-
-| id | 端口 | 启用 |
-| --- | --- | --- |
-| `legacy_app` | 8080 | 是 |
-| `demo_exam` | 8034 | 是 |
-| `demo_exam_vue` | 5777 | 是 |
-| `demo_exam_student_vue` | 5999 | 是 |
-| `ap_docs-site` | 8888 | 是 |
-| `ap_docs-site_web` | 7888 | 是 |
-| `ap_admin_test_center` | 8110 | 是 |
-| `ops_class_admin_manager` | 8147 | 是 |
-| `ops_class_admin_web` | 8146 | 是 |
-| `ap_admin_test_center_vue` | — | 否，本机没有独立目录 |
-| `acme_system_ap_java_backend` | — | 否，私有 Maven 被挡住 |
-| `opsstudentmanageserver` | — | 否，`acme-job-sdk` 被挡住 |
-
-`04-papers`、`05-wechat`、`06-admin-misc` 里其余仓库也已登记，目前停用，原因是启动命令还没确认。
-
-路径和启动命令见 [config/projects.toml](config/projects.toml)，字段说明见 [docs/development.md](docs/development.md)。Spring / pnpm 在后台跑，日志默认在 `~/.tongyun-dev/logs/<id>.out`。
-
-### 工具链版本与环境注入（node / java / toolchain）
-
-`tongyun-dev` 不再通过 `source sdkman-init.sh` 或 `fnm exec` / `bash -lc` 包装命令，而是由 `tongyun-dev-core` 在启动前直接定位 JDK / Node 并将 `JAVA_HOME` 和目标 `PATH` 直接注入子进程环境：
-
-- **Java 解析规则（`java = "<ver>"` 或 `java_home = "<path>"`）**：
-  - 若配置了显式 `java_home`，优先采用并校验 `bin/java`（Windows 为 `bin/java.exe`）。
-  - **macOS / Linux**：扫描 `<SDKMAN_DIR 或 ~/.sdkman>/candidates/java/` 目录下匹配版本目录（"8" 匹配 `8` / `8.*` 如 `8.0.504-zulu`；"17" 匹配 `17.*`；"1.8" 视同 "8"，跳过 `current` 链接，多个取版本最大者；支持 `Contents/Home` 结构）。macOS 额外搜索 `/Library/Java/JavaVirtualMachines/*/Contents/Home`。
-  - **Windows**：扫描 `Program Files` 下的 `Zulu\zulu-<ver>*`、`Eclipse Adoptium\jdk-<ver>*`、`Java\jdk1.8*`（8）或 `Java\jdk-<ver>*`。
-- **Node 解析规则（`node = "<ver>"` 或 `node_home = "<path>"`）**：
-  - 若配置了显式 `node_home`，优先采用。
-  - **macOS / Linux**：优先搜索 fnm（候选 `FNM_DIR`、`~/.local/share/fnm`、`~/Library/Application Support/fnm`、`~/.fnm` 下 `node-versions/v<ver>*/installation/bin`）；其次搜索 nvm（`<NVM_DIR 或 ~/.nvm>/versions/node/v<ver>*/bin`）。
-  - **Windows**：搜索 `%FNM_DIR%` 或 `%APPDATA%\fnm\node-versions\v<ver>*\installation`；以及 nvm-windows（`%NVM_HOME%\v<ver>*`）。
-- **没声明 java 时**：macOS / Linux 若存在 `~/.sdkman/candidates/java/current`，用它作为 `JAVA_HOME`（等同以前 source sdkman-init 后的默认 JDK），避免 GUI App 用到 `/usr/bin/java` 占位程序。
-- **PATH 注入与常用目录补齐**：
-  - 子进程 `PATH` 最前端依次放入：Java bin、Node bin。
-  - macOS / Linux 环境还会将存在的高频工具目录自动补入 `PATH`（不重复）：`/opt/homebrew/bin`、`/usr/local/bin`、`<sdkman>/candidates/maven/current/bin`、`<sdkman>/candidates/gradle/current/bin`、`~/.local/bin`、`~/Library/pnpm`（macOS），避免 macOS 应用程序环境（GUI App）PATH 过短找不到 `mvn` / `pnpm`。
-- **Windows 支持字段**：
-  - `java_home`、`node_home`：自定义 JDK / Node 路径。
-  - `shell`：单条命令执行时的解释器，支持 `"cmd"`（默认，`cmd /C <cmd>`）或 `"powershell"`（`powershell -NoProfile -ExecutionPolicy Bypass -Command <cmd>`）。
-  - `start_windows` / `stop_windows`：Windows 平台优先采用的启动/停止命令数组。
-- **重要提示：外部启动脚本不要 source sdkman-init.sh**：
-  - 外部脚本（例如 `legacy_app` 的 `scripts/start-legacy.sh`）若开启 `set -u`（`set -euo pipefail`），`source sdkman-init.sh` 会因环境变量未定义报 `SDKMAN_CANDIDATES_API: unbound variable` 导致失败。App 已统一注入 `JAVA_HOME` 和 `PATH`，外部脚本直接执行 `mvn` / `catalina.sh` / `java` 即可。
-
-`add` 用 `--node` / `--java` / `--java-home` / `--node-home` / `--shell`写入配置。桌面 App 和网页控制台的项目列表会展示声明的版本。
-
-验收清单见 [docs/development.md](docs/development.md)。
-
-## 桌面窗口（Mac）
-
-需要 Node.js 20+ 和 Xcode Command Line Tools。窗口调用同一套 Rust core：项目列表（停用项变灰并显示原因）、启动、停止、刷新状态（`running` / `pid` / `port` / `login_probe`），并跟随该项目日志。启动和停止结束前按钮保持加载状态。端口被其他进程占用时会警告。可以一键打开日志文件和登录页（或 health URL）。
-
-开发调试：
+需要 Node.js 20+；macOS 还要 Xcode Command Line Tools；桌面壳需要 Rust 1.88+（Tauri 依赖要求）。
 
 ```bash
 cd apps/desktop
 npm install
-npm run tauri dev
+npm run tauri dev      # 开发
+npm run tauri build    # 打包
 ```
 
-打包并安装 `.app`（在 `apps/desktop` 目录）：
-
-```bash
-npm install
-npm run tauri build
-```
-
-`npm run tauri build` 会先编前端，再编 release。产物：
-
-| 产物 | 路径 |
-| --- | --- |
-| 应用 | `apps/desktop/src-tauri/target/release/bundle/macos/tongyun-dev.app` |
-| 磁盘镜像 | `apps/desktop/src-tauri/target/release/bundle/dmg/` 里的 `.dmg`（文件名带版本和架构） |
-
-装到「应用程序」后打开：
-
-```bash
-cp -R apps/desktop/src-tauri/target/release/bundle/macos/tongyun-dev.app /Applications/
-open /Applications/tongyun-dev.app
-```
-
-也可以打开 `.dmg`，把 `tongyun-dev` 拖进「应用程序」。若 Gatekeeper 拦住：系统设置 → 隐私与安全性 → 仍要打开。
-
-桌面壳需要 Rust 1.88+（Tauri 依赖要求），CLI / core 1.85 即可。
-
-开发时在仓库里运行，窗口会从当前目录往上找到 `config/projects.toml`。也可以先 `export TONGYUN_DEV_CONFIG=/absolute/path/to/config/projects.toml`。不要把密钥写进仓库。
+产物在 `apps/desktop/src-tauri/target/release/bundle/`（macOS：`macos/tongyun-dev.app` 和 `dmg/*.dmg`）。安装包没有 Apple 签名，第一次打开如被拦：系统设置 → 隐私与安全性 → 仍要打开。
 
 ## 平台
 
-工具链路径解析与环境变量注入（`JAVA_HOME` / `PATH`、`shell_argv`、`start_windows`）已支持 macOS、Linux 和 Windows。进程停止与状态查询目前仍只支持 Unix（core 依赖 `kill`、`ps`、`lsof`、`tail`），Windows 上的进程停止与状态目前仍未实现。`scripts/run.ps1` 保留用于启动控制台。
+工具链解析和环境注入支持 macOS、Linux、Windows。进程停止与状态查询目前只支持 Unix（依赖 `kill`、`ps`、`lsof`、`tail`）。
 
 ## 文档
 
 - [AGENTS.md](AGENTS.md) — AI 开发规则
 - [docs/prd.md](docs/prd.md) — 产品范围
 - [docs/plan.md](docs/plan.md) — 排期
-- [docs/development.md](docs/development.md) — 命令与验收
+- [docs/development.md](docs/development.md) — 命令、配置字段与验收
+
+## License
+
+MIT

@@ -105,6 +105,8 @@ export type NewProjectReq = {
   start_timeout_secs?: number | null;
   stop_grace_secs?: number | null;
   auto_install?: boolean;
+  background?: boolean | null;
+  tomcat?: string | null;
 };
 
 export type ProjectEditReq = {
@@ -123,4 +125,41 @@ export type ProjectEditReq = {
   start_timeout_secs?: number | null;
   stop_grace_secs?: number | null;
   auto_install?: boolean;
+};
+
+export type Confidence = "high" | "medium" | "low";
+
+/** One project found by `scan_dir` (mirrors tongyun_dev_core::scan::Candidate). */
+export type ScanCandidate = {
+  id: string;
+  name: string;
+  root: string;
+  kind: string;
+  label: string;
+  confidence: Confidence;
+  start: string;
+  stop: string | null;
+  port: number;
+  port_guessed: boolean;
+  health_url: string | null;
+  login_url: string | null;
+  java: string | null;
+  node: string | null;
+  background: boolean;
+  needs_tomcat: boolean;
+  why: string[];
+  existing_id: string | null;
+};
+
+export type ScanReport = {
+  root: string;
+  depth: number;
+  dirs_visited: number;
+  truncated: boolean;
+  candidates: ScanCandidate[];
+};
+
+export type ImportReport = {
+  added: ProjectRow[];
+  skipped: { id: string; reason: string }[];
 };

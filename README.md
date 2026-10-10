@@ -109,16 +109,30 @@ tongyun-dev remove my_web             # 只删注册，不动项目文件
 
 路径和启动命令见 [config/projects.toml](config/projects.toml)，字段说明见 [docs/development.md](docs/development.md)。Spring / pnpm 在后台跑，日志默认在 `~/.tongyun-dev/logs/<id>.out`。
 
-### 工具链版本（node / java）
+### 工具链版本与环境注入（node / java / toolchain）
 
-在 `config/projects.toml` 中，每个项目可声明可选的 `node` 与 `java` 字段：
+`tongyun-dev` 不再通过 `source sdkman-init.sh` 或 `fnm exec` / `bash -lc` 包装命令，而是由 `tongyun-dev-core` 在启动前直接定位 JDK / Node 并将 `JAVA_HOME` 和目标 `PATH` 直接注入子进程环境：
 
-| 字段 | 示例 | 行为说明 |
-| --- | --- | --- |
-| `node` | `"20"` | CLI start 时在启动命令前加 `fnm exec --using=<v> --` 切换；未安装 `fnm` 时给出可读报错 |
-| `java` | `"17"` | CLI start 时经 `bash -lc` 运行 `sdk use java <v>` 切换；未安装 `sdkman` 时给出可读报错 |
+- **Java 解析规则（`java = "<ver>"` 或 `java_home = "<path>"`）**：
+  - 若配置了显式 `java_home`，优先采用并校验 `bin/java`（Windows 为 `bin/java.exe`）。
+  - **macOS / Linux**：扫描 `<SDKMAN_DIR 或 ~/.sdkman>/candidates/java/` 目录下匹配版本目录（"8" 匹配 `8` / `8.*` 如 `8.0.504-zulu`；"17" 匹配 `17.*`；"1.8" 视同 "8"，跳过 `current` 链接，多个取版本最大者；支持 `Contents/Home` 结构）。macOS 额外搜索 `/Library/Java/JavaVirtualMachines/*/Contents/Home`。
+  - **Windows**：扫描 `Program Files` 下的 `Zulu\zulu-<ver>*`、`Eclipse Adoptium\jdk-<ver>*`、`Java\jdk1.8*`（8）或 `Java\jdk-<ver>*`。
+- **Node 解析规则（`node = "<ver>"` 或 `node_home = "<path>"`）**：
+  - 若配置了显式 `node_home`，优先采用。
+  - **macOS / Linux**：优先搜索 fnm（候选 `FNM_DIR`、`~/.local/share/fnm`、`~/Library/Application Support/fnm`、`~/.fnm` 下 `node-versions/v<ver>*/installation/bin`）；其次搜索 nvm（`<NVM_DIR 或 ~/.nvm>/versions/node/v<ver>*/bin`）。
+  - **Windows**：搜索 `%FNM_DIR%` 或 `%APPDATA%\fnm\node-versions\v<ver>*\installation`；以及 nvm-windows（`%NVM_HOME%\v<ver>*`）。
+- **没声明 java 时**：macOS / Linux 若存在 `~/.sdkman/candidates/java/current`，用它作为 `JAVA_HOME`（等同以前 source sdkman-init 后的默认 JDK），避免 GUI App 用到 `/usr/bin/java` 占位程序。
+- **PATH 注入与常用目录补齐**：
+  - 子进程 `PATH` 最前端依次放入：Java bin、Node bin。
+  - macOS / Linux 环境还会将存在的高频工具目录自动补入 `PATH`（不重复）：`/opt/homebrew/bin`、`/usr/local/bin`、`<sdkman>/candidates/maven/current/bin`、`<sdkman>/candidates/gradle/current/bin`、`~/.local/bin`、`~/Library/pnpm`（macOS），避免 macOS 应用程序环境（GUI App）PATH 过短找不到 `mvn` / `pnpm`。
+- **Windows 支持字段**：
+  - `java_home`、`node_home`：自定义 JDK / Node 路径。
+  - `shell`：单条命令执行时的解释器，支持 `"cmd"`（默认，`cmd /C <cmd>`）或 `"powershell"`（`powershell -NoProfile -ExecutionPolicy Bypass -Command <cmd>`）。
+  - `start_windows` / `stop_windows`：Windows 平台优先采用的启动/停止命令数组。
+- **重要提示：外部启动脚本不要 source sdkman-init.sh**：
+  - 外部脚本（例如 `legacy_app` 的 `scripts/start-legacy.sh`）若开启 `set -u`（`set -euo pipefail`），`source sdkman-init.sh` 会因环境变量未定义报 `SDKMAN_CANDIDATES_API: unbound variable` 导致失败。App 已统一注入 `JAVA_HOME` 和 `PATH`，外部脚本直接执行 `mvn` / `catalina.sh` / `java` 即可。
 
-`add` 用 `--node` / `--java`（网页控制台表单同样有这两栏）写入这两个字段。桌面 App 和网页控制台的项目列表会展示声明的版本（如 `Node 20`、`Java 17`；未声明则不显示）。
+`add` 用 `--node` / `--java` / `--java-home` / `--node-home` / `--shell`写入配置。桌面 App 和网页控制台的项目列表会展示声明的版本。
 
 验收清单见 [docs/development.md](docs/development.md)。
 
@@ -163,7 +177,7 @@ open /Applications/tongyun-dev.app
 
 ## 平台
 
-目前只支持 macOS / Linux：core 用 `kill`、`ps`、`lsof`、`tail` 管进程。`scripts/run.ps1` 保留着，但 Windows 上启停和状态还不能用。
+工具链路径解析与环境变量注入（`JAVA_HOME` / `PATH`、`shell_argv`、`start_windows`）已支持 macOS、Linux 和 Windows。进程停止与状态查询目前仍只支持 Unix（core 依赖 `kill`、`ps`、`lsof`、`tail`），Windows 上的进程停止与状态目前仍未实现。`scripts/run.ps1` 保留用于启动控制台。
 
 ## 文档
 

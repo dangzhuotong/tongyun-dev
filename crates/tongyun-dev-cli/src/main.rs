@@ -83,12 +83,21 @@ enum Cmd {
         /// Log file (default ~/.tongyun-dev/logs/<id>.out)
         #[arg(long)]
         log_file: Option<String>,
-        /// Node version via fnm, e.g. 22
+        /// Node version, e.g. 22
         #[arg(long)]
         node: Option<String>,
-        /// Java version via sdkman, e.g. 17.0.10-tem
+        /// Java version, e.g. 17
         #[arg(long)]
         java: Option<String>,
+        /// Explicit JDK home directory
+        #[arg(long)]
+        java_home: Option<String>,
+        /// Explicit Node home or bin directory
+        #[arg(long)]
+        node_home: Option<String>,
+        /// Shell to run commands with (bash, sh, cmd, powershell)
+        #[arg(long)]
+        shell: Option<String>,
         /// Run the start command in the foreground (only for scripts that exit by themselves)
         #[arg(long)]
         foreground: bool,
@@ -213,6 +222,9 @@ fn main() -> Result<()> {
             log_file,
             node,
             java,
+            java_home,
+            node_home,
+            shell,
             foreground,
         } => {
             let row = loaded.add_project(NewProject {
@@ -227,6 +239,9 @@ fn main() -> Result<()> {
                 log_file,
                 node,
                 java,
+                java_home,
+                node_home,
+                shell,
                 background: Some(!foreground),
             })?;
             println!(
@@ -354,22 +369,9 @@ mod tests {
     fn delegates_command_assembly_to_core() {
         let cmd = vec!["pnpm".to_string(), "dev".to_string()];
         let assembled = tongyun_dev_core::assemble_start_cmd(&cmd, Some("20"), None);
-        assert_eq!(
-            assembled,
-            vec!["fnm", "exec", "--using=20", "--", "pnpm", "dev"]
-        );
+        assert_eq!(assembled, vec!["pnpm", "dev"]);
 
         let assembled_java = tongyun_dev_core::assemble_start_cmd(&cmd, None, Some("17"));
-        assert_eq!(
-            assembled_java,
-            vec![
-                "bash",
-                "-lc",
-                "sdk use java 17 && exec \"$@\"",
-                "--",
-                "pnpm",
-                "dev"
-            ]
-        );
+        assert_eq!(assembled_java, vec!["pnpm", "dev"]);
     }
 }

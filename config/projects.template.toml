@@ -1,0 +1,29 @@
+# tongyun-dev 项目配置模板
+#
+# 字段说明：
+#   name        显示名（例如 "示例应用"）
+#   root        项目根目录路径（支持 ~ 或绝对路径，例如 "~/code/example-app"）
+#   port        服务监听端口（启用的项目端口必须大于 0）
+#   enabled     是否启用，缺省 true。false 时桌面列表变灰并显示 reason
+#   reason      enabled = false 时的说明原因（必填）
+#   start       启动命令数组（例如 ["pnpm", "dev"] 或 ["mvn", "spring-boot:run"]）
+#   stop        停止命令数组（可选；未配置时按 PID 进程组和端口监听停止）
+#   background  true：命令放到后台进程组，stdout/stderr 追加到日志，PID 写入 pid 文件
+#   login_url   就绪探针 URL（可选；HTTP 200/301/302 视为就绪）
+#   health_url  健康探针 URL（可选；未配置 login_url 时使用）
+#   java        Java 版本（可选，如 "8"、"17"）。App 自动找到对应 JDK，设置 JAVA_HOME 和 PATH，
+#               不需要 sdkman / sdk use 命令。启动脚本里不要 source sdkman-init.sh。
+#   node        Node 版本（可选，如 "22"）。App 自动从 fnm / nvm 安装目录找到并放进 PATH，不需要 fnm env。
+#   java_home / node_home  可选，显式指定安装目录（Windows 或特殊安装时用）
+#   shell       可选，单条命令用哪个 shell 执行：bash（macOS/Linux 默认）、sh、cmd（Windows 默认）、powershell
+#   start_windows / stop_windows  可选，Windows 上优先使用的启动 / 停止命令数组
+#   log_file    日志文件路径（可选，默认 ~/.tongyun-dev/logs/<id>.out）
+#   pid_file    PID 文件路径（可选，默认 ~/.tongyun-dev/logs/<id>.pid）
+
+[projects.example_app]
+name = "示例项目"
+root = "~/code/example-app"
+port = 3000
+enabled = false
+reason = "示例项目配置模板，请修改 root 与 start 后启用"
+start = ["pnpm", "dev"]

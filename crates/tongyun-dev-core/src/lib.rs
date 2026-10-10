@@ -10,6 +10,12 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub mod toolchain;
+pub use toolchain::{
+    format_home, resolve_java_home, resolve_node_bin, shell_argv, shell_argv_with_os,
+    toolchain_env, HostOs, ToolchainError, ToolchainRoots,
+};
+
 const START_READY_DEFAULT_SECS: u64 = 180;
 const LOG_TAIL_MAX_LINES: usize = 500;
 const LOG_TAIL_WINDOW: u64 = 512 * 1024;
@@ -42,6 +48,10 @@ struct Project {
     #[serde(default)]
     stop: Vec<String>,
     #[serde(default)]
+    start_windows: Vec<String>,
+    #[serde(default)]
+    stop_windows: Vec<String>,
+    #[serde(default)]
     tomcat: String,
     #[serde(default)]
     log_dir: String,
@@ -62,6 +72,12 @@ struct Project {
     node: Option<String>,
     #[serde(default)]
     java: Option<String>,
+    #[serde(default)]
+    java_home: Option<String>,
+    #[serde(default)]
+    node_home: Option<String>,
+    #[serde(default)]
+    shell: Option<String>,
 }
 
 struct Vars {
@@ -86,8 +102,13 @@ struct Resolved {
     background: bool,
     start: Vec<String>,
     stop: Vec<String>,
+    start_windows: Vec<String>,
+    stop_windows: Vec<String>,
     node: Option<String>,
     java: Option<String>,
+    java_home: Option<PathBuf>,
+    node_home: Option<PathBuf>,
+    shell: Option<String>,
 }
 
 impl Resolved {
@@ -102,8 +123,22 @@ impl Resolved {
         ]
     }
 
+    pub fn active_start(&self) -> Vec<String> {
+        if cfg!(windows) && !self.start_windows.is_empty() {
+            return self.start_windows.clone();
+        }
+        self.start.clone()
+    }
+
+    pub fn active_stop(&self) -> Vec<String> {
+        if cfg!(windows) && !self.stop_windows.is_empty() {
+            return self.stop_windows.clone();
+        }
+        self.stop.clone()
+    }
+
     pub fn assembled_start(&self) -> Vec<String> {
-        assemble_start_cmd(&self.start, self.node.as_deref(), self.java.as_deref())
+        self.active_start()
     }
 }
 
@@ -119,6 +154,12 @@ pub struct ProjectRow {
     pub node: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub java: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub java_home: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_home: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -179,6 +220,9 @@ impl Loaded {
                 reason: resolved.reason,
                 node: resolved.node,
                 java: resolved.java,
+                java_home: resolved.java_home.as_ref().map(|p| path_to_string(p)),
+                node_home: resolved.node_home.as_ref().map(|p| path_to_string(p)),
+                shell: resolved.shell,
             });
         }
         Ok(ProjectList {
@@ -288,24 +332,228 @@ pub fn load(explicit: Option<&Path>) -> Result<Loaded> {
     Ok(Loaded { path, config })
 }
 
-fn resolve_config_path(explicit: Option<&Path>) -> Result<PathBuf> {
+pub const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../../../config/projects.template.toml");
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct ConfigInfo {
+    pub path: Option<String>,
+    pub source: String,
+    pub default_path: String,
+}
+
+pub fn config_dir(home: Option<&Path>) -> PathBuf {
+    match home {
+        Some(h) => h.join(".config").join("tongyun-dev"),
+        None => current_home()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".config")
+            .join("tongyun-dev"),
+    }
+}
+
+pub fn default_config_path(home: Option<&Path>) -> PathBuf {
+    config_dir(home).join("projects.toml")
+}
+
+pub fn create_default_config() -> Result<PathBuf> {
+    create_default_config_with(None)
+}
+
+pub fn create_default_config_with(home: Option<&Path>) -> Result<PathBuf> {
+    let target = default_config_path(home);
+    if target.is_file() {
+        return Ok(target);
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create config directory {}", parent.display()))?;
+    }
+    std::fs::write(&target, DEFAULT_CONFIG_TEMPLATE)
+        .with_context(|| format!("write default config template to {}", target.display()))?;
+    Ok(target)
+}
+
+pub fn remember_config_path(path: &Path) -> Result<()> {
+    remember_config_path_with(path, None)
+}
+
+pub fn remember_config_path_with(path: &Path, home: Option<&Path>) -> Result<()> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read config file {}", path.display()))?;
+    parse_config(&text)?;
+
+    let dir = config_dir(home);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("create config directory {}", dir.display()))?;
+    let settings_path = dir.join("settings.json");
+
+    let mut map: serde_json::Map<String, serde_json::Value> = if settings_path.is_file() {
+        let content = std::fs::read_to_string(&settings_path)
+            .with_context(|| format!("read {}", settings_path.display()))?;
+        serde_json::from_str(&content).unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+
+    let path_to_save = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+
+    map.insert(
+        "config_path".to_string(),
+        serde_json::Value::String(path_to_string(&path_to_save)),
+    );
+
+    let json_bytes = serde_json::to_string_pretty(&serde_json::Value::Object(map))
+        .context("serialize settings.json")?;
+    std::fs::write(&settings_path, format!("{json_bytes}\n"))
+        .with_context(|| format!("write {}", settings_path.display()))?;
+    Ok(())
+}
+
+fn read_remembered_config(home: Option<&Path>) -> Option<PathBuf> {
+    let settings_file = config_dir(home).join("settings.json");
+    if !settings_file.is_file() {
+        return None;
+    }
+    let content = std::fs::read_to_string(&settings_file).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let path_str = value.get("config_path")?.as_str()?.trim();
+    if path_str.is_empty() {
+        return None;
+    }
+    let expanded = expand_tilde_with(path_str, home).ok()?;
+    let path = PathBuf::from(expanded);
+    if path.is_file() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn resolve_config_source_with(
+    explicit: Option<&Path>,
+    env_value: Option<&str>,
+    home: Option<&Path>,
+    cwd: Option<&Path>,
+    exe_dir: Option<&Path>,
+) -> Result<(PathBuf, &'static str)> {
     if let Some(p) = explicit {
-        return expand_config_arg(p);
+        let expanded = expand_config_arg_with(p, home)?;
+        return Ok((expanded, "arg"));
     }
-    if let Ok(p) = std::env::var("TONGYUN_DEV_CONFIG") {
-        return expand_config_arg(Path::new(p.trim()));
+    if let Some(env_str) = env_value.map(str::trim).filter(|s| !s.is_empty()) {
+        let expanded = expand_config_arg_with(Path::new(env_str), home)?;
+        return Ok((expanded, "env"));
     }
-    if let Some(path) = std::env::current_dir().ok().and_then(walk_for_config) {
-        return Ok(path);
+    if let Some(remembered) = read_remembered_config(home) {
+        return Ok((remembered, "remembered"));
     }
-    if let Some(path) = std::env::current_exe()
+    let user_default = default_config_path(home);
+    if user_default.is_file() {
+        return Ok((user_default, "user_default"));
+    }
+    if let Some(path) = cwd.and_then(|d| walk_for_config(d.to_path_buf())) {
+        return Ok((path, "repo"));
+    }
+    if let Some(path) = exe_dir.and_then(|d| walk_for_config(d.to_path_buf())) {
+        return Ok((path, "repo"));
+    }
+
+    let default_hint = path_to_string(&user_default);
+    let mut searched = Vec::new();
+    searched.push("--config explicit argument".to_string());
+    searched.push("$TONGYUN_DEV_CONFIG environment variable".to_string());
+    searched.push(format!(
+        "{}/settings.json (remembered path)",
+        path_to_string(&config_dir(home))
+    ));
+    searched.push(default_hint.clone());
+    if let Some(d) = cwd {
+        searched.push(format!(
+            "{}/config/projects.toml (and ancestor directories)",
+            path_to_string(d)
+        ));
+    }
+    if let Some(d) = exe_dir {
+        searched.push(format!(
+            "{}/config/projects.toml (and ancestor directories)",
+            path_to_string(d)
+        ));
+    }
+
+    bail!(
+        "config/projects.toml not found.\nSearched candidate locations:\n  - {}\nHint: create default config at `{default_hint}` or pass --config / set TONGYUN_DEV_CONFIG",
+        searched.join("\n  - ")
+    );
+}
+
+pub fn resolve_config_path_with(
+    explicit: Option<&Path>,
+    env_value: Option<&str>,
+    home: Option<&Path>,
+    cwd: Option<&Path>,
+    exe_dir: Option<&Path>,
+) -> Result<PathBuf> {
+    resolve_config_source_with(explicit, env_value, home, cwd, exe_dir).map(|(p, _)| p)
+}
+
+pub fn resolve_config_path(explicit: Option<&Path>) -> Result<PathBuf> {
+    let env_val = std::env::var("TONGYUN_DEV_CONFIG").ok();
+    let home = current_home();
+    let cwd = std::env::current_dir().ok();
+    let exe_dir = std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .and_then(walk_for_config)
-    {
-        return Ok(path);
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    resolve_config_path_with(
+        explicit,
+        env_val.as_deref(),
+        home.as_deref(),
+        cwd.as_deref(),
+        exe_dir.as_deref(),
+    )
+}
+
+pub fn config_info() -> ConfigInfo {
+    let env_val = std::env::var("TONGYUN_DEV_CONFIG").ok();
+    let home = current_home();
+    let cwd = std::env::current_dir().ok();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    config_info_with(
+        None,
+        env_val.as_deref(),
+        home.as_deref(),
+        cwd.as_deref(),
+        exe_dir.as_deref(),
+    )
+}
+
+pub fn config_info_with(
+    explicit: Option<&Path>,
+    env_value: Option<&str>,
+    home: Option<&Path>,
+    cwd: Option<&Path>,
+    exe_dir: Option<&Path>,
+) -> ConfigInfo {
+    let default_path = path_to_string(&default_config_path(home));
+    match resolve_config_source_with(explicit, env_value, home, cwd, exe_dir) {
+        Ok((path, source)) => ConfigInfo {
+            path: Some(path_to_string(&path)),
+            source: source.to_string(),
+            default_path,
+        },
+        Err(_) => ConfigInfo {
+            path: None,
+            source: "none".to_string(),
+            default_path,
+        },
     }
-    bail!("config/projects.toml not found; pass --config or set TONGYUN_DEV_CONFIG");
 }
 
 fn walk_for_config(start: PathBuf) -> Option<PathBuf> {
@@ -370,13 +618,21 @@ fn subst(s: &str, vars: &Vars) -> String {
         .replace("{{log_dir}}", &vars.log_dir)
 }
 
+fn is_windows_absolute(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
 fn expand_path(label: &str, raw: &str, home: Option<&Path>) -> Result<PathBuf> {
     let expanded = expand_tilde_with(raw, home)?;
     if expanded.contains("{{") {
         bail!("{label} has an unresolved template: {expanded}");
     }
     let path = PathBuf::from(&expanded);
-    if !path.is_absolute() {
+    if !path.is_absolute() && !is_windows_absolute(&expanded) {
         bail!("{label} must be an absolute path after expansion, got `{expanded}`");
     }
     Ok(path)
@@ -449,7 +705,7 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
     } else {
         login.to_string()
     };
-    if p.enabled && p.start.is_empty() {
+    if p.enabled && p.start.is_empty() && p.start_windows.is_empty() {
         bail!("project `{id}` has an empty start command");
     }
     if p.enabled && tomcat.is_some() && p.stop.is_empty() {
@@ -465,6 +721,16 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
     } else {
         render_argv(&p.stop, &vars, home)?
     };
+    let start_windows = if p.start_windows.is_empty() {
+        Vec::new()
+    } else {
+        render_argv(&p.start_windows, &vars, home)?
+    };
+    let stop_windows = if p.stop_windows.is_empty() {
+        Vec::new()
+    } else {
+        render_argv(&p.stop_windows, &vars, home)?
+    };
     let node = p
         .node
         .as_deref()
@@ -473,6 +739,32 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
         .map(String::from);
     let java = p
         .java
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let java_home = if let Some(jh) = p
+        .java_home
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(expand_path("java_home", jh, home)?)
+    } else {
+        None
+    };
+    let node_home = if let Some(nh) = p
+        .node_home
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(expand_path("node_home", nh, home)?)
+    } else {
+        None
+    };
+    let shell = p
+        .shell
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -492,8 +784,13 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
         background: p.background,
         start,
         stop,
+        start_windows,
+        stop_windows,
         node,
         java,
+        java_home,
+        node_home,
+        shell,
     })
 }
 
@@ -501,12 +798,14 @@ fn parse_config(text: &str) -> Result<FileConfig> {
     toml::from_str(text).context("parse projects.toml")
 }
 
-fn expand_config_arg(p: &Path) -> Result<PathBuf> {
+fn expand_config_arg_with(p: &Path, home: Option<&Path>) -> Result<PathBuf> {
     let s = p.to_str().context("config path is not utf-8")?;
-    Ok(PathBuf::from(expand_tilde_with(
-        s,
-        current_home().as_deref(),
-    )?))
+    Ok(PathBuf::from(expand_tilde_with(s, home)?))
+}
+
+#[allow(dead_code)]
+fn expand_config_arg(p: &Path) -> Result<PathBuf> {
+    expand_config_arg_with(p, current_home().as_deref())
 }
 
 fn read_pid(path: &Path) -> Option<u32> {
@@ -941,106 +1240,15 @@ fn wait_until(timeout: Duration, mut pred: impl FnMut() -> bool) -> bool {
     }
 }
 
-pub fn assemble_start_cmd(start: &[String], node: Option<&str>, java: Option<&str>) -> Vec<String> {
-    if start.is_empty() {
-        return Vec::new();
-    }
-    let mut cmd = start.to_vec();
-    if let Some(v) = node.map(str::trim).filter(|s| !s.is_empty()) {
-        let mut fnm_prefix = vec![
-            "fnm".to_string(),
-            "exec".to_string(),
-            format!("--using={v}"),
-            "--".to_string(),
-        ];
-        fnm_prefix.extend(cmd);
-        cmd = fnm_prefix;
-    }
-    if let Some(v) = java.map(str::trim).filter(|s| !s.is_empty()) {
-        let mut sdk_prefix = vec![
-            "bash".to_string(),
-            "-lc".to_string(),
-            format!("sdk use java {v} && exec \"$@\""),
-            "--".to_string(),
-        ];
-        sdk_prefix.extend(cmd);
-        cmd = sdk_prefix;
-    }
-    cmd
+pub fn assemble_start_cmd(
+    start: &[String],
+    _node: Option<&str>,
+    _java: Option<&str>,
+) -> Vec<String> {
+    start.to_vec()
 }
 
-pub fn check_toolchain_availability(
-    node: Option<&str>,
-    java: Option<&str>,
-    home: Option<&Path>,
-) -> Result<()> {
-    if let Some(v) = node.map(str::trim).filter(|s| !s.is_empty()) {
-        check_fnm_installed(v)?;
-    }
-    if let Some(v) = java.map(str::trim).filter(|s| !s.is_empty()) {
-        check_sdkman_installed(v, home)?;
-    }
-    Ok(())
-}
-
-fn check_fnm_installed(v: &str) -> Result<()> {
-    let status = Command::new("fnm")
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    match status {
-        Ok(s) if s.success() => Ok(()),
-        Ok(_) => bail!("fnm failed to execute; required for node = \"{v}\""),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let bash_check = Command::new("bash")
-                .args(["-lc", "command -v fnm >/dev/null 2>&1"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            if let Ok(st) = bash_check {
-                if st.success() {
-                    return Ok(());
-                }
-            }
-            bail!("fnm not found in PATH; required for node = \"{v}\"");
-        }
-        Err(err) => bail!("failed to check fnm: {err}; required for node = \"{v}\""),
-    }
-}
-
-fn check_sdkman_installed(v: &str, home: Option<&Path>) -> Result<()> {
-    let has_sdk_file = if let Ok(sdk_dir) = std::env::var("SDKMAN_DIR") {
-        Path::new(&sdk_dir).join("bin/sdkman-init.sh").is_file()
-    } else if let Some(h) = home {
-        h.join(".sdkman/bin/sdkman-init.sh").is_file()
-    } else {
-        false
-    };
-    if has_sdk_file {
-        return Ok(());
-    }
-
-    let status = Command::new("bash")
-        .args(["-lc", "command -v sdk >/dev/null 2>&1"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    if let Ok(st) = status {
-        if st.success() {
-            return Ok(());
-        }
-    }
-
-    bail!("sdkman not found; required for java = \"{v}\"");
-}
-
-fn spawn_background(p: &Resolved, start_cmd: &[String]) -> Result<()> {
+fn spawn_background(p: &Resolved, start_cmd: &[String], env: &[(String, String)]) -> Result<()> {
     if start_cmd.is_empty() {
         bail!("empty start command");
     }
@@ -1058,6 +1266,11 @@ fn spawn_background(p: &Resolved, start_cmd: &[String]) -> Result<()> {
         .stdout(log)
         .stderr(log_err)
         .current_dir(&p.root);
+    for (k, v) in env {
+        if !v.is_empty() {
+            cmd.env(k, v);
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1078,6 +1291,21 @@ fn spawn_background(p: &Resolved, start_cmd: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Env for stop commands: same JAVA_HOME / PATH as start (catalina.sh stop needs java),
+/// but a missing toolchain must not block stopping.
+fn stop_env(p: &Resolved, mut base: Vec<(String, String)>) -> Vec<(String, String)> {
+    if let Ok(tc) = toolchain_env(
+        p.java.as_deref(),
+        p.java_home.as_deref(),
+        p.node.as_deref(),
+        p.node_home.as_deref(),
+        &ToolchainRoots::from_env(),
+    ) {
+        base.extend(tc);
+    }
+    base
+}
+
 fn cmd_start(p: &Resolved) -> Result<()> {
     if !p.enabled {
         let why = if p.reason.is_empty() {
@@ -1087,11 +1315,15 @@ fn cmd_start(p: &Resolved) -> Result<()> {
         };
         bail!("project `{}` is disabled: {why}", p.id);
     }
-    check_toolchain_availability(
-        p.node.as_deref(),
+    let roots = ToolchainRoots::from_env();
+    let tc_env = toolchain_env(
         p.java.as_deref(),
-        current_home().as_deref(),
-    )?;
+        p.java_home.as_deref(),
+        p.node.as_deref(),
+        p.node_home.as_deref(),
+        &roots,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     let start_cmd = p.assembled_start();
     eprintln!("starting {} …", p.id);
     eprintln!("  root {}", p.root.display());
@@ -1119,9 +1351,11 @@ fn cmd_start(p: &Resolved) -> Result<()> {
         return Ok(());
     }
     if p.background {
-        spawn_background(p, &start_cmd)?;
+        spawn_background(p, &start_cmd, &tc_env)?;
     } else {
-        run_cmd(&start_cmd, Some(&p.root), &p.catalina_env())?;
+        let mut full_env = tc_env;
+        full_env.extend(p.catalina_env());
+        run_cmd(&start_cmd, Some(&p.root), &full_env)?;
     }
     let timeout = start_ready_timeout()?;
     if p.login_url.is_empty() {
@@ -1239,9 +1473,10 @@ fn cmd_stop_catalina(p: &Resolved) -> Result<()> {
         eprintln!("{} already stopped", p.id);
         return Ok(());
     }
-    if let Some(missing) = first_missing_script(&p.stop) {
+    let stop_cmd = p.active_stop();
+    if let Some(missing) = first_missing_script(&stop_cmd) {
         eprintln!("stop script not found: {missing}");
-    } else if let Err(e) = run_cmd(&p.stop, Some(tomcat), &p.catalina_env()) {
+    } else if let Err(e) = run_cmd(&stop_cmd, Some(tomcat), &stop_env(p, p.catalina_env())) {
         eprintln!("catalina stop reported an error: {e}");
     }
     if !wait_until(Duration::from_secs(20), || is_down(p)) {
@@ -1267,10 +1502,11 @@ fn cmd_stop_dev(p: &Resolved) -> Result<()> {
         eprintln!("{} already stopped", p.id);
         return Ok(());
     }
-    if !p.stop.is_empty() {
-        if let Some(missing) = first_missing_script(&p.stop) {
+    let stop_cmd = p.active_stop();
+    if !stop_cmd.is_empty() {
+        if let Some(missing) = first_missing_script(&stop_cmd) {
             eprintln!("stop script not found: {missing}");
-        } else if let Err(e) = run_cmd(&p.stop, Some(&p.root), &[]) {
+        } else if let Err(e) = run_cmd(&stop_cmd, Some(&p.root), &stop_env(p, Vec::new())) {
             eprintln!("stop command reported an error: {e}");
         }
     }
@@ -1348,6 +1584,12 @@ pub struct NewProject {
     #[serde(default)]
     pub java: Option<String>,
     #[serde(default)]
+    pub java_home: Option<String>,
+    #[serde(default)]
+    pub node_home: Option<String>,
+    #[serde(default)]
+    pub shell: Option<String>,
+    #[serde(default)]
     pub background: Option<bool>,
 }
 
@@ -1370,11 +1612,6 @@ fn valid_version(v: &str) -> bool {
     !v.is_empty()
         && v.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
-}
-
-fn shell_argv(cmd: &str, login: bool) -> Vec<String> {
-    let flag = if login { "-lc" } else { "-c" };
-    vec!["bash".into(), flag.into(), cmd.to_string()]
 }
 
 impl NewProject {
@@ -1405,18 +1642,27 @@ impl NewProject {
                 }
             }
         }
-        // A login shell would re-run fnm / sdkman init and undo the version switch.
-        let login = node.is_none() && java.is_none();
+        let shell = non_empty(&self.shell);
+        if let Some(ref sh) = shell {
+            let lower = sh.to_ascii_lowercase();
+            if !matches!(lower.as_str(), "bash" | "sh" | "cmd" | "powershell") {
+                bail!("shell must be one of bash, sh, cmd, powershell, got `{sh}`");
+            }
+        }
+        let java_home = non_empty(&self.java_home);
+        let node_home = non_empty(&self.node_home);
         let name = non_empty(&self.name).unwrap_or_else(|| id.clone());
         let project = Project {
             name,
             root,
             enabled: true,
             reason: String::new(),
-            start: shell_argv(&start, login),
+            start: shell_argv(&start, shell.as_deref()),
             stop: non_empty(&self.stop)
-                .map(|s| shell_argv(&s, login))
+                .map(|s| shell_argv(&s, shell.as_deref()))
                 .unwrap_or_default(),
+            start_windows: Vec::new(),
+            stop_windows: Vec::new(),
             tomcat: String::new(),
             log_dir: String::new(),
             log_file: non_empty(&self.log_file).unwrap_or_default(),
@@ -1427,6 +1673,9 @@ impl NewProject {
             background: self.background.unwrap_or(true),
             node,
             java,
+            java_home,
+            node_home,
+            shell,
         };
         Ok((id, project))
     }
@@ -1446,6 +1695,15 @@ fn project_table(p: &Project) -> toml_edit::Table {
     }
     if let Some(v) = &p.java {
         t["java"] = value(v.as_str());
+    }
+    if let Some(v) = &p.java_home {
+        t["java_home"] = value(v.as_str());
+    }
+    if let Some(v) = &p.node_home {
+        t["node_home"] = value(v.as_str());
+    }
+    if let Some(v) = &p.shell {
+        t["shell"] = value(v.as_str());
     }
     let arr = |argv: &[String]| {
         let mut a = Array::new();
@@ -1521,6 +1779,9 @@ impl Loaded {
             reason: r.reason,
             node: r.node,
             java: r.java,
+            java_home: r.java_home.as_ref().map(|p| path_to_string(p)),
+            node_home: r.node_home.as_ref().map(|p| path_to_string(p)),
+            shell: r.shell,
         })
     }
 
@@ -1709,6 +1970,10 @@ mod tests {
         for bad in ["password", "secret", "token", "jdbc", "api_key", "apikey"] {
             assert!(!lower.contains(bad), "{bad} appeared in projects.toml");
         }
+        assert!(!PROJECTS_TOML.contains("sdkman-init"));
+        assert!(!PROJECTS_TOML.contains("sdk use"));
+        assert!(!PROJECTS_TOML.contains("fnm env"));
+        assert!(!PROJECTS_TOML.contains("fnm exec"));
     }
 
     #[test]
@@ -1888,8 +2153,8 @@ port = 9
         assert!(be.tomcat.is_none());
         assert_eq!(be.port, 8034);
         assert!(be.login_url.is_empty());
+        assert_eq!(be.java.as_deref(), Some("8"));
         let start = be.start.join(" ");
-        assert!(start.contains("sdkman-init.sh"), "{start}");
         assert!(start.contains("spring-boot:run"), "{start}");
         assert!(start.contains("profiles=dev"), "{start}");
         assert_eq!(
@@ -1909,8 +2174,8 @@ port = 9
         .unwrap();
         assert_eq!(vue.port, 5777);
         assert!(vue.background);
+        assert_eq!(vue.node.as_deref(), Some("22"));
         let vue_start = vue.start.join(" ");
-        assert!(vue_start.contains("fnm"), "{vue_start}");
         assert!(vue_start.contains("5777"), "{vue_start}");
         assert_eq!(vue.login_url, "http://127.0.0.1:5777/");
 
@@ -1921,6 +2186,7 @@ port = 9
         )
         .unwrap();
         assert_eq!(student.port, 5999);
+        assert_eq!(student.node.as_deref(), Some("22"));
         assert_eq!(student.login_url, "http://127.0.0.1:5999/");
         assert_eq!(
             student.root,
@@ -1946,6 +2212,7 @@ port = 9
         )
         .unwrap();
         assert_eq!(web.port, 7888);
+        assert_eq!(web.node.as_deref(), Some("22"));
         assert_eq!(web.login_url, "http://127.0.0.1:7888/");
         assert_eq!(
             web.root,
@@ -1992,7 +2259,7 @@ port = 9
         )
         .unwrap();
         assert_eq!(ops_web.port, 8146);
-        assert!(ops_web.start.join(" ").contains("fnm"));
+        assert_eq!(ops_web.node.as_deref(), Some("22"));
         assert_eq!(
             ops_web.root,
             PathBuf::from(
@@ -2082,6 +2349,9 @@ port = 3002
             reason: fs.reason.clone(),
             node: fs.node.clone(),
             java: fs.java.clone(),
+            java_home: fs.java_home.as_ref().map(|p| path_to_string(p)),
+            node_home: fs.node_home.as_ref().map(|p| path_to_string(p)),
+            shell: fs.shell.clone(),
         };
         let json_fs: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row_fs).unwrap()).unwrap();
@@ -2097,6 +2367,9 @@ port = 3002
             reason: none.reason.clone(),
             node: none.node.clone(),
             java: none.java.clone(),
+            java_home: none.java_home.as_ref().map(|p| path_to_string(p)),
+            node_home: none.node_home.as_ref().map(|p| path_to_string(p)),
+            shell: none.shell.clone(),
         };
         let json_none: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row_none).unwrap()).unwrap();
@@ -2108,52 +2381,15 @@ port = 3002
     fn assemble_start_cmd_cases() {
         let base = vec!["npm".to_string(), "run".to_string(), "dev".to_string()];
 
-        // node only -> fnm exec --using=<v> --
         let with_node = assemble_start_cmd(&base, Some("20"), None);
-        assert_eq!(
-            with_node,
-            vec!["fnm", "exec", "--using=20", "--", "npm", "run", "dev"]
-        );
+        assert_eq!(with_node, base);
 
-        // java only -> bash -lc 'sdk use java <v> && exec "$@"' --
         let with_java = assemble_start_cmd(&base, None, Some("17"));
-        assert_eq!(
-            with_java,
-            vec![
-                "bash",
-                "-lc",
-                "sdk use java 17 && exec \"$@\"",
-                "--",
-                "npm",
-                "run",
-                "dev"
-            ]
-        );
+        assert_eq!(with_java, base);
 
-        // both -> sdkman wrapping fnm wrapping command
         let with_both = assemble_start_cmd(&base, Some("20"), Some("17"));
-        assert_eq!(
-            with_both,
-            vec![
-                "bash",
-                "-lc",
-                "sdk use java 17 && exec \"$@\"",
-                "--",
-                "fnm",
-                "exec",
-                "--using=20",
-                "--",
-                "npm",
-                "run",
-                "dev"
-            ]
-        );
+        assert_eq!(with_both, base);
 
-        // neither -> unchanged
-        let without_any = assemble_start_cmd(&base, None, None);
-        assert_eq!(without_any, base);
-
-        // empty base command
         let empty: Vec<String> = Vec::new();
         assert_eq!(
             assemble_start_cmd(&empty, Some("20"), Some("17")),
@@ -2192,28 +2428,11 @@ port = 9002
         )
         .unwrap();
 
-        if Command::new("fnm").arg("--version").status().is_err() {
-            let err =
-                check_toolchain_availability(Some("999"), None, Some(Path::new("/nonexistent")))
-                    .unwrap_err()
-                    .to_string();
-            assert!(err.contains("fnm"), "{err}");
-            assert!(err.contains("999"), "{err}");
-
-            let start_err = cmd_start(&p_fnm).unwrap_err().to_string();
-            assert!(start_err.contains("fnm"), "{start_err}");
-            assert!(start_err.contains("999"), "{start_err}");
-        }
-
-        let err_sdk = check_sdkman_installed("999", Some(Path::new("/nonexistent/sdkman")))
-            .unwrap_err()
-            .to_string();
-        assert!(err_sdk.contains("sdkman"), "{err_sdk}");
-        assert!(err_sdk.contains("999"), "{err_sdk}");
+        let start_err = cmd_start(&p_fnm).unwrap_err().to_string();
+        assert!(start_err.contains("缺 Node 999"), "{start_err}");
 
         let start_err_sdk = cmd_start(&p_sdk).unwrap_err().to_string();
-        assert!(start_err_sdk.contains("sdkman"), "{start_err_sdk}");
-        assert!(start_err_sdk.contains("999"), "{start_err_sdk}");
+        assert!(start_err_sdk.contains("缺 Java 999"), "{start_err_sdk}");
     }
 }
 
@@ -2276,15 +2495,7 @@ port = 8080
         // Toolchain declared -> non-login shell so fnm / sdkman are not reset.
         assert_eq!(p.start, vec!["bash", "-c", "pnpm dev"]);
         let resolved = reloaded.resolve("web_app").unwrap();
-        assert_eq!(
-            resolved.assembled_start()[..4],
-            [
-                "bash",
-                "-lc",
-                "sdk use java 17.0.10-tem && exec \"$@\"",
-                "--"
-            ]
-        );
+        assert_eq!(resolved.assembled_start(), vec!["bash", "-c", "pnpm dev"]);
 
         let mut loaded = reloaded;
         loaded.remove_project("web_app").unwrap();
@@ -2333,8 +2544,8 @@ port = 8080
         r.stop = Some("pkill -f vite".into());
         loaded.add_project(r).unwrap();
         let p = loaded.config.projects.get("plain").unwrap();
-        assert_eq!(p.start, vec!["bash", "-lc", "pnpm dev"]);
-        assert_eq!(p.stop, vec!["bash", "-lc", "pkill -f vite"]);
+        assert_eq!(p.start, vec!["bash", "-c", "pnpm dev"]);
+        assert_eq!(p.stop, vec!["bash", "-c", "pkill -f vite"]);
         assert_eq!(loaded.page_url("plain").unwrap(), "http://127.0.0.1:5173/");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

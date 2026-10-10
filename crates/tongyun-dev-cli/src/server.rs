@@ -221,6 +221,9 @@ pub fn overview(loaded: &Loaded) -> Result<Vec<Value>> {
             m.insert("reason".into(), json!(row.reason));
             m.insert("node".into(), json!(row.node));
             m.insert("java".into(), json!(row.java));
+            m.insert("java_home".into(), json!(row.java_home));
+            m.insert("node_home".into(), json!(row.node_home));
+            m.insert("shell".into(), json!(row.shell));
         }
         out.push(v);
     }

@@ -7,6 +7,9 @@ export type Project = {
   reason: string;
   node?: string | null;
   java?: string | null;
+  java_home?: string | null;
+  node_home?: string | null;
+  shell?: string | null;
 };
 
 export type ProjectList = {

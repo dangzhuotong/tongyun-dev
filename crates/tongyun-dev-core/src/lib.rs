@@ -17,6 +17,8 @@ pub use toolchain::{
 };
 
 const START_READY_DEFAULT_SECS: u64 = 180;
+/// 有启动标记、进程却找不到时，先等这么多秒再判定「进程已退出」。
+const START_EXIT_GRACE_SECS: u64 = 3;
 const LOG_TAIL_MAX_LINES: usize = 500;
 const LOG_TAIL_WINDOW: u64 = 512 * 1024;
 
@@ -69,6 +71,10 @@ struct Project {
     #[serde(default)]
     background: bool,
     #[serde(default)]
+    pub start_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub stop_grace_secs: Option<u64>,
+    #[serde(default)]
     node: Option<String>,
     #[serde(default)]
     java: Option<String>,
@@ -100,6 +106,8 @@ struct Resolved {
     /// `login_url` when set, otherwise `health_url`. Empty means ready == port open.
     login_url: String,
     background: bool,
+    start_timeout_secs: Option<u64>,
+    stop_grace_secs: Option<u64>,
     start: Vec<String>,
     stop: Vec<String>,
     start_windows: Vec<String>,
@@ -151,6 +159,10 @@ pub struct ProjectRow {
     pub port: u16,
     pub reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_timeout_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_grace_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub java: Option<String>,
@@ -168,11 +180,107 @@ pub struct ProjectList {
     pub projects: Vec<ProjectRow>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifeState {
+    Stopped,
+    Starting,
+    PortOpen,
+    Ready,
+    Failed,
+}
+
+impl std::fmt::Display for LifeState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LifeState::Stopped => write!(f, "stopped"),
+            LifeState::Starting => write!(f, "starting"),
+            LifeState::PortOpen => write!(f, "port_open"),
+            LifeState::Ready => write!(f, "ready"),
+            LifeState::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct StartMarker {
+    pub started_at: u64,
+    pub timeout_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateInput {
+    pub process_alive: bool,
+    pub port_open: bool,
+    pub port_conflict: bool,
+    pub has_probe: bool,
+    pub probe_ok: bool,
+    pub started_at: Option<u64>,
+    pub now: u64,
+    pub timeout_secs: u64,
+    pub start_error: Option<String>,
+}
+
+pub fn derive_state(input: StateInput) -> (LifeState, Option<String>) {
+    // 启动命令报错
+    if let Some(err) = input.start_error {
+        return (LifeState::Failed, Some(err));
+    }
+
+    // 端口被别的程序占着（现有 port_conflict=true）不算本项目 Ready/PortOpen
+    let effective_port_open = input.port_open && !input.port_conflict;
+
+    // 端口通 + 探针 ok（或没配探针）→ Ready
+    if effective_port_open && (!input.has_probe || input.probe_ok) {
+        return (LifeState::Ready, None);
+    }
+
+    // 未就绪情况：
+    // 有启动标记 + 未就绪 + （进程已退出 或 已超时）→ Failed
+    if let Some(started_at) = input.started_at {
+        let elapsed = input.now.saturating_sub(started_at);
+        // catalina.sh start 返回后 JVM 写 pid 文件要一点时间：头几秒进程没找到不算失败
+        if !input.process_alive && elapsed >= START_EXIT_GRACE_SECS {
+            return (LifeState::Failed, Some("进程已退出".to_string()));
+        }
+        if elapsed >= input.timeout_secs {
+            return (
+                LifeState::Failed,
+                Some(format!("超过 {} 秒仍未就绪", input.timeout_secs)),
+            );
+        }
+        // 端口通 + 配了探针但没 ok → PortOpen
+        if effective_port_open {
+            return (LifeState::PortOpen, None);
+        }
+        // 端口不通 + 进程活着 + 未超时 → Starting
+        return (LifeState::Starting, None);
+    }
+
+    // 无启动标记的情况（例如在终端里手动起的）
+    if effective_port_open && input.has_probe && !input.probe_ok {
+        return (LifeState::PortOpen, None);
+    }
+    if input.process_alive && !effective_port_open {
+        // 进程在但端口没通：算启动中，不算 running
+        return (LifeState::Starting, None);
+    }
+
+    // 其它 → Stopped
+    (LifeState::Stopped, None)
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct StatusJson {
     pub id: String,
     pub name: String,
     pub running: bool,
+    pub state: LifeState,
+    pub elapsed_secs: Option<u64>,
+    pub timeout_secs: u64,
+    pub failure: Option<String>,
     pub pid: Option<u32>,
     pub port: u16,
     pub port_open: bool,
@@ -186,7 +294,7 @@ pub struct StatusJson {
     pub port_holder: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct LoginProbe {
     pub url: String,
     pub http_code: Option<u16>,
@@ -218,6 +326,8 @@ impl Loaded {
                 enabled: resolved.enabled,
                 port: resolved.port,
                 reason: resolved.reason,
+                start_timeout_secs: resolved.start_timeout_secs,
+                stop_grace_secs: resolved.stop_grace_secs,
                 node: resolved.node,
                 java: resolved.java,
                 java_home: resolved.java_home.as_ref().map(|p| path_to_string(p)),
@@ -257,11 +367,86 @@ impl Loaded {
         peers
     }
 
+    pub fn start_detached(&self, id: &str) -> Result<StatusJson> {
+        let project = self.resolve(id)?;
+        if !project.enabled {
+            let why = if project.reason.is_empty() {
+                "disabled"
+            } else {
+                project.reason.as_str()
+            };
+            bail!("project `{}` is disabled: {why}", project.id);
+        }
+        if let Err(e) = cmd_start_detached(&project) {
+            let err_msg = format!("{e:#}");
+            let marker = StartMarker {
+                started_at: current_time_secs(),
+                timeout_secs: start_ready_timeout_secs(&project),
+                error: Some(err_msg.clone()),
+            };
+            let _ = write_start_marker(&project.pid_file, &marker);
+            let mut st = self.status(id)?;
+            if st.state != LifeState::Failed {
+                st.state = LifeState::Failed;
+                st.failure = Some(err_msg);
+            }
+            return Ok(st);
+        }
+        self.status(id)
+    }
+
     pub fn start(&self, id: &str) -> Result<StatusJson> {
         let project = self.resolve(id)?;
-        cmd_start(&project)?;
-        let peers = self.peer_pids(&project.id);
-        Ok(status_of(&project, &peers))
+        let initial_st = self.start_detached(id)?;
+        if initial_st.state == LifeState::Ready {
+            return Ok(initial_st);
+        }
+        if initial_st.state == LifeState::Failed {
+            let fail = initial_st.failure.unwrap_or_else(|| "启动失败".into());
+            bail!("{fail}");
+        }
+
+        let timeout = Duration::from_secs(initial_st.timeout_secs);
+        if project.login_url.is_empty() {
+            eprintln!("waiting up to {}s for port {}", timeout.as_secs(), project.port);
+        } else {
+            eprintln!("waiting up to {}s for {}", timeout.as_secs(), project.login_url);
+        }
+
+        let start_time = Instant::now();
+        let mut last_log_time = Instant::now();
+
+        loop {
+            thread::sleep(Duration::from_millis(400));
+            let st = self.status(id)?;
+            match st.state {
+                LifeState::Ready => {
+                    eprintln!("就绪");
+                    return Ok(st);
+                }
+                LifeState::Failed => {
+                    let fail = st.failure.unwrap_or_else(|| "启动失败".into());
+                    bail!("{fail}");
+                }
+                LifeState::PortOpen => {
+                    if last_log_time.elapsed() >= Duration::from_secs(5) {
+                        let elapsed = st.elapsed_secs.unwrap_or_else(|| start_time.elapsed().as_secs());
+                        eprintln!("端口已通 已 {} 秒", elapsed);
+                        last_log_time = Instant::now();
+                    }
+                }
+                LifeState::Starting => {
+                    if last_log_time.elapsed() >= Duration::from_secs(5) {
+                        let elapsed = st.elapsed_secs.unwrap_or_else(|| start_time.elapsed().as_secs());
+                        eprintln!("启动中 已 {} 秒", elapsed);
+                        last_log_time = Instant::now();
+                    }
+                }
+                LifeState::Stopped => {
+                    bail!("服务已停止");
+                }
+            }
+        }
     }
 
     pub fn stop(&self, id: &str) -> Result<StatusJson> {
@@ -787,6 +972,8 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
         port: p.port,
         login_url,
         background: p.background,
+        start_timeout_secs: p.start_timeout_secs.filter(|&t| t > 0),
+        stop_grace_secs: p.stop_grace_secs.filter(|&g| g > 0),
         start,
         stop,
         start_windows,
@@ -1129,19 +1316,91 @@ fn port_conflict_of(
     }
 }
 
+fn current_time_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+pub fn start_marker_path(pid_file: &Path) -> PathBuf {
+    let mut p = pid_file.as_os_str().to_os_string();
+    p.push(".start");
+    PathBuf::from(p)
+}
+
+pub fn read_start_marker(pid_file: &Path) -> Option<StartMarker> {
+    let path = start_marker_path(pid_file);
+    let text = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+pub fn write_start_marker(pid_file: &Path, marker: &StartMarker) -> Result<()> {
+    let path = start_marker_path(pid_file);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json = serde_json::to_string(marker).context("serialize start marker")?;
+    std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
 fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
     let own = tracked_pids(p);
     let open = port_open(p.port);
     let (port_conflict, port_holder) = port_conflict_of(p, &own, peers, open);
-    let pid = own.into_iter().next();
+    let pid = own.into_iter().next().or_else(|| {
+        read_pid(&p.pid_file).filter(|&pid| process_alive(pid))
+    });
+    let process_alive = pid.is_some();
+    let probe = login_probe(&p.login_url);
+    let has_probe = !p.login_url.is_empty();
+
+    let marker = read_start_marker(&p.pid_file);
+    let timeout_secs = marker
+        .as_ref()
+        .map(|m| m.timeout_secs)
+        .unwrap_or_else(|| start_ready_timeout_secs(p));
+    let started_at = marker.as_ref().map(|m| m.started_at);
+    let start_error = marker.as_ref().and_then(|m| m.error.clone());
+    let now = current_time_secs();
+
+    let (state, failure) = derive_state(StateInput {
+        process_alive,
+        port_open: open,
+        port_conflict,
+        has_probe,
+        probe_ok: probe.ok,
+        started_at,
+        now,
+        timeout_secs,
+        start_error,
+    });
+
+    if state == LifeState::Stopped && !process_alive {
+        let _ = std::fs::remove_file(start_marker_path(&p.pid_file));
+    }
+
+    let elapsed_secs = match state {
+        LifeState::Starting | LifeState::PortOpen | LifeState::Failed | LifeState::Ready => {
+            started_at.map(|st| now.saturating_sub(st))
+        }
+        LifeState::Stopped => None,
+    };
+    let running = matches!(state, LifeState::PortOpen | LifeState::Ready);
+
     StatusJson {
         id: p.id.clone(),
         name: p.name.clone(),
-        running: pid.is_some(),
+        running,
+        state,
+        elapsed_secs,
+        timeout_secs,
+        failure,
         pid,
         port: p.port,
         port_open: open,
-        login_probe: login_probe(&p.login_url),
+        login_probe: probe,
         log_path: path_to_string(&p.log_file),
         pid_path: path_to_string(&p.pid_file),
         root: path_to_string(&p.root),
@@ -1217,19 +1476,20 @@ fn ensure_log_dir(dir: &Path, home: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn start_ready_timeout() -> Result<Duration> {
-    match std::env::var("TONGYUN_DEV_START_TIMEOUT") {
-        Ok(s) => {
-            let secs: u64 = s.trim().parse().with_context(|| {
-                format!("TONGYUN_DEV_START_TIMEOUT must be a number of seconds, got `{s}`")
-            })?;
-            if secs == 0 {
-                bail!("TONGYUN_DEV_START_TIMEOUT must be > 0");
-            }
-            Ok(Duration::from_secs(secs))
+fn start_ready_timeout_secs(p: &Resolved) -> u64 {
+    if let Some(t) = p.start_timeout_secs {
+        if t > 0 {
+            return t;
         }
-        Err(_) => Ok(Duration::from_secs(START_READY_DEFAULT_SECS)),
     }
+    if let Ok(s) = std::env::var("TONGYUN_DEV_START_TIMEOUT") {
+        if let Ok(secs) = s.trim().parse::<u64>() {
+            if secs > 0 {
+                return secs;
+            }
+        }
+    }
+    START_READY_DEFAULT_SECS
 }
 
 fn wait_until(timeout: Duration, mut pred: impl FnMut() -> bool) -> bool {
@@ -1311,7 +1571,7 @@ fn stop_env(p: &Resolved, mut base: Vec<(String, String)>) -> Vec<(String, Strin
     base
 }
 
-fn cmd_start(p: &Resolved) -> Result<()> {
+fn cmd_start_detached(p: &Resolved) -> Result<()> {
     if !p.enabled {
         let why = if p.reason.is_empty() {
             "disabled"
@@ -1320,6 +1580,7 @@ fn cmd_start(p: &Resolved) -> Result<()> {
         };
         bail!("project `{}` is disabled: {why}", p.id);
     }
+    let timeout_secs = start_ready_timeout_secs(p);
     let roots = ToolchainRoots::from_env();
     let tc_env = toolchain_env(
         p.java.as_deref(),
@@ -1329,6 +1590,7 @@ fn cmd_start(p: &Resolved) -> Result<()> {
         &roots,
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
+
     let start_cmd = p.assembled_start();
     eprintln!("starting {} …", p.id);
     eprintln!("  root {}", p.root.display());
@@ -1355,6 +1617,14 @@ fn cmd_start(p: &Resolved) -> Result<()> {
         eprintln!("{} already up on port {}", p.id, p.port);
         return Ok(());
     }
+
+    let marker = StartMarker {
+        started_at: current_time_secs(),
+        timeout_secs,
+        error: None,
+    };
+    write_start_marker(&p.pid_file, &marker)?;
+
     if p.background {
         spawn_background(p, &start_cmd, &tc_env)?;
     } else {
@@ -1362,32 +1632,12 @@ fn cmd_start(p: &Resolved) -> Result<()> {
         full_env.extend(p.catalina_env());
         run_cmd(&start_cmd, Some(&p.root), &full_env)?;
     }
-    let timeout = start_ready_timeout()?;
-    if p.login_url.is_empty() {
-        eprintln!("waiting up to {}s for port {}", timeout.as_secs(), p.port);
-    } else {
-        eprintln!("waiting up to {}s for {}", timeout.as_secs(), p.login_url);
-    }
-    let started = Instant::now();
-    let ready = loop {
-        if is_ready(p) || started.elapsed() >= timeout {
-            break is_ready(p);
-        }
-        thread::sleep(Duration::from_secs(1));
-    };
-    if !ready {
-        if p.login_url.is_empty() {
-            bail!("port {} not open. log: {}", p.port, p.log_file.display());
-        }
-        let probe = login_probe(&p.login_url);
-        bail!(
-            "login page not ready at {} (http {:?}). log: {}",
-            p.login_url,
-            probe.http_code,
-            p.log_file.display()
-        );
-    }
     Ok(())
+}
+
+#[allow(dead_code)]
+fn cmd_start(p: &Resolved) -> Result<()> {
+    cmd_start_detached(p)
 }
 
 fn signal_pid(pid: u32, sig: &str) -> bool {
@@ -1415,7 +1665,21 @@ fn signal_group(pid: u32, sig: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn terminate_pid(pid: u32, group: bool) -> Result<()> {
+fn group_alive(pid: u32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    Command::new("kill")
+        .args(["-0", "--", &format!("-{pid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn terminate_pid_with_grace(pid: u32, group: bool, grace_secs: u64) -> Result<()> {
     if pid <= 1 {
         bail!("refusing to signal pid {pid}");
     }
@@ -1425,7 +1689,13 @@ fn terminate_pid(pid: u32, group: bool) -> Result<()> {
         signal_group(pid, "-TERM");
     }
     signal_pid(pid, "-TERM");
-    if wait_until(Duration::from_secs(8), || !process_alive(pid)) {
+    if wait_until(Duration::from_secs(grace_secs), || {
+        if group {
+            !process_alive(pid) && !group_alive(pid)
+        } else {
+            !process_alive(pid)
+        }
+    }) {
         return Ok(());
     }
     eprintln!("sending KILL to {pid} ({comm})");
@@ -1433,17 +1703,30 @@ fn terminate_pid(pid: u32, group: bool) -> Result<()> {
         signal_group(pid, "-KILL");
     }
     signal_pid(pid, "-KILL");
-    if wait_until(Duration::from_secs(3), || !process_alive(pid)) {
+    if wait_until(Duration::from_secs(3), || {
+        if group {
+            !process_alive(pid) && !group_alive(pid)
+        } else {
+            !process_alive(pid)
+        }
+    }) {
         Ok(())
     } else {
         bail!("pid {pid} still alive after KILL");
     }
 }
 
+#[allow(dead_code)]
+fn terminate_pid(pid: u32, group: bool) -> Result<()> {
+    terminate_pid_with_grace(pid, group, 8)
+}
+
+#[allow(dead_code)]
 fn terminate_server(pid: u32) -> Result<()> {
     terminate_pid(pid, false)
 }
 
+#[allow(dead_code)]
 fn listener_hint(port: u16) -> String {
     let pids = listener_pids(port);
     if pids.is_empty() {
@@ -1460,74 +1743,83 @@ fn listener_hint(port: u16) -> String {
 }
 
 fn cmd_stop(p: &Resolved) -> Result<()> {
-    if p.tomcat.is_some() {
-        cmd_stop_catalina(p)
-    } else {
-        cmd_stop_dev(p)
-    }
-}
-
-fn cmd_stop_catalina(p: &Resolved) -> Result<()> {
-    let Some(tomcat) = p.tomcat.as_ref() else {
-        bail!("internal: catalina stop without tomcat");
-    };
-    eprintln!("stopping {} …", p.id);
-    eprintln!("  catalina {}", tomcat.join("bin/catalina.sh").display());
-    eprintln!("  pid file {}", p.pid_file.display());
-    if is_down(p) {
-        eprintln!("{} already stopped", p.id);
-        return Ok(());
-    }
-    let stop_cmd = p.active_stop();
-    if let Some(missing) = first_missing_script(&stop_cmd) {
-        eprintln!("stop script not found: {missing}");
-    } else if let Err(e) = run_cmd(&stop_cmd, Some(tomcat), &stop_env(p, p.catalina_env())) {
-        eprintln!("catalina stop reported an error: {e}");
-    }
-    if !wait_until(Duration::from_secs(20), || is_down(p)) {
-        let pids = server_pids(p);
-        if pids.is_empty() {
-            bail!("stop did not release the port: {}", listener_hint(p.port));
-        }
-        for pid in pids {
-            terminate_server(pid)?;
-        }
-        if !wait_until(Duration::from_secs(10), || is_down(p)) {
-            bail!("stop did not release the port: {}", listener_hint(p.port));
-        }
-    }
-    Ok(())
-}
-
-fn cmd_stop_dev(p: &Resolved) -> Result<()> {
     eprintln!("stopping {} …", p.id);
     eprintln!("  pid file {}", p.pid_file.display());
     eprintln!("  port {}", p.port);
+
+    let pid_in_file = read_pid(&p.pid_file);
+    let stale_pid = match pid_in_file {
+        Some(pid) => !process_alive(pid),
+        None => p.pid_file.is_file(),
+    };
+
+    if stale_pid {
+        let _ = std::fs::remove_file(&p.pid_file);
+        let _ = std::fs::remove_file(start_marker_path(&p.pid_file));
+    }
+
     if is_down(p) {
         eprintln!("{} already stopped", p.id);
+        let _ = std::fs::remove_file(&p.pid_file);
+        let _ = std::fs::remove_file(start_marker_path(&p.pid_file));
         return Ok(());
     }
+
+    let grace_secs = p.stop_grace_secs.unwrap_or(8);
+
+    // 1. 先跑配置的 stop 命令（有的话，失败不致命）
     let stop_cmd = p.active_stop();
     if !stop_cmd.is_empty() {
         if let Some(missing) = first_missing_script(&stop_cmd) {
             eprintln!("stop script not found: {missing}");
-        } else if let Err(e) = run_cmd(&stop_cmd, Some(&p.root), &stop_env(p, Vec::new())) {
-            eprintln!("stop command reported an error: {e}");
+        } else {
+            let (dir, env) = if let Some(tomcat) = &p.tomcat {
+                (Some(tomcat.as_path()), stop_env(p, p.catalina_env()))
+            } else {
+                (Some(p.root.as_path()), stop_env(p, Vec::new()))
+            };
+            if let Err(e) = run_cmd(&stop_cmd, dir, &env) {
+                eprintln!("stop command reported an error: {e}");
+            }
         }
     }
-    if let Some(pid) = read_pid(&p.pid_file) {
+
+    // 本项目自己的进程树根（发信号之前先记下，信号之后父进程可能已经没了）
+    let roots: Vec<u32> = pid_in_file
+        .filter(|&pid| process_alive(pid))
+        .into_iter()
+        .collect();
+
+    // 2. 然后对 pid 文件里的进程按进程组发 TERM，宽限期后仍在则对进程组 KILL
+    if let Some(pid) = pid_in_file {
         if process_alive(pid) {
-            terminate_pid(pid, true)?;
+            let _ = terminate_pid_with_grace(pid, true, grace_secs);
         }
     }
-    for pid in listener_pids(p.port) {
-        if process_alive(pid) {
-            terminate_server(pid)?;
+
+    // 3. 再清理端口上属于本项目的监听进程（沿用现有 belongs_to / is_server_process 判断，不杀陌生进程）
+    if p.tomcat.is_some() {
+        for pid in server_pids(p) {
+            if process_alive(pid) {
+                let _ = terminate_pid_with_grace(pid, false, grace_secs);
+            }
+        }
+    } else {
+        // 只清理属于本项目进程树的监听进程，端口上的陌生进程不动
+        for pid in listener_pids(p.port) {
+            if process_alive(pid) && belongs_to(pid, &roots) {
+                let _ = terminate_pid_with_grace(pid, false, grace_secs);
+            }
         }
     }
-    if !wait_until(Duration::from_secs(10), || is_down(p)) {
-        bail!("stop did not release the port: {}", listener_hint(p.port));
-    }
+
+    // 4. 等待
+    let _ = wait_until(Duration::from_secs(3), || is_down(p));
+
+    // 5. 结束后删除 pid 文件和启动标记
+    let _ = std::fs::remove_file(&p.pid_file);
+    let _ = std::fs::remove_file(start_marker_path(&p.pid_file));
+
     Ok(())
 }
 
@@ -1596,6 +1888,10 @@ pub struct NewProject {
     pub shell: Option<String>,
     #[serde(default)]
     pub background: Option<bool>,
+    #[serde(default)]
+    pub start_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub stop_grace_secs: Option<u64>,
 }
 
 fn non_empty(v: &Option<String>) -> Option<String> {
@@ -1676,6 +1972,8 @@ impl NewProject {
             login_url: non_empty(&self.login_url).unwrap_or_default(),
             health_url: non_empty(&self.health_url).unwrap_or_default(),
             background: self.background.unwrap_or(true),
+            start_timeout_secs: self.start_timeout_secs,
+            stop_grace_secs: self.stop_grace_secs,
             node,
             java,
             java_home,
@@ -1694,6 +1992,12 @@ fn project_table(p: &Project) -> toml_edit::Table {
     t["port"] = value(i64::from(p.port));
     if p.background {
         t["background"] = value(true);
+    }
+    if let Some(v) = p.start_timeout_secs {
+        t["start_timeout_secs"] = value(v as i64);
+    }
+    if let Some(v) = p.stop_grace_secs {
+        t["stop_grace_secs"] = value(v as i64);
     }
     if let Some(v) = &p.node {
         t["node"] = value(v.as_str());
@@ -1782,6 +2086,8 @@ impl Loaded {
             enabled: r.enabled,
             port: r.port,
             reason: r.reason,
+            start_timeout_secs: r.start_timeout_secs,
+            stop_grace_secs: r.stop_grace_secs,
             node: r.node,
             java: r.java,
             java_home: r.java_home.as_ref().map(|p| path_to_string(p)),
@@ -1987,6 +2293,10 @@ mod tests {
             id: "legacy_app".into(),
             name: "legacy_app".into(),
             running: false,
+            state: LifeState::Stopped,
+            elapsed_secs: None,
+            timeout_secs: 180,
+            failure: None,
             pid: None,
             port: 8080,
             port_open: false,
@@ -2005,6 +2315,10 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
         for key in [
             "running",
+            "state",
+            "elapsed_secs",
+            "timeout_secs",
+            "failure",
             "pid",
             "port",
             "login_probe",
@@ -2017,6 +2331,10 @@ mod tests {
         assert_eq!(v["port_conflict"], false);
         assert_eq!(v["port_holder"], "");
         assert_eq!(v["running"], false);
+        assert_eq!(v["state"], "stopped");
+        assert_eq!(v["timeout_secs"], 180);
+        assert!(v["failure"].is_null());
+        assert!(v["elapsed_secs"].is_null());
         assert!(v["pid"].is_null());
         assert_eq!(v["port"], 8080);
         assert!(v["login_probe"]["http_code"].is_null());
@@ -2025,6 +2343,206 @@ mod tests {
             v["log_path"],
             "/Users/dev/.tongyun-dev/logs/legacy_app_catalina.out"
         );
+    }
+
+    #[test]
+    fn test_derive_state_table() {
+        struct Case {
+            desc: &'static str,
+            input: StateInput,
+            expected_state: LifeState,
+            expected_failure: Option<&'static str>,
+        }
+
+        let cases = vec![
+            Case {
+                desc: "1. 端口通 + 探针 ok -> Ready",
+                input: StateInput {
+                    process_alive: true,
+                    port_open: true,
+                    port_conflict: false,
+                    has_probe: true,
+                    probe_ok: true,
+                    started_at: Some(100),
+                    now: 105,
+                    timeout_secs: 10,
+                    start_error: None,
+                },
+                expected_state: LifeState::Ready,
+                expected_failure: None,
+            },
+            Case {
+                desc: "2. 端口通 + 无探针 -> Ready",
+                input: StateInput {
+                    process_alive: true,
+                    port_open: true,
+                    port_conflict: false,
+                    has_probe: false,
+                    probe_ok: false,
+                    started_at: Some(100),
+                    now: 105,
+                    timeout_secs: 10,
+                    start_error: None,
+                },
+                expected_state: LifeState::Ready,
+                expected_failure: None,
+            },
+            Case {
+                desc: "3. 端口通 + 配了探针但没 ok + 未超时 -> PortOpen",
+                input: StateInput {
+                    process_alive: true,
+                    port_open: true,
+                    port_conflict: false,
+                    has_probe: true,
+                    probe_ok: false,
+                    started_at: Some(100),
+                    now: 105,
+                    timeout_secs: 10,
+                    start_error: None,
+                },
+                expected_state: LifeState::PortOpen,
+                expected_failure: None,
+            },
+            Case {
+                desc: "4. 端口不通 + 进程活着 + 未超时 -> Starting",
+                input: StateInput {
+                    process_alive: true,
+                    port_open: false,
+                    port_conflict: false,
+                    has_probe: false,
+                    probe_ok: false,
+                    started_at: Some(100),
+                    now: 105,
+                    timeout_secs: 10,
+                    start_error: None,
+                },
+                expected_state: LifeState::Starting,
+                expected_failure: None,
+            },
+            Case {
+                desc: "5. 有启动标记 + 进程已退出 -> Failed (进程已退出)",
+                input: StateInput {
+                    process_alive: false,
+                    port_open: false,
+                    port_conflict: false,
+                    has_probe: false,
+                    probe_ok: false,
+                    started_at: Some(100),
+                    now: 105,
+                    timeout_secs: 10,
+                    start_error: None,
+                },
+                expected_state: LifeState::Failed,
+                expected_failure: Some("进程已退出"),
+            },
+            Case {
+                desc: "6. 有启动标记 + 超过 N 秒未就绪 -> Failed (超时)",
+                input: StateInput {
+                    process_alive: true,
+                    port_open: false,
+                    port_conflict: false,
+                    has_probe: false,
+                    probe_ok: false,
+                    started_at: Some(100),
+                    now: 115,
+                    timeout_secs: 10,
+                    start_error: None,
+                },
+                expected_state: LifeState::Failed,
+                expected_failure: Some("超过 10 秒仍未就绪"),
+            },
+            Case {
+                desc: "7. 端口冲突 (别的程序占着端口) -> 不算 Ready，进程活着未超时仍是 Starting",
+                input: StateInput {
+                    process_alive: true,
+                    port_open: true,
+                    port_conflict: true,
+                    has_probe: false,
+                    probe_ok: false,
+                    started_at: Some(100),
+                    now: 105,
+                    timeout_secs: 10,
+                    start_error: None,
+                },
+                expected_state: LifeState::Starting,
+                expected_failure: None,
+            },
+            Case {
+                desc: "8. 启动命令报错 -> Failed",
+                input: StateInput {
+                    process_alive: false,
+                    port_open: false,
+                    port_conflict: false,
+                    has_probe: false,
+                    probe_ok: false,
+                    started_at: Some(100),
+                    now: 100,
+                    timeout_secs: 10,
+                    start_error: Some("缺 Java 8：未在 ~/.sdkman 找到 8.*".to_string()),
+                },
+                expected_state: LifeState::Failed,
+                expected_failure: Some("缺 Java 8：未在 ~/.sdkman 找到 8.*"),
+            },
+            Case {
+                desc: "9. 其它 (无启动标记，进程不活，端口不通) -> Stopped",
+                input: StateInput {
+                    process_alive: false,
+                    port_open: false,
+                    port_conflict: false,
+                    has_probe: false,
+                    probe_ok: false,
+                    started_at: None,
+                    now: 100,
+                    timeout_secs: 10,
+                    start_error: None,
+                },
+                expected_state: LifeState::Stopped,
+                expected_failure: None,
+            },
+            Case {
+                desc: "10. 端口冲突且无启动标记 -> Stopped",
+                input: StateInput {
+                    process_alive: false,
+                    port_open: true,
+                    port_conflict: true,
+                    has_probe: false,
+                    probe_ok: false,
+                    started_at: None,
+                    now: 100,
+                    timeout_secs: 10,
+                    start_error: None,
+                },
+                expected_state: LifeState::Stopped,
+                expected_failure: None,
+            },
+            Case {
+                desc: "11. 端口通但探针未 ok 且超时 -> Failed",
+                input: StateInput {
+                    process_alive: true,
+                    port_open: true,
+                    port_conflict: false,
+                    has_probe: true,
+                    probe_ok: false,
+                    started_at: Some(100),
+                    now: 115,
+                    timeout_secs: 10,
+                    start_error: None,
+                },
+                expected_state: LifeState::Failed,
+                expected_failure: Some("超过 10 秒仍未就绪"),
+            },
+        ];
+
+        for c in cases {
+            let (state, failure) = derive_state(c.input);
+            assert_eq!(state, c.expected_state, "Case '{}' failed on state", c.desc);
+            assert_eq!(
+                failure.as_deref(),
+                c.expected_failure,
+                "Case '{}' failed on failure",
+                c.desc
+            );
+        }
     }
 
     #[test]
@@ -2352,6 +2870,8 @@ port = 3002
             enabled: fs.enabled,
             port: fs.port,
             reason: fs.reason.clone(),
+            start_timeout_secs: fs.start_timeout_secs,
+            stop_grace_secs: fs.stop_grace_secs,
             node: fs.node.clone(),
             java: fs.java.clone(),
             java_home: fs.java_home.as_ref().map(|p| path_to_string(p)),
@@ -2370,6 +2890,8 @@ port = 3002
             enabled: none.enabled,
             port: none.port,
             reason: none.reason.clone(),
+            start_timeout_secs: none.start_timeout_secs,
+            stop_grace_secs: none.stop_grace_secs,
             node: none.node.clone(),
             java: none.java.clone(),
             java_home: none.java_home.as_ref().map(|p| path_to_string(p)),

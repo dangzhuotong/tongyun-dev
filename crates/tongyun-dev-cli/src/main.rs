@@ -252,6 +252,7 @@ fn main() -> Result<()> {
                 node_home,
                 shell,
                 background: Some(!foreground),
+                ..Default::default()
             })?;
             println!(
                 "已注册项目 `{}`（{}），写入 {}",

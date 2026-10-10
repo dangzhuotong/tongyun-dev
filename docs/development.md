@@ -57,6 +57,8 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 | `login_url` | 可选。HTTP 200 / 301 / 302 才算启动完成 |
 | `health_url` | 可选。没有 `login_url` 时用它做同样的探针，状态里仍放在 `login_probe` |
 | 两者都空 | 端口能连上即算就绪。Spring 的 `/` 经常不是 200，所以后端默认不写探针 |
+| `node` | 可选（如 `"20"`）。CLI 启动时自动加 `fnm exec --using=<v> --`，缺失时给出可读报错 |
+| `java` | 可选（如 `"17"`）。CLI 启动时经 `bash -lc` 执行 `sdk use java <v>` 切换，缺失时给出可读报错 |
 | `log_dir` / `log_file` / `pid_file` | 可省略。默认 `~/.tongyun-dev/logs/<id>.out` 和 `.pid` |
 
 Spring 用 `bash -c` 拉起 sdkman 再 `mvn spring-boot:run -Dspring-boot.run.profiles=dev`。`demo_exam` 会在当前 Java 不是 8 时，从 `~/.sdkman/candidates/java/8.*` 里挑一个 `sdk use`。前端用 `fnm exec --using=22` 跑 `pnpm dev`。不用 login shell。

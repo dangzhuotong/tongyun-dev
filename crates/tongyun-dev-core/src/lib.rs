@@ -58,6 +58,10 @@ struct Project {
     /// Long-running dev servers (mvn, pnpm) are detached. Tomcat's start script exits.
     #[serde(default)]
     background: bool,
+    #[serde(default)]
+    node: Option<String>,
+    #[serde(default)]
+    java: Option<String>,
 }
 
 struct Vars {
@@ -82,6 +86,8 @@ struct Resolved {
     background: bool,
     start: Vec<String>,
     stop: Vec<String>,
+    node: Option<String>,
+    java: Option<String>,
 }
 
 impl Resolved {
@@ -95,9 +101,13 @@ impl Resolved {
             ("CATALINA_PID".into(), path_to_string(&self.pid_file)),
         ]
     }
+
+    pub fn assembled_start(&self) -> Vec<String> {
+        assemble_start_cmd(&self.start, self.node.as_deref(), self.java.as_deref())
+    }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProjectRow {
     pub id: String,
     pub name: String,
@@ -105,6 +115,10 @@ pub struct ProjectRow {
     pub enabled: bool,
     pub port: u16,
     pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub java: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -163,6 +177,8 @@ impl Loaded {
                 enabled: resolved.enabled,
                 port: resolved.port,
                 reason: resolved.reason,
+                node: resolved.node,
+                java: resolved.java,
             });
         }
         Ok(ProjectList {
@@ -449,6 +465,18 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
     } else {
         render_argv(&p.stop, &vars, home)?
     };
+    let node = p
+        .node
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let java = p
+        .java
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
     Ok(Resolved {
         id: id.to_string(),
         name: p.name.clone(),
@@ -464,6 +492,8 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
         background: p.background,
         start,
         stop,
+        node,
+        java,
     })
 }
 
@@ -911,7 +941,113 @@ fn wait_until(timeout: Duration, mut pred: impl FnMut() -> bool) -> bool {
     }
 }
 
-fn spawn_background(p: &Resolved) -> Result<()> {
+pub fn assemble_start_cmd(
+    start: &[String],
+    node: Option<&str>,
+    java: Option<&str>,
+) -> Vec<String> {
+    if start.is_empty() {
+        return Vec::new();
+    }
+    let mut cmd = start.to_vec();
+    if let Some(v) = node.map(str::trim).filter(|s| !s.is_empty()) {
+        let mut fnm_prefix = vec![
+            "fnm".to_string(),
+            "exec".to_string(),
+            format!("--using={v}"),
+            "--".to_string(),
+        ];
+        fnm_prefix.extend(cmd);
+        cmd = fnm_prefix;
+    }
+    if let Some(v) = java.map(str::trim).filter(|s| !s.is_empty()) {
+        let mut sdk_prefix = vec![
+            "bash".to_string(),
+            "-lc".to_string(),
+            format!("sdk use java {v} && exec \"$@\""),
+            "--".to_string(),
+        ];
+        sdk_prefix.extend(cmd);
+        cmd = sdk_prefix;
+    }
+    cmd
+}
+
+pub fn check_toolchain_availability(
+    node: Option<&str>,
+    java: Option<&str>,
+    home: Option<&Path>,
+) -> Result<()> {
+    if let Some(v) = node.map(str::trim).filter(|s| !s.is_empty()) {
+        check_fnm_installed(v)?;
+    }
+    if let Some(v) = java.map(str::trim).filter(|s| !s.is_empty()) {
+        check_sdkman_installed(v, home)?;
+    }
+    Ok(())
+}
+
+fn check_fnm_installed(v: &str) -> Result<()> {
+    let status = Command::new("fnm")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(_) => bail!("fnm failed to execute; required for node = \"{v}\""),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let bash_check = Command::new("bash")
+                .args(["-lc", "command -v fnm >/dev/null 2>&1"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            if let Ok(st) = bash_check {
+                if st.success() {
+                    return Ok(());
+                }
+            }
+            bail!("fnm not found in PATH; required for node = \"{v}\"");
+        }
+        Err(err) => bail!("failed to check fnm: {err}; required for node = \"{v}\""),
+    }
+}
+
+fn check_sdkman_installed(v: &str, home: Option<&Path>) -> Result<()> {
+    let has_sdk_file = if let Ok(sdk_dir) = std::env::var("SDKMAN_DIR") {
+        Path::new(&sdk_dir).join("bin/sdkman-init.sh").is_file()
+    } else if let Some(h) = home {
+        h.join(".sdkman/bin/sdkman-init.sh").is_file()
+    } else {
+        false
+    };
+    if has_sdk_file {
+        return Ok(());
+    }
+
+    let status = Command::new("bash")
+        .args(["-lc", "command -v sdk >/dev/null 2>&1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    if let Ok(st) = status {
+        if st.success() {
+            return Ok(());
+        }
+    }
+
+    bail!("sdkman not found; required for java = \"{v}\"");
+}
+
+fn spawn_background(p: &Resolved, start_cmd: &[String]) -> Result<()> {
+    if start_cmd.is_empty() {
+        bail!("empty start command");
+    }
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -920,8 +1056,8 @@ fn spawn_background(p: &Resolved) -> Result<()> {
     let log_err = log
         .try_clone()
         .with_context(|| format!("clone log handle {}", p.log_file.display()))?;
-    let mut cmd = Command::new(&p.start[0]);
-    cmd.args(&p.start[1..])
+    let mut cmd = Command::new(&start_cmd[0]);
+    cmd.args(&start_cmd[1..])
         .stdin(Stdio::null())
         .stdout(log)
         .stderr(log_err)
@@ -933,7 +1069,7 @@ fn spawn_background(p: &Resolved) -> Result<()> {
     }
     let mut child = cmd
         .spawn()
-        .with_context(|| format!("spawn {}", p.start[0]))?;
+        .with_context(|| format!("spawn {}", start_cmd[0]))?;
     let pid = child.id();
     if let Err(err) = std::fs::write(&p.pid_file, format!("{pid}\n")) {
         signal_pid(pid, "-KILL");
@@ -955,6 +1091,12 @@ fn cmd_start(p: &Resolved) -> Result<()> {
         };
         bail!("project `{}` is disabled: {why}", p.id);
     }
+    check_toolchain_availability(
+        p.node.as_deref(),
+        p.java.as_deref(),
+        current_home().as_deref(),
+    )?;
+    let start_cmd = p.assembled_start();
     eprintln!("starting {} …", p.id);
     eprintln!("  root {}", p.root.display());
     if p.background {
@@ -962,7 +1104,7 @@ fn cmd_start(p: &Resolved) -> Result<()> {
     } else {
         eprintln!(
             "  script {}",
-            script_tokens(&p.start)
+            script_tokens(&start_cmd)
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(" ")
@@ -972,7 +1114,7 @@ fn cmd_start(p: &Resolved) -> Result<()> {
     if !p.root.is_dir() {
         bail!("project root not found: {}", p.root.display());
     }
-    if let Some(missing) = first_missing_script(&p.start) {
+    if let Some(missing) = first_missing_script(&start_cmd) {
         bail!("start script not found: {missing}");
     }
     ensure_log_dir(&p.log_dir, current_home().as_deref())?;
@@ -981,9 +1123,9 @@ fn cmd_start(p: &Resolved) -> Result<()> {
         return Ok(());
     }
     if p.background {
-        spawn_background(p)?;
+        spawn_background(p, &start_cmd)?;
     } else {
-        run_cmd(&p.start, Some(&p.root), &p.catalina_env())?;
+        run_cmd(&start_cmd, Some(&p.root), &p.catalina_env())?;
     }
     let timeout = start_ready_timeout()?;
     if p.login_url.is_empty() {
@@ -1582,5 +1724,169 @@ port = 9
         let text = read_tail(&path, 2).unwrap();
         assert_eq!(text, "c\nd\n");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parses_and_resolves_node_and_java_toolchain() {
+        let toml_str = r#"
+[projects.fullstack]
+name = "fullstack"
+root = "/tmp/fullstack"
+node = "20"
+java = "17"
+start = ["pnpm", "dev"]
+port = 3000
+
+[projects.none]
+name = "none"
+root = "/tmp/none"
+start = ["true"]
+port = 3001
+
+[projects.whitespace]
+name = "whitespace"
+root = "/tmp/whitespace"
+node = "  "
+java = ""
+start = ["true"]
+port = 3002
+"#;
+        let cfg: FileConfig = parse_config(toml_str).unwrap();
+        let home = Path::new("/Users/dev");
+
+        let fs = resolve_project("fullstack", cfg.projects.get("fullstack").unwrap(), Some(home)).unwrap();
+        assert_eq!(fs.node.as_deref(), Some("20"));
+        assert_eq!(fs.java.as_deref(), Some("17"));
+
+        let none = resolve_project("none", cfg.projects.get("none").unwrap(), Some(home)).unwrap();
+        assert_eq!(none.node, None);
+        assert_eq!(none.java, None);
+
+        let ws = resolve_project("whitespace", cfg.projects.get("whitespace").unwrap(), Some(home)).unwrap();
+        assert_eq!(ws.node, None);
+        assert_eq!(ws.java, None);
+
+        // ProjectRow serialization check
+        let row_fs = ProjectRow {
+            id: fs.id.clone(),
+            name: fs.name.clone(),
+            root: path_to_string(&fs.root),
+            enabled: fs.enabled,
+            port: fs.port,
+            reason: fs.reason.clone(),
+            node: fs.node.clone(),
+            java: fs.java.clone(),
+        };
+        let json_fs: serde_json::Value = serde_json::from_str(&serde_json::to_string(&row_fs).unwrap()).unwrap();
+        assert_eq!(json_fs["node"], "20");
+        assert_eq!(json_fs["java"], "17");
+
+        let row_none = ProjectRow {
+            id: none.id.clone(),
+            name: none.name.clone(),
+            root: path_to_string(&none.root),
+            enabled: none.enabled,
+            port: none.port,
+            reason: none.reason.clone(),
+            node: none.node.clone(),
+            java: none.java.clone(),
+        };
+        let json_none: serde_json::Value = serde_json::from_str(&serde_json::to_string(&row_none).unwrap()).unwrap();
+        assert!(json_none.get("node").is_none());
+        assert!(json_none.get("java").is_none());
+    }
+
+    #[test]
+    fn assemble_start_cmd_cases() {
+        let base = vec!["npm".to_string(), "run".to_string(), "dev".to_string()];
+
+        // node only -> fnm exec --using=<v> --
+        let with_node = assemble_start_cmd(&base, Some("20"), None);
+        assert_eq!(
+            with_node,
+            vec!["fnm", "exec", "--using=20", "--", "npm", "run", "dev"]
+        );
+
+        // java only -> bash -lc 'sdk use java <v> && exec "$@"' --
+        let with_java = assemble_start_cmd(&base, None, Some("17"));
+        assert_eq!(
+            with_java,
+            vec![
+                "bash",
+                "-lc",
+                "sdk use java 17 && exec \"$@\"",
+                "--",
+                "npm",
+                "run",
+                "dev"
+            ]
+        );
+
+        // both -> sdkman wrapping fnm wrapping command
+        let with_both = assemble_start_cmd(&base, Some("20"), Some("17"));
+        assert_eq!(
+            with_both,
+            vec![
+                "bash",
+                "-lc",
+                "sdk use java 17 && exec \"$@\"",
+                "--",
+                "fnm",
+                "exec",
+                "--using=20",
+                "--",
+                "npm",
+                "run",
+                "dev"
+            ]
+        );
+
+        // neither -> unchanged
+        let without_any = assemble_start_cmd(&base, None, None);
+        assert_eq!(without_any, base);
+
+        // empty base command
+        let empty: Vec<String> = Vec::new();
+        assert_eq!(assemble_start_cmd(&empty, Some("20"), Some("17")), Vec::<String>::new());
+    }
+
+    #[test]
+    fn toolchain_missing_reports_readable_errors() {
+        let toml_str = r#"
+[projects.needs_fnm]
+name = "needs_fnm"
+root = "/tmp/needs_fnm"
+node = "999"
+start = ["pnpm", "dev"]
+port = 9001
+
+[projects.needs_sdkman]
+name = "needs_sdkman"
+root = "/tmp/needs_sdkman"
+java = "999"
+start = ["mvn", "spring-boot:run"]
+port = 9002
+"#;
+        let cfg: FileConfig = parse_config(toml_str).unwrap();
+        let p_fnm = resolve_project("needs_fnm", cfg.projects.get("needs_fnm").unwrap(), Some(Path::new("/nonexistent"))).unwrap();
+        let p_sdk = resolve_project("needs_sdkman", cfg.projects.get("needs_sdkman").unwrap(), Some(Path::new("/nonexistent"))).unwrap();
+
+        if Command::new("fnm").arg("--version").status().is_err() {
+            let err = check_toolchain_availability(Some("999"), None, Some(Path::new("/nonexistent"))).unwrap_err().to_string();
+            assert!(err.contains("fnm"), "{err}");
+            assert!(err.contains("999"), "{err}");
+
+            let start_err = cmd_start(&p_fnm).unwrap_err().to_string();
+            assert!(start_err.contains("fnm"), "{start_err}");
+            assert!(start_err.contains("999"), "{start_err}");
+        }
+
+        let err_sdk = check_sdkman_installed("999", Some(Path::new("/nonexistent/sdkman"))).unwrap_err().to_string();
+        assert!(err_sdk.contains("sdkman"), "{err_sdk}");
+        assert!(err_sdk.contains("999"), "{err_sdk}");
+
+        let start_err_sdk = cmd_start(&p_sdk).unwrap_err().to_string();
+        assert!(start_err_sdk.contains("sdkman"), "{start_err_sdk}");
+        assert!(start_err_sdk.contains("999"), "{start_err_sdk}");
     }
 }

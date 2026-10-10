@@ -126,3 +126,44 @@ fn print_list(loaded: &Loaded, json: bool) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parses_cli_arguments() {
+        let cli = Cli::try_parse_from(["tongyun-dev", "list", "--json"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::List { json: true }));
+
+        let cli = Cli::try_parse_from(["tongyun-dev", "start", "legacy_app"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Start { ref id } if id == "legacy_app"));
+
+        let cli = Cli::try_parse_from(["tongyun-dev", "status", "legacy_app", "--json"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Status { ref id, json: true } if id == "legacy_app"));
+    }
+
+    #[test]
+    fn delegates_command_assembly_to_core() {
+        let cmd = vec!["pnpm".to_string(), "dev".to_string()];
+        let assembled = tongyun_dev_core::assemble_start_cmd(&cmd, Some("20"), None);
+        assert_eq!(
+            assembled,
+            vec!["fnm", "exec", "--using=20", "--", "pnpm", "dev"]
+        );
+
+        let assembled_java = tongyun_dev_core::assemble_start_cmd(&cmd, None, Some("17"));
+        assert_eq!(
+            assembled_java,
+            vec![
+                "bash",
+                "-lc",
+                "sdk use java 17 && exec \"$@\"",
+                "--",
+                "pnpm",
+                "dev"
+            ]
+        );
+    }
+}

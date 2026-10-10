@@ -1,5 +1,7 @@
 use std::path::Path;
-use tongyun_dev_core::{LogTail, ProjectList, StatusJson};
+use tongyun_dev_core::{
+    LogTail, NewProject, ProjectDetail, ProjectEdit, ProjectList, ProjectRow, StatusJson,
+};
 
 fn report(err: impl std::fmt::Display) -> String {
     format!("{err:#}")
@@ -146,6 +148,48 @@ async fn open_config_file() -> Result<(), String> {
     .await
 }
 
+#[tauri::command]
+async fn project_detail(id: String) -> Result<ProjectDetail, String> {
+    blocking(move || {
+        let loaded = tongyun_dev_core::load(None).map_err(report)?;
+        loaded.project_detail(&id).map_err(report)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn add_project(req: NewProject) -> Result<ProjectRow, String> {
+    blocking(move || {
+        let mut loaded = tongyun_dev_core::load(None).map_err(report)?;
+        loaded.add_project(req).map_err(report)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn update_project(id: String, edit: ProjectEdit) -> Result<ProjectRow, String> {
+    blocking(move || {
+        let mut loaded = tongyun_dev_core::load(None).map_err(report)?;
+        loaded.update_project(&id, edit).map_err(report)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn remove_project(id: String) -> Result<(), String> {
+    blocking(move || {
+        let mut loaded = tongyun_dev_core::load(None).map_err(report)?;
+        loaded.remove_project(&id).map_err(report)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn pick_folder() -> Result<Option<String>, String> {
+    let picked = rfd::AsyncFileDialog::new().pick_folder().await;
+    Ok(picked.map(|h| h.path().to_string_lossy().to_string()))
+}
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -161,7 +205,12 @@ pub fn run() {
             config_info,
             pick_config_file,
             create_default_config,
-            open_config_file
+            open_config_file,
+            project_detail,
+            add_project,
+            update_project,
+            remove_project,
+            pick_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running tongyun-dev");

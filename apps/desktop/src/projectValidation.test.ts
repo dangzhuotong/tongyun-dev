@@ -1,0 +1,154 @@
+import { describe, expect, it } from "vitest";
+import { buildEditRequest, validateProjectForm, type EditBaseline, type ProjectFormData } from "./projectValidation";
+
+describe("validateProjectForm (项目表单校验)", () => {
+  const validData: ProjectFormData = {
+    id: "test_proj",
+    name: "测试项目",
+    root: "/home/user/project",
+    start: "pnpm dev",
+    stop: "pnpm stop",
+    port: 3000,
+    login_url: "http://127.0.0.1:3000/login",
+    health_url: "",
+    log_file: "",
+    node: "22",
+    java: "",
+    enabled: true,
+    reason: "",
+    start_timeout_secs: 180,
+  };
+
+  it("passes validation for complete valid project data in create mode", () => {
+    const errors = validateProjectForm(validData, false);
+    expect(Object.keys(errors)).toHaveLength(0);
+  });
+
+  it("passes validation in edit mode without checking ID", () => {
+    const editData = { ...validData, id: "" };
+    const errors = validateProjectForm(editData, true);
+    expect(errors.id).toBeUndefined();
+    expect(Object.keys(errors)).toHaveLength(0);
+  });
+
+  describe("必填项校验", () => {
+    it("reports error when root is missing or whitespace only", () => {
+      const errorsEmpty = validateProjectForm({ ...validData, root: "" });
+      expect(errorsEmpty.root).toBe("根目录为必填项");
+
+      const errorsSpaces = validateProjectForm({ ...validData, root: "   " });
+      expect(errorsSpaces.root).toBe("根目录为必填项");
+    });
+
+    it("reports error when start command is missing or whitespace only", () => {
+      const errorsEmpty = validateProjectForm({ ...validData, start: "" });
+      expect(errorsEmpty.start).toBe("启动命令为必填项");
+
+      const errorsSpaces = validateProjectForm({ ...validData, start: "   " });
+      expect(errorsSpaces.start).toBe("启动命令为必填项");
+    });
+
+    it("reports error when id is missing or invalid in create mode", () => {
+      const errorsEmpty = validateProjectForm({ ...validData, id: "" }, false);
+      expect(errorsEmpty.id).toBe("项目 ID 为必填项");
+
+      const errorsInvalid = validateProjectForm({ ...validData, id: "bad id with spaces!" }, false);
+      expect(errorsInvalid.id).toContain("字母、数字、下划线");
+    });
+
+    it("reports error when enabled is false but reason is empty", () => {
+      const errors = validateProjectForm({ ...validData, enabled: false, reason: "" });
+      expect(errors.reason).toBe("停用项目时必须填写停用原因");
+
+      const errorsOk = validateProjectForm({ ...validData, enabled: false, reason: "正在维护" });
+      expect(errorsOk.reason).toBeUndefined();
+    });
+  });
+
+  describe("端口范围校验 (端口>0 与 1-65535)", () => {
+    it("rejects port <= 0", () => {
+      expect(validateProjectForm({ ...validData, port: 0 }).port).toBeDefined();
+      expect(validateProjectForm({ ...validData, port: -1 }).port).toBeDefined();
+      expect(validateProjectForm({ ...validData, port: -8080 }).port).toBeDefined();
+    });
+
+    it("rejects port > 65535", () => {
+      expect(validateProjectForm({ ...validData, port: 65536 }).port).toBeDefined();
+      expect(validateProjectForm({ ...validData, port: 99999 }).port).toBeDefined();
+    });
+
+    it("rejects non-integer ports or NaN", () => {
+      expect(validateProjectForm({ ...validData, port: 8080.5 }).port).toBeDefined();
+      expect(validateProjectForm({ ...validData, port: "not-a-number" }).port).toBeDefined();
+      expect(validateProjectForm({ ...validData, port: "" }).port).toBeDefined();
+    });
+
+    it("accepts valid port numbers and valid port strings", () => {
+      expect(validateProjectForm({ ...validData, port: 1 }).port).toBeUndefined();
+      expect(validateProjectForm({ ...validData, port: 8080 }).port).toBeUndefined();
+      expect(validateProjectForm({ ...validData, port: 65535 }).port).toBeUndefined();
+      expect(validateProjectForm({ ...validData, port: "5173" }).port).toBeUndefined();
+    });
+  });
+});
+
+describe("buildEditRequest (只提交改过的字段)", () => {
+  const base: EditBaseline = {
+    name: "legacy_app",
+    root: "~/code/demo",
+    start: "set -e\n./start.sh\n",
+    start_editable: true,
+    stop: "",
+    stop_editable: true,
+    port: 8080,
+    login_url: "http://127.0.0.1:8080/login",
+    health_url: "",
+    log_file: "",
+    node: null,
+    java: "8",
+    enabled: true,
+    reason: "",
+    start_timeout_secs: null,
+  };
+  const form = (over: Partial<ProjectFormData> = {}): ProjectFormData => ({
+    id: "legacy_app",
+    name: base.name,
+    root: base.root,
+    start: base.start,
+    stop: "",
+    port: "8080",
+    login_url: base.login_url,
+    health_url: "",
+    log_file: "",
+    node: "",
+    java: "8",
+    enabled: true,
+    reason: "",
+    start_timeout_secs: "",
+    ...over,
+  });
+
+  it("未改动时为空，不碰多行 start", () => {
+    expect(buildEditRequest(base, form())).toEqual({});
+  });
+  it("只改端口只发 port", () => {
+    expect(buildEditRequest(base, form({ port: "9090" }))).toEqual({ port: 9090 });
+  });
+  it("清空登录页发空串（删键）", () => {
+    expect(buildEditRequest(base, form({ login_url: "" }))).toEqual({ login_url: "" });
+  });
+  it("start 不可编辑时永不提交 start", () => {
+    expect(
+      buildEditRequest({ ...base, start_editable: false }, form({ start: "x" }))
+    ).toEqual({});
+  });
+  it("停用时带原因，重新启用时清掉原因", () => {
+    expect(buildEditRequest(base, form({ enabled: false, reason: "迁移中" }))).toEqual({
+      enabled: false,
+      reason: "迁移中",
+    });
+    expect(
+      buildEditRequest({ ...base, enabled: false, reason: "未配置", port: 0 }, form({ port: "8302" }))
+    ).toEqual({ enabled: true, reason: "", port: 8302 });
+  });
+});

@@ -39,6 +39,7 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct Project {
+    #[serde(default)]
     name: String,
     root: String,
     #[serde(default = "default_true")]
@@ -412,9 +413,17 @@ impl Loaded {
 
         let timeout = Duration::from_secs(initial_st.timeout_secs);
         if project.login_url.is_empty() {
-            eprintln!("waiting up to {}s for port {}", timeout.as_secs(), project.port);
+            eprintln!(
+                "waiting up to {}s for port {}",
+                timeout.as_secs(),
+                project.port
+            );
         } else {
-            eprintln!("waiting up to {}s for {}", timeout.as_secs(), project.login_url);
+            eprintln!(
+                "waiting up to {}s for {}",
+                timeout.as_secs(),
+                project.login_url
+            );
         }
 
         let start_time = Instant::now();
@@ -434,14 +443,18 @@ impl Loaded {
                 }
                 LifeState::PortOpen => {
                     if last_log_time.elapsed() >= Duration::from_secs(5) {
-                        let elapsed = st.elapsed_secs.unwrap_or_else(|| start_time.elapsed().as_secs());
+                        let elapsed = st
+                            .elapsed_secs
+                            .unwrap_or_else(|| start_time.elapsed().as_secs());
                         eprintln!("端口已通 已 {} 秒", elapsed);
                         last_log_time = Instant::now();
                     }
                 }
                 LifeState::Starting => {
                     if last_log_time.elapsed() >= Duration::from_secs(5) {
-                        let elapsed = st.elapsed_secs.unwrap_or_else(|| start_time.elapsed().as_secs());
+                        let elapsed = st
+                            .elapsed_secs
+                            .unwrap_or_else(|| start_time.elapsed().as_secs());
                         eprintln!("启动中 已 {} 秒", elapsed);
                         last_log_time = Instant::now();
                     }
@@ -965,7 +978,11 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
         .map(String::from);
     Ok(Resolved {
         id: id.to_string(),
-        name: p.name.clone(),
+        name: if p.name.trim().is_empty() {
+            id.to_string()
+        } else {
+            p.name.clone()
+        },
         enabled: p.enabled,
         reason: p.reason.trim().to_string(),
         root,
@@ -1353,9 +1370,10 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
     let own = tracked_pids(p);
     let open = port_open(p.port);
     let (port_conflict, port_holder) = port_conflict_of(p, &own, peers, open);
-    let pid = own.into_iter().next().or_else(|| {
-        read_pid(&p.pid_file).filter(|&pid| process_alive(pid))
-    });
+    let pid = own
+        .into_iter()
+        .next()
+        .or_else(|| read_pid(&p.pid_file).filter(|&pid| process_alive(pid)));
     let process_alive = pid.is_some();
     let probe = login_probe(&p.login_url);
     let has_probe = !p.login_url.is_empty();
@@ -1896,6 +1914,10 @@ pub struct NewProject {
     pub start_timeout_secs: Option<u64>,
     #[serde(default)]
     pub stop_grace_secs: Option<u64>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 fn non_empty(v: &Option<String>) -> Option<String> {
@@ -1957,11 +1979,16 @@ impl NewProject {
         let java_home = non_empty(&self.java_home);
         let node_home = non_empty(&self.node_home);
         let name = non_empty(&self.name).unwrap_or_else(|| id.clone());
+        let enabled = self.enabled.unwrap_or(true);
+        let reason = non_empty(&self.reason).unwrap_or_default();
+        if !enabled && reason.is_empty() {
+            bail!("disabled project `{id}` needs a reason");
+        }
         let project = Project {
             name,
             root,
-            enabled: true,
-            reason: String::new(),
+            enabled,
+            reason,
             start: shell_argv(&start, shell.as_deref()),
             stop: non_empty(&self.stop)
                 .map(|s| shell_argv(&s, shell.as_deref()))
@@ -1993,6 +2020,12 @@ fn project_table(p: &Project) -> toml_edit::Table {
     let mut t = Table::new();
     t["name"] = value(p.name.as_str());
     t["root"] = value(p.root.as_str());
+    if !p.enabled {
+        t["enabled"] = value(false);
+    }
+    if !p.reason.is_empty() {
+        t["reason"] = value(p.reason.as_str());
+    }
     t["port"] = value(i64::from(p.port));
     if p.background {
         t["background"] = value(true);
@@ -2039,6 +2072,83 @@ fn project_table(p: &Project) -> toml_edit::Table {
         }
     }
     t
+}
+
+/// Project updates applied via `Loaded::update_project`.
+/// Semantics: `None` = do not modify; `Some("")` (for strings) = remove key; otherwise set.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ProjectEdit {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub root: Option<String>,
+    #[serde(default)]
+    pub start: Option<String>,
+    #[serde(default)]
+    pub stop: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub login_url: Option<String>,
+    #[serde(default)]
+    pub health_url: Option<String>,
+    #[serde(default)]
+    pub log_file: Option<String>,
+    #[serde(default)]
+    pub node: Option<String>,
+    #[serde(default)]
+    pub java: Option<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub start_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub stop_grace_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct ProjectDetail {
+    pub id: String,
+    pub name: String,
+    pub root: String,
+    pub start: String,
+    pub start_editable: bool,
+    pub stop: String,
+    pub stop_editable: bool,
+    pub port: u16,
+    pub login_url: String,
+    pub health_url: String,
+    pub log_file: String,
+    pub node: Option<String>,
+    pub java: Option<String>,
+    pub enabled: bool,
+    pub reason: String,
+    pub start_timeout_secs: Option<u64>,
+    pub stop_grace_secs: Option<u64>,
+}
+
+fn unpack_command(argv: &[String]) -> (String, bool) {
+    if argv.is_empty() {
+        (String::new(), true)
+    } else if argv.len() == 3 && argv[0] == "bash" && (argv[1] == "-c" || argv[1] == "-lc") {
+        (argv[2].clone(), true)
+    } else {
+        (argv.join(" "), false)
+    }
+}
+
+fn set_table_val(table: &mut toml_edit::Table, key: &str, new_val: toml_edit::Value) {
+    if let Some(item) = table.get_mut(key) {
+        if let Some(val) = item.as_value_mut() {
+            let decor = val.decor().clone();
+            *val = new_val;
+            *val.decor_mut() = decor;
+            return;
+        }
+    }
+    table.insert(key, toml_edit::Item::Value(new_val));
 }
 
 fn read_doc(path: &Path) -> Result<toml_edit::DocumentMut> {
@@ -2118,6 +2228,234 @@ impl Loaded {
         write_doc(&self.path, &doc)?;
         self.config.projects.remove(id);
         Ok(())
+    }
+
+    /// Detailed information about a registered project, suitable for filling the edit form.
+    pub fn project_detail(&self, id: &str) -> Result<ProjectDetail> {
+        let p = self
+            .config
+            .projects
+            .get(id)
+            .with_context(|| format!("unknown project id `{id}`; try `tongyun-dev list`"))?;
+        let (start, start_editable) = unpack_command(&p.start);
+        let (stop, stop_editable) = unpack_command(&p.stop);
+        Ok(ProjectDetail {
+            id: id.to_string(),
+            name: if p.name.trim().is_empty() {
+                id.to_string()
+            } else {
+                p.name.clone()
+            },
+            root: p.root.clone(),
+            start,
+            start_editable,
+            stop,
+            stop_editable,
+            port: p.port,
+            login_url: p.login_url.clone(),
+            health_url: p.health_url.clone(),
+            log_file: p.log_file.clone(),
+            node: p.node.clone(),
+            java: p.java.clone(),
+            enabled: p.enabled,
+            reason: p.reason.clone(),
+            start_timeout_secs: p.start_timeout_secs,
+            stop_grace_secs: p.stop_grace_secs,
+        })
+    }
+
+    /// Update an existing project in the config file. Preserves other keys, key order, comments and multiline strings.
+    pub fn update_project(&mut self, id: &str, edit: ProjectEdit) -> Result<ProjectRow> {
+        let existing = self
+            .config
+            .projects
+            .get(id)
+            .with_context(|| format!("unknown project id `{id}`; try `tongyun-dev list`"))?;
+
+        for (label, v) in [("node", &edit.node), ("java", &edit.java)] {
+            if let Some(v) = v {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() && !valid_version(trimmed) {
+                    bail!("{label} version `{trimmed}` may only contain letters, digits, `.`, `-`, `_`");
+                }
+            }
+        }
+
+        let mut doc = read_doc(&self.path)?;
+        let projects = doc
+            .get_mut("projects")
+            .and_then(|p| p.as_table_mut())
+            .context("`projects` in config is not a table")?;
+        let proj_table = projects
+            .get_mut(id)
+            .and_then(|p| p.as_table_mut())
+            .context(format!(
+                "project `{id}` not found in {}",
+                self.path.display()
+            ))?;
+
+        if let Some(ref name) = edit.name {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                proj_table.remove("name");
+            } else {
+                set_table_val(proj_table, "name", toml_edit::Value::from(trimmed));
+            }
+        }
+
+        if let Some(ref root) = edit.root {
+            let trimmed = root.trim();
+            if trimmed.is_empty() {
+                proj_table.remove("root");
+            } else {
+                set_table_val(proj_table, "root", toml_edit::Value::from(trimmed));
+            }
+        }
+
+        if let Some(port) = edit.port {
+            set_table_val(proj_table, "port", toml_edit::Value::from(i64::from(port)));
+        }
+
+        if let Some(ref start) = edit.start {
+            let trimmed = start.trim();
+            if trimmed.is_empty() {
+                proj_table.remove("start");
+            } else {
+                let argv = shell_argv(trimmed, existing.shell.as_deref());
+                let mut a = toml_edit::Array::new();
+                for s in argv {
+                    a.push(s.as_str());
+                }
+                set_table_val(proj_table, "start", toml_edit::Value::Array(a));
+            }
+        }
+
+        if let Some(ref stop) = edit.stop {
+            let trimmed = stop.trim();
+            if trimmed.is_empty() {
+                proj_table.remove("stop");
+            } else {
+                let argv = shell_argv(trimmed, existing.shell.as_deref());
+                let mut a = toml_edit::Array::new();
+                for s in argv {
+                    a.push(s.as_str());
+                }
+                set_table_val(proj_table, "stop", toml_edit::Value::Array(a));
+            }
+        }
+
+        if let Some(ref login_url) = edit.login_url {
+            let trimmed = login_url.trim();
+            if trimmed.is_empty() {
+                proj_table.remove("login_url");
+            } else {
+                set_table_val(proj_table, "login_url", toml_edit::Value::from(trimmed));
+            }
+        }
+
+        if let Some(ref health_url) = edit.health_url {
+            let trimmed = health_url.trim();
+            if trimmed.is_empty() {
+                proj_table.remove("health_url");
+            } else {
+                set_table_val(proj_table, "health_url", toml_edit::Value::from(trimmed));
+            }
+        }
+
+        if let Some(ref log_file) = edit.log_file {
+            let trimmed = log_file.trim();
+            if trimmed.is_empty() {
+                proj_table.remove("log_file");
+            } else {
+                set_table_val(proj_table, "log_file", toml_edit::Value::from(trimmed));
+            }
+        }
+
+        if let Some(ref node) = edit.node {
+            let trimmed = node.trim();
+            if trimmed.is_empty() {
+                proj_table.remove("node");
+            } else {
+                set_table_val(proj_table, "node", toml_edit::Value::from(trimmed));
+            }
+        }
+
+        if let Some(ref java) = edit.java {
+            let trimmed = java.trim();
+            if trimmed.is_empty() {
+                proj_table.remove("java");
+            } else {
+                set_table_val(proj_table, "java", toml_edit::Value::from(trimmed));
+            }
+        }
+
+        if let Some(enabled) = edit.enabled {
+            set_table_val(proj_table, "enabled", toml_edit::Value::from(enabled));
+        }
+
+        if let Some(ref reason) = edit.reason {
+            let trimmed = reason.trim();
+            if trimmed.is_empty() {
+                proj_table.remove("reason");
+            } else {
+                set_table_val(proj_table, "reason", toml_edit::Value::from(trimmed));
+            }
+        }
+
+        if let Some(timeout) = edit.start_timeout_secs {
+            if timeout == 0 {
+                proj_table.remove("start_timeout_secs");
+            } else {
+                set_table_val(
+                    proj_table,
+                    "start_timeout_secs",
+                    toml_edit::Value::from(timeout as i64),
+                );
+            }
+        }
+
+        if let Some(grace) = edit.stop_grace_secs {
+            if grace == 0 {
+                proj_table.remove("stop_grace_secs");
+            } else {
+                set_table_val(
+                    proj_table,
+                    "stop_grace_secs",
+                    toml_edit::Value::from(grace as i64),
+                );
+            }
+        }
+
+        let temp_config = parse_config(&doc.to_string())?;
+        let updated_project = temp_config
+            .projects
+            .get(id)
+            .context(format!("project `{id}` missing after update"))?;
+        resolve_project(id, updated_project, current_home().as_deref())?;
+
+        write_doc(&self.path, &doc)?;
+        self.config
+            .projects
+            .insert(id.to_string(), updated_project.clone());
+
+        let r = self.resolve(id)?;
+        let configured = r.port > 0 && (!r.active_start().is_empty() || r.tomcat.is_some());
+        Ok(ProjectRow {
+            id: r.id,
+            name: r.name,
+            root: path_to_string(&r.root),
+            enabled: r.enabled,
+            port: r.port,
+            reason: r.reason,
+            configured,
+            start_timeout_secs: r.start_timeout_secs,
+            stop_grace_secs: r.stop_grace_secs,
+            node: r.node,
+            java: r.java,
+            java_home: r.java_home.as_ref().map(|p| path_to_string(p)),
+            node_home: r.node_home.as_ref().map(|p| path_to_string(p)),
+            shell: r.shell,
+        })
     }
 
     /// Page to open in the browser: `login_url`, else `health_url`, else `http://127.0.0.1:<port>/`.
@@ -3385,5 +3723,259 @@ start = ["echo", "hi"]
             Some(path_to_string(&def_cfg).as_str())
         );
         let _ = std::fs::remove_dir_all(&temp);
+    }
+}
+
+#[cfg(test)]
+mod edit_project_tests {
+    use super::*;
+
+    fn temp_config(tag: &str, body: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("tongyun_dev_edit_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("proj_a")).unwrap();
+        std::fs::create_dir_all(dir.join("proj_b")).unwrap();
+        let path = dir.join("projects.toml");
+        std::fs::write(&path, body.replace("@ROOT@", &path_to_string(&dir))).unwrap();
+        path
+    }
+
+    const BASE_EDIT: &str = r#"# keep this header comment
+[projects.proj_a]
+name = "proj_a"
+root = "@ROOT@/proj_a"
+# keep this inline note before start
+start = ["bash", "{{root}}/start.sh"]
+port = 8080
+login_url = "http://127.0.0.1:8080/login"
+enabled = true
+
+# keep comment before proj_b
+[projects.proj_b]
+name = "proj_b"
+root = "@ROOT@/proj_b"
+port = 9000
+start = ["bash", "-c", '''
+set -euo pipefail
+echo starting proj_b
+''']
+"#;
+
+    #[test]
+    fn test_1_change_port_preserves_comments_multiline_and_other_projects_verbatim() {
+        let path = temp_config("t1", BASE_EDIT);
+        let text_before = std::fs::read_to_string(&path).unwrap();
+        let mut loaded = load(Some(&path)).unwrap();
+
+        let edit = ProjectEdit {
+            port: Some(8888),
+            ..Default::default()
+        };
+        let row = loaded.update_project("proj_a", edit).unwrap();
+        assert_eq!(row.port, 8888);
+
+        let text_after = std::fs::read_to_string(&path).unwrap();
+        let lines_before: Vec<&str> = text_before.lines().collect();
+        let lines_after: Vec<&str> = text_after.lines().collect();
+
+        assert_eq!(
+            lines_before.len(),
+            lines_after.len(),
+            "number of lines must match"
+        );
+        let mut diff_indices = Vec::new();
+        for (idx, (b, a)) in lines_before.iter().zip(lines_after.iter()).enumerate() {
+            if b != a {
+                diff_indices.push((idx, *b, *a));
+            }
+        }
+        assert_eq!(
+            diff_indices.len(),
+            1,
+            "only exactly one line should change, got: {:?}",
+            diff_indices
+        );
+        assert_eq!(diff_indices[0].1, "port = 8080");
+        assert_eq!(diff_indices[0].2, "port = 8888");
+    }
+
+    #[test]
+    fn test_2_clear_login_url_removes_key() {
+        let path = temp_config("t2", BASE_EDIT);
+        let mut loaded = load(Some(&path)).unwrap();
+
+        let edit = ProjectEdit {
+            login_url: Some("".into()),
+            ..Default::default()
+        };
+        let row = loaded.update_project("proj_a", edit).unwrap();
+        assert_eq!(row.id, "proj_a");
+
+        let text_after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text_after.contains("login_url"),
+            "login_url key must be removed from toml"
+        );
+
+        let reloaded = load(Some(&path)).unwrap();
+        assert_eq!(
+            reloaded.config.projects.get("proj_a").unwrap().login_url,
+            ""
+        );
+    }
+
+    #[test]
+    fn test_3_change_start_generates_bash_c_argv() {
+        let path = temp_config("t3", BASE_EDIT);
+        let mut loaded = load(Some(&path)).unwrap();
+
+        let edit = ProjectEdit {
+            start: Some("pnpm dev --port 8080".into()),
+            ..Default::default()
+        };
+        loaded.update_project("proj_a", edit).unwrap();
+
+        let text_after = std::fs::read_to_string(&path).unwrap();
+        assert!(text_after.contains(r#"start = ["bash", "-c", "pnpm dev --port 8080"]"#));
+
+        let reloaded = load(Some(&path)).unwrap();
+        assert_eq!(
+            reloaded.config.projects.get("proj_a").unwrap().start,
+            vec!["bash", "-c", "pnpm dev --port 8080"]
+        );
+    }
+
+    #[test]
+    fn test_4_start_non_editable_preserves_start_when_changing_port() {
+        let path = temp_config("t4", BASE_EDIT);
+        let mut loaded = load(Some(&path)).unwrap();
+
+        let edit = ProjectEdit {
+            port: Some(9999),
+            ..Default::default()
+        };
+        let row = loaded.update_project("proj_a", edit).unwrap();
+        assert_eq!(row.port, 9999);
+
+        let reloaded = load(Some(&path)).unwrap();
+        let p = reloaded.config.projects.get("proj_a").unwrap();
+        assert_eq!(p.port, 9999);
+        assert_eq!(p.start, vec!["bash", "{{root}}/start.sh"]);
+
+        let text_after = std::fs::read_to_string(&path).unwrap();
+        assert!(text_after.contains(r#"start = ["bash", "{{root}}/start.sh"]"#));
+    }
+
+    #[test]
+    fn test_5_enabled_false_without_reason_rejected() {
+        let path = temp_config("t5", BASE_EDIT);
+        let mut loaded = load(Some(&path)).unwrap();
+
+        let edit = ProjectEdit {
+            enabled: Some(false),
+            reason: None,
+            ..Default::default()
+        };
+        let err = loaded
+            .update_project("proj_a", edit)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("needs a reason"), "got: {err}");
+
+        let edit_empty_reason = ProjectEdit {
+            enabled: Some(false),
+            reason: Some("   ".into()),
+            ..Default::default()
+        };
+        let err2 = loaded
+            .update_project("proj_a", edit_empty_reason)
+            .unwrap_err()
+            .to_string();
+        assert!(err2.contains("needs a reason"), "got: {err2}");
+    }
+
+    #[test]
+    fn test_6_unknown_id_errors() {
+        let path = temp_config("t6", BASE_EDIT);
+        let mut loaded = load(Some(&path)).unwrap();
+
+        let edit = ProjectEdit {
+            port: Some(9090),
+            ..Default::default()
+        };
+        let err = loaded
+            .update_project("nonexistent_id", edit)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unknown project id `nonexistent_id`"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_7_write_can_be_read_back_by_load() {
+        let path = temp_config("t7", BASE_EDIT);
+        let mut loaded = load(Some(&path)).unwrap();
+
+        let edit = ProjectEdit {
+            name: Some("proj_a_renamed".into()),
+            port: Some(8181),
+            node: Some("20".into()),
+            start_timeout_secs: Some(120),
+            ..Default::default()
+        };
+        loaded.update_project("proj_a", edit).unwrap();
+
+        let reloaded = load(Some(&path)).unwrap();
+        let p = reloaded.config.projects.get("proj_a").unwrap();
+        assert_eq!(p.name, "proj_a_renamed");
+        assert_eq!(p.port, 8181);
+        assert_eq!(p.node.as_deref(), Some("20"));
+        assert_eq!(p.start_timeout_secs, Some(120));
+    }
+
+    #[test]
+    fn test_9_rejected_edit_leaves_file_untouched() {
+        let path = temp_config("t9", BASE_EDIT);
+        let before = std::fs::read_to_string(&path).unwrap();
+        let mut loaded = load(Some(&path)).unwrap();
+        let bad_java = ProjectEdit {
+            java: Some("8; rm -rf /".into()),
+            ..Default::default()
+        };
+        assert!(loaded.update_project("proj_a", bad_java).is_err());
+        let zero_port = ProjectEdit {
+            port: Some(0),
+            ..Default::default()
+        };
+        assert!(loaded.update_project("proj_a", zero_port).is_err());
+        let no_reason = ProjectEdit {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        assert!(loaded.update_project("proj_b", no_reason).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn test_8_project_detail_for_both_start_forms() {
+        let path = temp_config("t8", BASE_EDIT);
+        let loaded = load(Some(&path)).unwrap();
+
+        let detail_a = loaded.project_detail("proj_a").unwrap();
+        assert_eq!(detail_a.id, "proj_a");
+        assert_eq!(detail_a.start_editable, false);
+        assert_eq!(detail_a.start, "bash {{root}}/start.sh");
+        assert_eq!(detail_a.port, 8080);
+        assert_eq!(detail_a.login_url, "http://127.0.0.1:8080/login");
+        assert!(detail_a.enabled);
+
+        let detail_b = loaded.project_detail("proj_b").unwrap();
+        assert_eq!(detail_b.id, "proj_b");
+        assert_eq!(detail_b.start_editable, true);
+        assert!(detail_b.start.contains("echo starting proj_b"));
+        assert_eq!(detail_b.port, 9000);
     }
 }

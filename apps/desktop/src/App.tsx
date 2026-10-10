@@ -1,8 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ConfigInfo, LogTail, ProjectList, Status } from "./types";
+import type { ConfigInfo, LogTail, ProjectDetail, ProjectList, Status } from "./types";
 import { LogPanel } from "./LogPanel";
 import { stateShortLabel } from "./logFormat";
+import { ProjectForm } from "./ProjectForm";
 
 const LOG_LINES = 500;
 
@@ -18,6 +19,12 @@ export function App() {
   const [busy, setBusy] = useState<"" | "start" | "stop" | "restart">("");
   const busyRef = useRef(busy);
   busyRef.current = busy;
+
+  const [formModal, setFormModal] = useState<{
+    open: boolean;
+    mode: "create" | "edit";
+    detail: ProjectDetail | null;
+  }>({ open: false, mode: "create", detail: null });
 
   const refresh = useCallback(async (id: string) => {
     const [nextStatus, nextLog] = await Promise.all([
@@ -154,6 +161,55 @@ export function App() {
     }
   }
 
+  function handleOpenCreate() {
+    setError("");
+    setFormModal({
+      open: true,
+      mode: "create",
+      detail: null,
+    });
+  }
+
+  async function handleOpenEdit() {
+    if (!selected) return;
+    setError("");
+    try {
+      const detail = await invoke<ProjectDetail>("project_detail", { id: selected });
+      setFormModal({
+        open: true,
+        mode: "edit",
+        detail,
+      });
+    } catch (err: unknown) {
+      setError(String(err));
+    }
+  }
+
+  async function handleDeleteProject() {
+    if (!current || !selected) return;
+    const isRunning =
+      status?.running ||
+      status?.state === "starting" ||
+      status?.state === "port_open" ||
+      status?.state === "ready";
+    if (isRunning) {
+      window.alert(`项目「${current.name || selected}」正在运行中，请先停止项目再删除。`);
+      return;
+    }
+    const confirmed = window.confirm(
+      `确定要删除项目「${current.name || selected}」吗？\n只从配置里移除，不删项目文件。`
+    );
+    if (!confirmed) return;
+
+    setError("");
+    try {
+      await invoke("remove_project", { id: selected });
+      await loadProjects();
+    } catch (err: unknown) {
+      setError(String(err));
+    }
+  }
+
   async function handleStart() {
     if (!selected || busyRef.current) return;
     const project = projects?.projects.find((row) => row.id === selected);
@@ -282,6 +338,16 @@ export function App() {
             <p>本机项目</p>
           </div>
         </div>
+        <div className="sidebar-action-wrap">
+          <button
+            type="button"
+            className="btn-add-project"
+            disabled={missingConfig}
+            onClick={handleOpenCreate}
+          >
+            + 新增项目
+          </button>
+        </div>
         <ul className="projects">
           {projects?.projects.map((project) => {
             const toolchain = [
@@ -339,7 +405,33 @@ export function App() {
         {!projects && !error && !missingConfig && <p className="muted">正在读取配置…</p>}
         {missingConfig && <p className="muted">未找到配置</p>}
         {projects && projects.projects.length === 0 && <p className="muted">配置里没有项目</p>}
-        {projects && <p className="config-path">{projects.config_path}</p>}
+        {projects && (
+          <div className="sidebar-footer">
+            <p className="config-path" title={projects.config_path}>
+              {projects.config_path}
+            </p>
+            <div className="sidebar-footer-actions">
+              <button
+                type="button"
+                className="btn-sidebar-link"
+                onClick={handleOpenConfigFile}
+                title="用系统默认编辑器打开配置文件"
+              >
+                编辑配置文件
+              </button>
+              <button
+                type="button"
+                className="btn-sidebar-link"
+                onClick={() => {
+                  loadProjects().catch((err) => setError(String(err)));
+                }}
+                title="重新加载配置文件"
+              >
+                重新加载
+              </button>
+            </div>
+          </div>
+        )}
       </aside>
       <main>
         {missingConfig ? (
@@ -364,8 +456,30 @@ export function App() {
         ) : (
           <>
             <header>
-              <div>
-                <h1>{current?.name ?? "未选择项目"}</h1>
+              <div className="title-area">
+                <div className="title-row">
+                  <h1>{current?.name ?? "未选择项目"}</h1>
+                  {current && (
+                    <div className="project-crud-actions">
+                      <button
+                        type="button"
+                        className="btn-header-action"
+                        onClick={handleOpenEdit}
+                        disabled={busy !== ""}
+                      >
+                        编辑
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-header-action btn-danger"
+                        onClick={handleDeleteProject}
+                        disabled={busy !== ""}
+                      >
+                        删除
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <p>{status?.root ?? current?.root ?? ""}</p>
               </div>
               <div className="actions" aria-busy={busy !== ""}>
@@ -427,9 +541,9 @@ export function App() {
               <div className="unconfigured-banner">
                 <div>
                   <strong>缺少端口 / 启动命令</strong>
-                  <p>该项目缺少端口或启动配置，启动已禁用。点击右侧去编辑配置文件。</p>
+                  <p>该项目缺少端口或启动配置，启动已禁用。点击右侧去配置项目。</p>
                 </div>
-                <button type="button" onClick={handleOpenConfigFile}>
+                <button type="button" onClick={handleOpenEdit}>
                   去配置
                 </button>
               </div>
@@ -478,6 +592,17 @@ export function App() {
           </>
         )}
       </main>
+      {formModal.open && (
+        <ProjectForm
+          mode={formModal.mode}
+          initialDetail={formModal.detail}
+          onClose={() => setFormModal((prev) => ({ ...prev, open: false }))}
+          onSuccess={async (savedId) => {
+            await loadProjects();
+            setSelected(savedId);
+          }}
+        />
+      )}
     </div>
   );
 }

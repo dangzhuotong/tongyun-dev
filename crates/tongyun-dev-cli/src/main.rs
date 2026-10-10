@@ -12,7 +12,7 @@ use tongyun_dev_core::{Loaded, NewProject, StatusJson, DEFAULT_ADD_PORT};
     about = "Local project runner (start/stop/status/logs/open/add/remove/ui). No subcommand = web console on :9099"
 )]
 struct Cli {
-    /// Config file (default: ./config/projects.toml or $TONGYUN_DEV_CONFIG)
+    /// Config file path (lookup order: --config -> $TONGYUN_DEV_CONFIG -> ~/.config/tongyun-dev/settings.json -> ~/.config/tongyun-dev/projects.toml -> ./config/projects.toml)
     #[arg(long, global = true)]
     config: Option<PathBuf>,
     #[command(subcommand)]
@@ -143,11 +143,20 @@ fn print_status(st: &StatusJson, json: bool) -> Result<()> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let mut loaded = tongyun_dev_core::load(cli.config.as_deref())?;
     let cmd = cli.cmd.unwrap_or(Cmd::Ui {
         port: DEFAULT_UI_PORT,
         no_open: false,
     });
+    let mut loaded = match tongyun_dev_core::load(cli.config.as_deref()) {
+        Ok(l) => l,
+        Err(e) => {
+            if matches!(cmd, Cmd::Ui { .. }) {
+                eprintln!("{e:#}");
+                std::process::exit(1);
+            }
+            return Err(e);
+        }
+    };
     match cmd {
         Cmd::List { json } => print_list(&loaded, json)?,
         Cmd::Start { id, open } => match loaded.start(&id) {

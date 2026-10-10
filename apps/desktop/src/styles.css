@@ -304,6 +304,41 @@ button.primary.busy:disabled {
   word-break: break-word;
 }
 
+.empty-config {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  height: 100%;
+  max-width: 580px;
+  gap: 14px;
+  padding: 40px 20px;
+}
+
+.empty-config h2 {
+  margin: 0;
+  font-size: 24px;
+  letter-spacing: -0.02em;
+}
+
+.empty-config p {
+  margin: 0;
+  color: #6d655c;
+  line-height: 1.5;
+}
+
+.empty-config .config-default-path code {
+  display: inline-block;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #dfd8cc;
+  color: #2c2823;
+  font-family: "SF Mono", "Menlo", "Consolas", monospace;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+
 @media (max-width: 860px) {
   .app {
     grid-template-columns: 1fr;

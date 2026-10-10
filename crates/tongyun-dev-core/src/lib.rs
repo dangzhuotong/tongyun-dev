@@ -378,8 +378,16 @@ pub fn remember_config_path(path: &Path) -> Result<()> {
 }
 
 pub fn remember_config_path_with(path: &Path, home: Option<&Path>) -> Result<()> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("read config file {}", path.display()))?;
+    let expanded = expand_config_arg_with(path, home).unwrap_or_else(|_| path.to_path_buf());
+    let abs_path = if expanded.is_absolute() {
+        expanded
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&expanded))
+            .unwrap_or(expanded)
+    };
+    let text = std::fs::read_to_string(&abs_path)
+        .with_context(|| format!("read config file {}", abs_path.display()))?;
     parse_config(&text)?;
 
     let dir = config_dir(home);
@@ -390,22 +398,19 @@ pub fn remember_config_path_with(path: &Path, home: Option<&Path>) -> Result<()>
     let mut map: serde_json::Map<String, serde_json::Value> = if settings_path.is_file() {
         let content = std::fs::read_to_string(&settings_path)
             .with_context(|| format!("read {}", settings_path.display()))?;
-        serde_json::from_str(&content).unwrap_or_default()
+        let parsed: serde_json::Value = serde_json::from_str(&content)
+            .with_context(|| format!("parse settings JSON from {}", settings_path.display()))?;
+        parsed
+            .as_object()
+            .cloned()
+            .with_context(|| format!("expected JSON object in {}", settings_path.display()))?
     } else {
         serde_json::Map::new()
     };
 
-    let path_to_save = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    };
-
     map.insert(
         "config_path".to_string(),
-        serde_json::Value::String(path_to_string(&path_to_save)),
+        serde_json::Value::String(path_to_string(&abs_path)),
     );
 
     let json_bytes = serde_json::to_string_pretty(&serde_json::Value::Object(map))
@@ -487,7 +492,7 @@ fn resolve_config_source_with(
     }
 
     bail!(
-        "config/projects.toml not found.\nSearched candidate locations:\n  - {}\nHint: create default config at `{default_hint}` or pass --config / set TONGYUN_DEV_CONFIG",
+        "未找到配置文件 projects.toml (not found).\n已查找候选位置 (searched candidate locations):\n  - {}\n提示：可在 `{default_hint}` 创建默认配置，或通过 --config 参数 / TONGYUN_DEV_CONFIG 环境变量指定。",
         searched.join("\n  - ")
     );
 }
@@ -2558,5 +2563,277 @@ port = 8080
         assert!(open_url("http://a b").is_err());
         assert!(open_path(Path::new("relative")).is_err());
         assert!(open_path(Path::new("/definitely/not/here/tongyun")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod config_resolution_tests {
+    use super::*;
+
+    fn make_temp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tongyun_dev_cfg_test_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_valid_config(path: &Path) {
+        if let Some(p) = path.parent() {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        std::fs::write(
+            path,
+            r#"[projects.app]
+name = "app"
+root = "/tmp"
+port = 8080
+start = ["echo", "hi"]
+"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_1_explicit_over_env() {
+        let temp = make_temp("t1");
+        let arg_cfg = temp.join("arg.toml");
+        let env_cfg = temp.join("env.toml");
+        write_valid_config(&arg_cfg);
+        write_valid_config(&env_cfg);
+
+        let (resolved, source) = resolve_config_source_with(
+            Some(&arg_cfg),
+            Some(env_cfg.to_str().unwrap()),
+            Some(&temp),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(source, "arg");
+        assert_eq!(resolved, arg_cfg);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_2_env_over_remembered() {
+        let temp = make_temp("t2");
+        let env_cfg = temp.join("env.toml");
+        let rem_cfg = temp.join("rem.toml");
+        write_valid_config(&env_cfg);
+        write_valid_config(&rem_cfg);
+        remember_config_path_with(&rem_cfg, Some(&temp)).unwrap();
+
+        let (resolved, source) = resolve_config_source_with(
+            None,
+            Some(env_cfg.to_str().unwrap()),
+            Some(&temp),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(source, "env");
+        assert_eq!(resolved, env_cfg);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_3_remembered_over_user_default() {
+        let temp = make_temp("t3");
+        let rem_cfg = temp.join("rem.toml");
+        write_valid_config(&rem_cfg);
+        remember_config_path_with(&rem_cfg, Some(&temp)).unwrap();
+
+        let def_cfg = default_config_path(Some(&temp));
+        write_valid_config(&def_cfg);
+
+        let (resolved, source) =
+            resolve_config_source_with(None, None, Some(&temp), None, None).unwrap();
+        assert_eq!(source, "remembered");
+        assert_eq!(resolved, rem_cfg);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_4_user_default_over_repo() {
+        let temp = make_temp("t4");
+        let def_cfg = default_config_path(Some(&temp));
+        write_valid_config(&def_cfg);
+
+        let repo_dir = temp.join("repo");
+        let repo_cfg = repo_dir.join("config/projects.toml");
+        write_valid_config(&repo_cfg);
+
+        let (resolved, source) =
+            resolve_config_source_with(None, None, Some(&temp), Some(&repo_dir), None).unwrap();
+        assert_eq!(source, "user_default");
+        assert_eq!(resolved, def_cfg);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_5_none_returns_candidate_error() {
+        let temp = make_temp("t5");
+        let empty_cwd = temp.join("empty_repo");
+        std::fs::create_dir_all(&empty_cwd).unwrap();
+
+        let err = resolve_config_source_with(None, None, Some(&temp), Some(&empty_cwd), None)
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("projects.toml") || msg.contains("not found"));
+        assert!(msg.contains("--config"));
+        assert!(msg.contains("TONGYUN_DEV_CONFIG"));
+        assert!(msg.contains("settings.json"));
+        assert!(msg.contains(&path_to_string(&default_config_path(Some(&temp)))));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_6_deleted_remembered_file_skipped() {
+        let temp = make_temp("t6");
+        let rem_cfg = temp.join("rem.toml");
+        write_valid_config(&rem_cfg);
+        remember_config_path_with(&rem_cfg, Some(&temp)).unwrap();
+
+        std::fs::remove_file(&rem_cfg).unwrap();
+
+        let def_cfg = default_config_path(Some(&temp));
+        write_valid_config(&def_cfg);
+
+        let (resolved, source) =
+            resolve_config_source_with(None, None, Some(&temp), None, None).unwrap();
+        assert_eq!(source, "user_default");
+        assert_eq!(resolved, def_cfg);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_7_remember_rejects_unparseable_file() {
+        let temp = make_temp("t7");
+        let bad_cfg = temp.join("bad.toml");
+        std::fs::write(&bad_cfg, "not a valid toml [[{").unwrap();
+
+        let res = remember_config_path_with(&bad_cfg, Some(&temp));
+        assert!(res.is_err());
+
+        let settings = config_dir(Some(&temp)).join("settings.json");
+        assert!(!settings.exists());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_8_create_default_does_not_overwrite_and_template_parses() {
+        let parsed = parse_config(DEFAULT_CONFIG_TEMPLATE);
+        assert!(
+            parsed.is_ok(),
+            "template should parse successfully: {:?}",
+            parsed.err()
+        );
+
+        let temp = make_temp("t8");
+        let created = create_default_config_with(Some(&temp)).unwrap();
+        assert!(created.is_file());
+        let initial_content = std::fs::read_to_string(&created).unwrap();
+        assert_eq!(initial_content, DEFAULT_CONFIG_TEMPLATE);
+
+        std::fs::write(&created, "# custom user modification\n").unwrap();
+        let second_call = create_default_config_with(Some(&temp)).unwrap();
+        assert_eq!(second_call, created);
+        let current_content = std::fs::read_to_string(&created).unwrap();
+        assert_eq!(current_content, "# custom user modification\n");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_9_remember_preserves_existing_keys() {
+        let temp = make_temp("t9");
+        let settings_dir = config_dir(Some(&temp));
+        std::fs::create_dir_all(&settings_dir).unwrap();
+        let settings_path = settings_dir.join("settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"existing_key": "preserved", "num": 42}"#,
+        )
+        .unwrap();
+
+        let cfg = temp.join("cfg.toml");
+        write_valid_config(&cfg);
+        remember_config_path_with(&cfg, Some(&temp)).unwrap();
+
+        let read_back = std::fs::read_to_string(&settings_path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&read_back).unwrap();
+        assert_eq!(
+            val.get("existing_key").and_then(|v| v.as_str()),
+            Some("preserved")
+        );
+        assert_eq!(val.get("num").and_then(|v| v.as_i64()), Some(42));
+        assert_eq!(
+            val.get("config_path").and_then(|v| v.as_str()),
+            Some(path_to_string(&cfg).as_str())
+        );
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_10_remember_fails_on_corrupt_settings_json_without_wiping() {
+        let temp = make_temp("t10");
+        let settings_dir = config_dir(Some(&temp));
+        std::fs::create_dir_all(&settings_dir).unwrap();
+        let settings_path = settings_dir.join("settings.json");
+        let corrupt_content = "{corrupted json not valid";
+        std::fs::write(&settings_path, corrupt_content).unwrap();
+
+        let cfg = temp.join("cfg.toml");
+        write_valid_config(&cfg);
+        let res = remember_config_path_with(&cfg, Some(&temp));
+        assert!(res.is_err());
+
+        let after = std::fs::read_to_string(&settings_path).unwrap();
+        assert_eq!(after, corrupt_content);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_11_remember_absolutizes_relative_path() {
+        let temp = make_temp("t11");
+        let rel_cfg = temp.join("rel.toml");
+        write_valid_config(&rel_cfg);
+
+        remember_config_path_with(&rel_cfg, Some(&temp)).unwrap();
+
+        let settings_path = config_dir(Some(&temp)).join("settings.json");
+        let read_back = std::fs::read_to_string(&settings_path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&read_back).unwrap();
+        let saved = val.get("config_path").unwrap().as_str().unwrap();
+        assert!(Path::new(saved).is_absolute());
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_12_config_info_reporting() {
+        let temp = make_temp("t12");
+        let info_none = config_info_with(None, None, Some(&temp), None, None);
+        assert_eq!(info_none.source, "none");
+        assert!(info_none.path.is_none());
+        assert_eq!(
+            info_none.default_path,
+            path_to_string(&default_config_path(Some(&temp)))
+        );
+
+        let def_cfg = default_config_path(Some(&temp));
+        write_valid_config(&def_cfg);
+        let info_found = config_info_with(None, None, Some(&temp), None, None);
+        assert_eq!(info_found.source, "user_default");
+        assert_eq!(
+            info_found.path.as_deref(),
+            Some(path_to_string(&def_cfg).as_str())
+        );
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

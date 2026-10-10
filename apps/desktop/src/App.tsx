@@ -1,10 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { LogTail, ProjectList, Status } from "./types";
+import type { ConfigInfo, LogTail, ProjectList, Status } from "./types";
 
 const LOG_LINES = 200;
 
 export function App() {
+  const [configInfo, setConfigInfo] = useState<ConfigInfo | null>(null);
+  const [missingConfig, setMissingConfig] = useState(false);
   const [projects, setProjects] = useState<ProjectList | null>(null);
   const [selected, setSelected] = useState("");
   const [status, setStatus] = useState<Status | null>(null);
@@ -24,24 +26,66 @@ export function App() {
     setLog(nextLog);
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    invoke<ProjectList>("list_projects")
-      .then((list) => {
-        if (cancelled) return;
-        setProjects(list);
+  const loadProjects = useCallback(async () => {
+    setError("");
+    try {
+      const info = await invoke<ConfigInfo>("config_info");
+      setConfigInfo(info);
+      if (!info.path) {
+        setMissingConfig(true);
+        setProjects(null);
+        setSelected("");
+        return;
+      }
+      const list = await invoke<ProjectList>("list_projects");
+      setProjects(list);
+      setMissingConfig(false);
+      setSelected((prev) => {
+        if (prev && list.projects.some((p) => p.id === prev)) return prev;
         const preferred =
           list.projects.find((row) => row.enabled && row.id === "legacy_app") ??
           list.projects.find((row) => row.enabled);
-        if (preferred) setSelected(preferred.id);
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) setError(String(err));
+        return preferred?.id ?? "";
       });
-    return () => {
-      cancelled = true;
-    };
+    } catch (err: unknown) {
+      const errStr = String(err);
+      if (errStr.toLowerCase().includes("not found")) {
+        setMissingConfig(true);
+        setProjects(null);
+        setSelected("");
+      } else {
+        setError(errStr);
+      }
+    }
   }, []);
+
+  useEffect(() => {
+    loadProjects();
+  }, [loadProjects]);
+
+  async function handlePickConfig() {
+    setError("");
+    try {
+      const info = await invoke<ConfigInfo | null>("pick_config_file");
+      if (info && info.path) {
+        setConfigInfo(info);
+        await loadProjects();
+      }
+    } catch (err: unknown) {
+      setError(String(err));
+    }
+  }
+
+  async function handleCreateDefault() {
+    setError("");
+    try {
+      const info = await invoke<ConfigInfo>("create_default_config");
+      setConfigInfo(info);
+      await loadProjects();
+    } catch (err: unknown) {
+      setError(String(err));
+    }
+  }
 
   useEffect(() => {
     if (!selected) return;
@@ -150,82 +194,106 @@ export function App() {
             );
           })}
         </ul>
-        {!projects && !error && <p className="muted">正在读取配置…</p>}
+        {!projects && !error && !missingConfig && <p className="muted">正在读取配置…</p>}
+        {missingConfig && <p className="muted">未找到配置</p>}
         {projects && projects.projects.length === 0 && <p className="muted">配置里没有项目</p>}
         {projects && <p className="config-path">{projects.config_path}</p>}
       </aside>
       <main>
-        <header>
-          <div>
-            <h1>{current?.name ?? "未选择项目"}</h1>
-            <p>{status?.root ?? current?.root ?? ""}</p>
+        {missingConfig ? (
+          <div className="empty-config">
+            <h2>没找到项目配置 projects.toml</h2>
+            <p className="empty-desc">
+              请选择已有的配置文件，或在默认位置创建初始配置：
+            </p>
+            <p className="config-default-path">
+              <code>{configInfo?.default_path ?? "~/.config/tongyun-dev/projects.toml"}</code>
+            </p>
+            <div className="actions">
+              <button type="button" className="primary" onClick={handlePickConfig}>
+                选择配置文件…
+              </button>
+              <button type="button" onClick={handleCreateDefault}>
+                创建默认配置
+              </button>
+            </div>
+            {error && <p className="banner">{error}</p>}
           </div>
-          <div className="actions" aria-busy={busy !== ""}>
-            <button
-              type="button"
-              className={busy === "start" ? "primary busy" : "primary"}
-              disabled={!selected || busy !== "" || current?.enabled === false}
-              onClick={() => run("start")}
-            >
-              {busy === "start" ? "启动中…" : "启动"}
-            </button>
-            <button type="button" disabled={!selected || busy !== ""} onClick={() => run("stop")}>
-              {busy === "stop" ? "停止中…" : "停止"}
-            </button>
-            <button
-              type="button"
-              disabled={!selected || busy !== ""}
-              onClick={() => {
-                setError("");
-                refresh(selected).catch((err: unknown) => setError(String(err)));
-              }}
-            >
-              刷新状态
-            </button>
-            <button type="button" disabled={!page} onClick={() => reveal("page")}>
-              打开页面
-            </button>
-          </div>
-        </header>
-        {busy === "start" && <p className="banner busy">正在启动… 按钮会在端口或页面就绪后恢复。</p>}
-        {busy === "stop" && <p className="banner busy">正在停止… 按钮会在端口释放后恢复。</p>}
-        {current && !current.enabled && <p className="banner warn">{current.reason}</p>}
-        {status?.port_conflict && (
-          <p className="banner warn">
-            端口 {status.port} 被其他进程占用
-            {status.port_holder ? `：${status.port_holder}` : "。"}
-          </p>
+        ) : (
+          <>
+            <header>
+              <div>
+                <h1>{current?.name ?? "未选择项目"}</h1>
+                <p>{status?.root ?? current?.root ?? ""}</p>
+              </div>
+              <div className="actions" aria-busy={busy !== ""}>
+                <button
+                  type="button"
+                  className={busy === "start" ? "primary busy" : "primary"}
+                  disabled={!selected || busy !== "" || current?.enabled === false}
+                  onClick={() => run("start")}
+                >
+                  {busy === "start" ? "启动中…" : "启动"}
+                </button>
+                <button type="button" disabled={!selected || busy !== ""} onClick={() => run("stop")}>
+                  {busy === "stop" ? "停止中…" : "停止"}
+                </button>
+                <button
+                  type="button"
+                  disabled={!selected || busy !== ""}
+                  onClick={() => {
+                    setError("");
+                    refresh(selected).catch((err: unknown) => setError(String(err)));
+                  }}
+                >
+                  刷新状态
+                </button>
+                <button type="button" disabled={!page} onClick={() => reveal("page")}>
+                  打开页面
+                </button>
+              </div>
+            </header>
+            {busy === "start" && <p className="banner busy">正在启动… 按钮会在端口或页面就绪后恢复。</p>}
+            {busy === "stop" && <p className="banner busy">正在停止… 按钮会在端口释放后恢复。</p>}
+            {current && !current.enabled && <p className="banner warn">{current.reason}</p>}
+            {status?.port_conflict && (
+              <p className="banner warn">
+                端口 {status.port} 被其他进程占用
+                {status.port_holder ? `：${status.port_holder}` : "。"}
+              </p>
+            )}
+            {error && <p className="banner">{error}</p>}
+            <section className="status" aria-label="status">
+              <Field label="running" value={status ? (status.running ? "true" : "false") : "—"} tone={status?.running ? "up" : "down"} />
+              <Field label="pid" value={status?.pid ?? "—"} />
+              <Field label="port" value={status ? `${status.port}${status.port_open ? " · open" : " · closed"}` : "—"} />
+              <Field
+                label="login_probe"
+                value={
+                  status
+                    ? `${status.login_probe.http_code ?? "—"} · ${status.login_probe.ok ? "ok" : "not ok"}`
+                    : "—"
+                }
+                detail={status?.login_probe.url}
+                tone={status?.login_probe.ok ? "up" : undefined}
+              />
+            </section>
+            <section className="log">
+              <div className="log-bar">
+                <strong>log</strong>
+                <span>{logPath}</span>
+                <button type="button" disabled={!canOpenLog} onClick={() => reveal("log")}>
+                  打开日志
+                </button>
+              </div>
+              <pre ref={logRef}>
+                {log?.missing
+                  ? "日志文件还不存在。启动后会在这里跟上新行。"
+                  : log?.text || (selected ? "日志是空的。" : "")}
+              </pre>
+            </section>
+          </>
         )}
-        {error && <p className="banner">{error}</p>}
-        <section className="status" aria-label="status">
-          <Field label="running" value={status ? (status.running ? "true" : "false") : "—"} tone={status?.running ? "up" : "down"} />
-          <Field label="pid" value={status?.pid ?? "—"} />
-          <Field label="port" value={status ? `${status.port}${status.port_open ? " · open" : " · closed"}` : "—"} />
-          <Field
-            label="login_probe"
-            value={
-              status
-                ? `${status.login_probe.http_code ?? "—"} · ${status.login_probe.ok ? "ok" : "not ok"}`
-                : "—"
-            }
-            detail={status?.login_probe.url}
-            tone={status?.login_probe.ok ? "up" : undefined}
-          />
-        </section>
-        <section className="log">
-          <div className="log-bar">
-            <strong>log</strong>
-            <span>{logPath}</span>
-            <button type="button" disabled={!canOpenLog} onClick={() => reveal("log")}>
-              打开日志
-            </button>
-          </div>
-          <pre ref={logRef}>
-            {log?.missing
-              ? "日志文件还不存在。启动后会在这里跟上新行。"
-              : log?.text || (selected ? "日志是空的。" : "")}
-          </pre>
-        </section>
       </main>
     </div>
   );

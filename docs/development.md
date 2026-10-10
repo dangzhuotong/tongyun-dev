@@ -41,7 +41,7 @@ npm run tauri dev
 npm run tauri build
 ```
 
-`tauri dev` 打开窗口：左侧列出全部项目。`enabled = false` 的项变灰，并显示 `reason`，启动按钮不可用。启动 / 停止进行中按钮保持「启动中…」「停止中…」，列表锁定，直到命令结束。状态区显示 `running`、`pid`、`port`、`login_probe`。端口被别的进程或其他项目占用时出现警告（`port_conflict` / `port_holder`）。「打开页面」用系统浏览器打开 `login_url` 或 `health_url`（都没有时打开 `http://127.0.0.1:<port>/`）。「打开日志」用系统默认程序打开日志文件。下方日志区每 1.5 秒重读该项目的日志尾部。配置查找与 CLI 相同：`TONGYUN_DEV_CONFIG`，否则从当前目录往上找 `config/projects.toml`。
+`tauri dev` 打开窗口：左侧列出全部项目。`enabled = false` 的项变灰，并显示 `reason`，启动按钮不可用。启动 / 停止进行中按钮保持「启动中…」「停止中…」，列表锁定，直到命令结束。状态区显示 `running`、`pid`、`port`、`login_probe`。端口被别的进程或其他项目占用时出现警告（`port_conflict` / `port_holder`）。「打开页面」用系统浏览器打开 `login_url` 或 `health_url`（都没有时打开 `http://127.0.0.1:<port>/`）。「打开日志」用系统默认程序打开日志文件。下方日志区每 1.5 秒重读该项目的日志尾部。配置查找顺序与 CLI 相同：1) 显式 `--config` 参数 → 2) 环境变量 `TONGYUN_DEV_CONFIG` → 3) `~/.config/tongyun-dev/settings.json` 记住的路径 → 4) 默认配置 `~/.config/tongyun-dev/projects.toml` → 5) 从当前目录及上级目录找 `config/projects.toml`。未找到配置时桌面端主区域会展示空状态，支持选择文件或一键创建默认配置。
 
 Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/release/bundle/macos/tongyun-dev.app`。安装步骤见 [README](../README.md)。
 

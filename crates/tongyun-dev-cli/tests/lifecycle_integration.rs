@@ -194,3 +194,12 @@ fn web_console_lists_adds_and_removes_through_core() {
     assert!(logs.contains("\"missing\":true"), "{logs}");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn start_ui_server_missing_config_fails_gracefully() {
+    let missing_path = PathBuf::from("/definitely/nonexistent/tongyun_dev_missing_projects.toml");
+    let res = tongyun_dev_cli::server::start_ui_server(missing_path, free_port(), false);
+    assert!(res.is_err());
+    let err = res.unwrap_err().to_string();
+    assert!(err.contains("未找到配置文件 projects.toml") || err.contains("not found"));
+}

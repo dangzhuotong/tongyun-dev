@@ -43,3 +43,10 @@ export type LogTail = {
   missing: boolean;
   text: string;
 };
+
+export type ConfigInfo = {
+  path: string | null;
+  source: string;
+  default_path: string;
+};
+

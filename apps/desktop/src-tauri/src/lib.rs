@@ -79,6 +79,36 @@ async fn log_tail(id: String, lines: Option<usize>) -> Result<LogTail, String> {
     .await
 }
 
+#[tauri::command]
+fn config_info() -> tongyun_dev_core::ConfigInfo {
+    tongyun_dev_core::config_info()
+}
+
+#[tauri::command]
+async fn pick_config_file() -> Result<Option<tongyun_dev_core::ConfigInfo>, String> {
+    let picked = rfd::AsyncFileDialog::new()
+        .add_filter("TOML config", &["toml"])
+        .pick_file()
+        .await;
+
+    let Some(file_handle) = picked else {
+        return Ok(None);
+    };
+
+    let path = file_handle.path();
+    tongyun_dev_core::remember_config_path(path).map_err(report)?;
+    Ok(Some(tongyun_dev_core::config_info()))
+}
+
+#[tauri::command]
+async fn create_default_config() -> Result<tongyun_dev_core::ConfigInfo, String> {
+    blocking(|| {
+        tongyun_dev_core::create_default_config().map_err(report)?;
+        Ok(tongyun_dev_core::config_info())
+    })
+    .await
+}
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -88,7 +118,10 @@ pub fn run() {
             stop_project,
             log_tail,
             open_log,
-            open_page
+            open_page,
+            config_info,
+            pick_config_file,
+            create_default_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tongyun-dev");

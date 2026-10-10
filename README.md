@@ -65,7 +65,9 @@ cargo run -p tongyun-dev-cli -- list
 ./target/debug/tongyun-dev logs legacy_app --follow
 ```
 
-不在仓库根目录时，指定配置（`~` 可用）：
+配置查找顺序：1) 显式 `--config` 参数；2) 环境变量 `TONGYUN_DEV_CONFIG`；3) `~/.config/tongyun-dev/settings.json` 记住的路径；4) `~/.config/tongyun-dev/projects.toml`；5) 从当前目录往上找 `config/projects.toml`。
+
+不在仓库根目录时，可指定配置（`~` 可用）：
 
 ```bash
 export TONGYUN_DEV_CONFIG="$PWD/config/projects.toml"

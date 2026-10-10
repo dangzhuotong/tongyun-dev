@@ -11,9 +11,8 @@
 #   background  true：命令放到后台进程组，stdout/stderr 追加到日志，PID 写入 pid 文件
 #   login_url   就绪探针 URL（可选；HTTP 200/301/302 视为就绪）
 #   health_url  健康探针 URL（可选；未配置 login_url 时使用）
-#   java        Java 版本（可选，如 "8"、"17"）。App 自动找到对应 JDK，设置 JAVA_HOME 和 PATH，
-#               不需要 sdkman / sdk use 命令。启动脚本里不要 source sdkman-init.sh。
-#   node        Node 版本（可选，如 "22"）。App 自动从 fnm / nvm 安装目录找到并放进 PATH，不需要 fnm env。
+#   java        Java 版本（可选，如 "8"、"17"）。App 会自动找到对应版本并设置 JAVA_HOME / PATH，不需要 sdkman/fnm 命令。
+#   node        Node 版本（可选，如 "22"）。App 会自动找到对应版本并设置 JAVA_HOME / PATH，不需要 sdkman/fnm 命令。
 #   java_home / node_home  可选，显式指定安装目录（Windows 或特殊安装时用）
 #   shell       可选，单条命令用哪个 shell 执行：bash（macOS/Linux 默认）、sh、cmd（Windows 默认）、powershell
 #   start_windows / stop_windows  可选，Windows 上优先使用的启动 / 停止命令数组

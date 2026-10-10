@@ -27,6 +27,14 @@ struct AppState {
 
 /// Bind 127.0.0.1:`initial_port` (or the next free port up to +20) and serve forever.
 pub fn start_ui_server(config_path: PathBuf, initial_port: u16, auto_open: bool) -> Result<()> {
+    if !config_path.is_file() {
+        let default_path = tongyun_dev_core::default_config_path(None);
+        let default_hint = default_path.to_string_lossy();
+        eprintln!("未找到配置文件 projects.toml：{}", config_path.display());
+        eprintln!("默认配置路径：{default_hint}");
+        eprintln!("提示：可在 `{default_hint}` 创建默认配置，或通过 --config 参数 / TONGYUN_DEV_CONFIG 环境变量指定配置路径。");
+        bail!("未找到配置文件 projects.toml：{}", config_path.display());
+    }
     let (listener, port) = bind_from(initial_port)?;
     let url = format!("http://127.0.0.1:{port}");
     println!();

@@ -158,6 +158,7 @@ pub struct ProjectRow {
     pub enabled: bool,
     pub port: u16,
     pub reason: String,
+    pub configured: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_timeout_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -319,6 +320,8 @@ impl Loaded {
         let mut projects = Vec::with_capacity(ids.len());
         for id in ids {
             let resolved = self.resolve(&id)?;
+            let configured = resolved.port > 0
+                && (!resolved.active_start().is_empty() || resolved.tomcat.is_some());
             projects.push(ProjectRow {
                 id: resolved.id,
                 name: resolved.name,
@@ -326,6 +329,7 @@ impl Loaded {
                 enabled: resolved.enabled,
                 port: resolved.port,
                 reason: resolved.reason,
+                configured,
                 start_timeout_secs: resolved.start_timeout_secs,
                 stop_grace_secs: resolved.stop_grace_secs,
                 node: resolved.node,
@@ -2079,6 +2083,7 @@ impl Loaded {
         write_doc(&self.path, &doc)?;
         self.config.projects.insert(id.clone(), project);
         let r = self.resolve(&id)?;
+        let configured = r.port > 0 && (!r.active_start().is_empty() || r.tomcat.is_some());
         Ok(ProjectRow {
             id: r.id,
             name: r.name,
@@ -2086,6 +2091,7 @@ impl Loaded {
             enabled: r.enabled,
             port: r.port,
             reason: r.reason,
+            configured,
             start_timeout_secs: r.start_timeout_secs,
             stop_grace_secs: r.stop_grace_secs,
             node: r.node,
@@ -2890,6 +2896,7 @@ port = 3002
             enabled: fs.enabled,
             port: fs.port,
             reason: fs.reason.clone(),
+            configured: true,
             start_timeout_secs: fs.start_timeout_secs,
             stop_grace_secs: fs.stop_grace_secs,
             node: fs.node.clone(),
@@ -2910,6 +2917,7 @@ port = 3002
             enabled: none.enabled,
             port: none.port,
             reason: none.reason.clone(),
+            configured: true,
             start_timeout_secs: none.start_timeout_secs,
             stop_grace_secs: none.stop_grace_secs,
             node: none.node.clone(),

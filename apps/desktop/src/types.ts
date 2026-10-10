@@ -5,6 +5,7 @@ export type Project = {
   name: string;
   root: string;
   enabled: boolean;
+  configured: boolean;
   port: number;
   reason: string;
   start_timeout_secs?: number;

@@ -119,11 +119,39 @@ async fn create_default_config() -> Result<tongyun_dev_core::ConfigInfo, String>
     .await
 }
 
+#[tauri::command]
+async fn all_status() -> Result<Vec<StatusJson>, String> {
+    blocking(|| {
+        let loaded = tongyun_dev_core::load(None).map_err(report)?;
+        let list = loaded.list().map_err(report)?;
+        let mut results = Vec::new();
+        for p in list.projects {
+            if p.enabled && p.configured {
+                if let Ok(st) = loaded.status(&p.id) {
+                    results.push(st);
+                }
+            }
+        }
+        Ok(results)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn open_config_file() -> Result<(), String> {
+    blocking(|| {
+        let loaded = tongyun_dev_core::load(None).map_err(report)?;
+        tongyun_dev_core::open_path(loaded.path()).map_err(report)
+    })
+    .await
+}
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             list_projects,
             project_status,
+            all_status,
             start_project,
             stop_project,
             restart_project,
@@ -132,7 +160,8 @@ pub fn run() {
             open_page,
             config_info,
             pick_config_file,
-            create_default_config
+            create_default_config,
+            open_config_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tongyun-dev");

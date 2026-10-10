@@ -1,8 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ConfigInfo, LogTail, ProjectList, Status } from "./types";
+import { LogPanel } from "./LogPanel";
+import { stateShortLabel } from "./logFormat";
 
-const LOG_LINES = 200;
+const LOG_LINES = 500;
 
 export function App() {
   const [configInfo, setConfigInfo] = useState<ConfigInfo | null>(null);
@@ -10,10 +12,10 @@ export function App() {
   const [projects, setProjects] = useState<ProjectList | null>(null);
   const [selected, setSelected] = useState("");
   const [status, setStatus] = useState<Status | null>(null);
+  const [allStatuses, setAllStatuses] = useState<Record<string, Status>>({});
   const [log, setLog] = useState<LogTail | null>(null);
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState<"" | "start" | "stop">("");
-  const logRef = useRef<HTMLPreElement>(null);
+  const [busy, setBusy] = useState<"" | "start" | "stop" | "restart">("");
   const busyRef = useRef(busy);
   busyRef.current = busy;
 
@@ -23,7 +25,18 @@ export function App() {
       invoke<LogTail>("log_tail", { id, lines: LOG_LINES }),
     ]);
     setStatus(nextStatus);
-    setLog(nextLog);
+    setAllStatuses((prev) => ({ ...prev, [nextStatus.id]: nextStatus }));
+    setLog((prev) => {
+      if (
+        prev &&
+        prev.path === nextLog.path &&
+        prev.missing === nextLog.missing &&
+        prev.text === nextLog.text
+      ) {
+        return prev;
+      }
+      return nextLog;
+    });
   }, []);
 
   const loadProjects = useCallback(async () => {
@@ -63,6 +76,51 @@ export function App() {
     loadProjects();
   }, [loadProjects]);
 
+  // Periodic poll of all project statuses every 3 seconds
+  useEffect(() => {
+    let cancelled = false;
+    const fetchAll = async () => {
+      try {
+        const list = await invoke<Status[]>("all_status");
+        if (!cancelled) {
+          setAllStatuses((prev) => {
+            const next = { ...prev };
+            for (const s of list) {
+              next[s.id] = s;
+            }
+            return next;
+          });
+        }
+      } catch {
+        // periodic status poll errors are ignored
+      }
+    };
+    fetchAll();
+    const timer = window.setInterval(fetchAll, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  // Poll selected project status and log every 1 second
+  useEffect(() => {
+    if (!selected) return;
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      refresh(selected).catch((err: unknown) => {
+        if (!cancelled && !busyRef.current) setError(String(err));
+      });
+    };
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [selected, refresh]);
+
   async function handlePickConfig() {
     setError("");
     try {
@@ -87,44 +145,61 @@ export function App() {
     }
   }
 
-  useEffect(() => {
-    if (!selected) return;
-    let cancelled = false;
-    const tick = () => {
-      if (cancelled) return;
-      refresh(selected).catch((err: unknown) => {
-        if (!cancelled && !busyRef.current) setError(String(err));
-      });
-    };
-    tick();
-    const timer = window.setInterval(tick, 1500);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [selected, refresh]);
-
-  useEffect(() => {
-    const node = logRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
-  }, [log?.text]);
-
-  async function run(action: "start" | "stop") {
-    if (!selected || busyRef.current) return;
-    const project = projects?.projects.find((row) => row.id === selected);
-    if (action === "start" && project && !project.enabled) return;
-    setBusy(action);
+  async function handleOpenConfigFile() {
     setError("");
     try {
-      const command = action === "start" ? "start_project" : "stop_project";
-      const next = await invoke<Status>(command, { id: selected });
+      await invoke("open_config_file");
+    } catch (err: unknown) {
+      setError(String(err));
+    }
+  }
+
+  async function handleStart() {
+    if (!selected || busyRef.current) return;
+    const project = projects?.projects.find((row) => row.id === selected);
+    if (!project || !project.enabled || !project.configured) return;
+    setBusy("start");
+    setError("");
+    try {
+      const next = await invoke<Status>("start_project", { id: selected });
       setStatus(next);
-      const tail = await invoke<LogTail>("log_tail", { id: selected, lines: LOG_LINES });
-      setLog(tail);
+      setAllStatuses((prev) => ({ ...prev, [next.id]: next }));
     } catch (err: unknown) {
       setError(String(err));
       await refresh(selected).catch(() => undefined);
     } finally {
+      setBusy("");
+    }
+  }
+
+  async function handleStop() {
+    if (!selected || busyRef.current) return;
+    setBusy("stop");
+    setError("");
+    try {
+      const next = await invoke<Status>("stop_project", { id: selected });
+      setStatus(next);
+      setAllStatuses((prev) => ({ ...prev, [next.id]: next }));
+    } catch (err: unknown) {
+      setError(String(err));
+    } finally {
+      await refresh(selected).catch(() => undefined);
+      setBusy("");
+    }
+  }
+
+  async function handleRestart() {
+    if (!selected || busyRef.current) return;
+    setBusy("restart");
+    setError("");
+    try {
+      const next = await invoke<Status>("restart_project", { id: selected });
+      setStatus(next);
+      setAllStatuses((prev) => ({ ...prev, [next.id]: next }));
+    } catch (err: unknown) {
+      setError(String(err));
+    } finally {
+      await refresh(selected).catch(() => undefined);
       setBusy("");
     }
   }
@@ -148,6 +223,55 @@ export function App() {
   const logPath = log?.path || status?.log_path || "";
   const canOpenLog = Boolean(logPath) && !log?.missing;
 
+  // Button permissions
+  const isStoppedOrFailed = status ? status.state === "stopped" || status.state === "failed" : false;
+  const canStart = Boolean(
+    selected &&
+      busy === "" &&
+      current?.enabled &&
+      current?.configured &&
+      isStoppedOrFailed
+  );
+
+  const canStop = Boolean(
+    selected &&
+      busy === "" &&
+      current?.enabled &&
+      status &&
+      status.state !== "stopped"
+  );
+
+  const isReadyOrPortOpenOrFailed =
+    status?.state === "ready" ||
+    status?.state === "port_open" ||
+    status?.state === "failed";
+  const canRestart = Boolean(
+    selected &&
+      busy === "" &&
+      current?.enabled &&
+      current?.configured &&
+      isReadyOrPortOpenOrFailed
+  );
+
+  const isPortOpenOrReady = status?.state === "port_open" || status?.state === "ready";
+  const canOpenPage = Boolean(
+    selected &&
+      current?.configured &&
+      isPortOpenOrReady &&
+      page
+  );
+
+  function getOpenPageTitle(): string {
+    if (!selected || !current) return "未选择项目";
+    if (!current.configured) return "未配置端口或启动命令";
+    if (!current.enabled) return current.reason || "项目已禁用";
+    if (status?.state === "stopped") return "服务未启动（端口未通）";
+    if (status?.state === "starting") return "服务启动中，端口尚未通";
+    if (status?.state === "failed") return `服务启动失败${status.failure ? `：${status.failure}` : ""}`;
+    if (!page) return "未获取到页面地址";
+    return `在浏览器中打开：${page}`;
+  }
+
   return (
     <div className="app">
       <aside>
@@ -167,14 +291,20 @@ export function App() {
               .filter(Boolean)
               .join(" · ");
 
+            const projStatus =
+              project.id === selected && status ? status : allStatuses[project.id];
+
             return (
               <li key={project.id}>
                 <button
                   type="button"
-                  className={[project.id === selected ? "active" : "", project.enabled ? "" : "disabled"]
+                  className={[
+                    project.id === selected ? "active" : "",
+                    project.enabled ? "" : "disabled",
+                  ]
                     .filter(Boolean)
                     .join(" ")}
-                  disabled={busy !== ""}
+                  disabled={busy === "stop"}
                   onClick={() => {
                     setError("");
                     setStatus(null);
@@ -182,7 +312,19 @@ export function App() {
                     setSelected(project.id);
                   }}
                 >
-                  <span>{project.name}</span>
+                  <div className="project-row-top">
+                    <span className="project-name">{project.name}</span>
+                    {!project.configured ? (
+                      <span className="badge-tag unconfigured">未配置</span>
+                    ) : !project.enabled ? (
+                      <span className="badge-tag disabled">已禁用</span>
+                    ) : (
+                      <span className={`status-tag ${projStatus?.state || "stopped"}`}>
+                        <span className="status-dot" />
+                        <span className="status-label">{stateShortLabel(projStatus)}</span>
+                      </span>
+                    )}
+                  </div>
                   <small>
                     {project.id}
                     {project.port > 0 ? ` · ${project.port}` : ""}
@@ -229,14 +371,33 @@ export function App() {
               <div className="actions" aria-busy={busy !== ""}>
                 <button
                   type="button"
-                  className={busy === "start" ? "primary busy" : "primary"}
-                  disabled={!selected || busy !== "" || current?.enabled === false}
-                  onClick={() => run("start")}
+                  disabled={!canStart}
+                  onClick={handleStart}
                 >
                   {busy === "start" ? "启动中…" : "启动"}
                 </button>
-                <button type="button" disabled={!selected || busy !== ""} onClick={() => run("stop")}>
+                <button
+                  type="button"
+                  disabled={!canStop && busy !== "stop"}
+                  onClick={handleStop}
+                >
                   {busy === "stop" ? "停止中…" : "停止"}
+                </button>
+                <button
+                  type="button"
+                  disabled={!canRestart}
+                  onClick={handleRestart}
+                >
+                  {busy === "restart" ? "重启中…" : "重启"}
+                </button>
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={!canOpenPage}
+                  title={getOpenPageTitle()}
+                  onClick={() => reveal("page")}
+                >
+                  打开网页
                 </button>
                 <button
                   type="button"
@@ -248,13 +409,32 @@ export function App() {
                 >
                   刷新状态
                 </button>
-                <button type="button" disabled={!page} onClick={() => reveal("page")}>
-                  打开页面
-                </button>
               </div>
             </header>
-            {busy === "start" && <p className="banner busy">正在启动… 按钮会在端口或页面就绪后恢复。</p>}
-            {busy === "stop" && <p className="banner busy">正在停止… 按钮会在端口释放后恢复。</p>}
+
+            {/* Prominent State Bar at the top of detail area */}
+            {current && (
+              <DetailStateBar
+                status={status}
+                onScrollToLog={() => {
+                  document.getElementById("log-panel")?.scrollIntoView({ behavior: "smooth" });
+                }}
+              />
+            )}
+
+            {/* Unconfigured project notice */}
+            {current && !current.configured && (
+              <div className="unconfigured-banner">
+                <div>
+                  <strong>缺少端口 / 启动命令</strong>
+                  <p>该项目缺少端口或启动配置，启动已禁用。点击右侧去编辑配置文件。</p>
+                </div>
+                <button type="button" onClick={handleOpenConfigFile}>
+                  去配置
+                </button>
+              </div>
+            )}
+
             {current && !current.enabled && <p className="banner warn">{current.reason}</p>}
             {status?.port_conflict && (
               <p className="banner warn">
@@ -263,10 +443,18 @@ export function App() {
               </p>
             )}
             {error && <p className="banner">{error}</p>}
+
             <section className="status" aria-label="status">
-              <Field label="running" value={status ? (status.running ? "true" : "false") : "—"} tone={status?.running ? "up" : "down"} />
+              <Field
+                label="running"
+                value={status ? (status.running ? "true" : "false") : "—"}
+                tone={status?.running ? "up" : "down"}
+              />
               <Field label="pid" value={status?.pid ?? "—"} />
-              <Field label="port" value={status ? `${status.port}${status.port_open ? " · open" : " · closed"}` : "—"} />
+              <Field
+                label="port"
+                value={status ? `${status.port}${status.port_open ? " · open" : " · closed"}` : "—"}
+              />
               <Field
                 label="login_probe"
                 value={
@@ -278,25 +466,135 @@ export function App() {
                 tone={status?.login_probe.ok ? "up" : undefined}
               />
             </section>
-            <section className="log">
-              <div className="log-bar">
-                <strong>log</strong>
-                <span>{logPath}</span>
-                <button type="button" disabled={!canOpenLog} onClick={() => reveal("log")}>
-                  打开日志
-                </button>
-              </div>
-              <pre ref={logRef}>
-                {log?.missing
-                  ? "日志文件还不存在。启动后会在这里跟上新行。"
-                  : log?.text || (selected ? "日志是空的。" : "")}
-              </pre>
-            </section>
+
+            {/* Real-time Log Panel */}
+            <LogPanel
+              log={log}
+              logPath={logPath}
+              canOpenLog={canOpenLog}
+              onOpenLog={() => reveal("log")}
+              selected={selected}
+            />
           </>
         )}
       </main>
     </div>
   );
+}
+
+function DetailStateBar({
+  status,
+  onScrollToLog,
+}: {
+  status: Status | null;
+  onScrollToLog: () => void;
+}) {
+  if (!status) {
+    return (
+      <div className="detail-state-bar stopped">
+        <div className="state-bar-main">
+          <div className="state-bar-left">
+            <span className="state-bar-dot" />
+            <span className="state-bar-text">正在探测状态…</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const state = status.state;
+
+  if (state === "stopped") {
+    return (
+      <div className="detail-state-bar stopped">
+        <div className="state-bar-main">
+          <div className="state-bar-left">
+            <span className="state-bar-dot" />
+            <span className="state-bar-text">已停止</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (state === "starting") {
+    const elapsed = status.elapsed_secs ?? 0;
+    const timeout = status.timeout_secs || 180;
+    const pct = Math.min(100, Math.round((elapsed / timeout) * 100));
+
+    return (
+      <div className="detail-state-bar starting">
+        <div className="state-bar-main">
+          <div className="state-bar-left">
+            <span className="state-bar-dot" />
+            <span className="state-bar-text">启动中 · 已 {elapsed} 秒</span>
+          </div>
+        </div>
+        <div className="state-progress-wrap">
+          <div className="state-progress-track">
+            <div
+              className="state-progress-bar"
+              style={{ width: `${Math.max(4, pct)}%` }}
+            />
+          </div>
+          <span className="state-tip">
+            {status.port_open
+              ? "端口已通，正在等待服务就绪…"
+              : `端口 ${status.port} 还没通，日志在写说明在启动`}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  if (state === "port_open") {
+    return (
+      <div className="detail-state-bar port_open">
+        <div className="state-bar-main">
+          <div className="state-bar-left">
+            <span className="state-bar-dot" />
+            <span className="state-bar-text">端口已通 · 等登录页</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (state === "ready") {
+    const elapsed = status.elapsed_secs;
+    return (
+      <div className="detail-state-bar ready">
+        <div className="state-bar-main">
+          <div className="state-bar-left">
+            <span className="state-bar-dot" />
+            <span className="state-bar-text">
+              {elapsed != null ? `就绪 · 用时 ${elapsed} 秒` : "就绪"}
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (state === "failed") {
+    return (
+      <div className="detail-state-bar failed">
+        <div className="state-bar-main">
+          <div className="state-bar-left">
+            <span className="state-bar-dot" />
+            <span className="state-bar-text">
+              失败 · {status.failure || "服务启动失败"}
+            </span>
+          </div>
+          <button type="button" className="btn-view-log" onClick={onScrollToLog}>
+            看日志
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return null;
 }
 
 function pageUrl(status: Status | null, project: { port: number } | null): string {

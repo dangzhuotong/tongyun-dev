@@ -1,0 +1,130 @@
+import type { LifeState, Status } from "./types";
+
+export type LogLevel = "error" | "warn" | "normal";
+
+export type SearchMatch = {
+  lineIndex: number;
+  start: number;
+  end: number;
+};
+
+/**
+ * Escapes special HTML characters to prevent XSS / HTML injection.
+ */
+export function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+/**
+ * Classifies log lines based on keywords:
+ * Lines containing ERROR, Exception, Caused by, FATAL are error lines.
+ * Lines containing WARN are warning lines.
+ */
+export function getLogLevel(line: string): LogLevel {
+  if (/(ERROR|Exception|Caused by|FATAL)/.test(line)) {
+    return "error";
+  }
+  if (/WARN/.test(line)) {
+    return "warn";
+  }
+  return "normal";
+}
+
+/**
+ * Finds all case-insensitive occurrences of a query string across multiple log lines.
+ */
+export function findMatches(lines: string[], query: string): SearchMatch[] {
+  if (!query || query.trim() === "") return [];
+  const matches: SearchMatch[] = [];
+  const qLower = query.toLowerCase();
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    const line = lines[lineIndex];
+    const lineLower = line.toLowerCase();
+    let start = 0;
+    while (start <= lineLower.length - qLower.length) {
+      const idx = lineLower.indexOf(qLower, start);
+      if (idx === -1) break;
+      matches.push({
+        lineIndex,
+        start: idx,
+        end: idx + query.length,
+      });
+      start = idx + Math.max(1, query.length);
+    }
+  }
+
+  return matches;
+}
+
+/**
+ * Counts the total number of matches for a query across log lines.
+ */
+export function countMatches(lines: string[], query: string): number {
+  return findMatches(lines, query).length;
+}
+
+/**
+ * Formats user-facing status label for full detail banner.
+ */
+export function stateLabel(
+  status:
+    | Pick<Status, "state" | "elapsed_secs" | "failure">
+    | { state: LifeState; elapsed_secs?: number | null; failure?: string | null }
+    | null
+    | undefined
+): string {
+  if (!status) return "—";
+  switch (status.state) {
+    case "stopped":
+      return "已停止";
+    case "starting": {
+      const secs = status.elapsed_secs ?? 0;
+      return `启动中 · 已 ${secs} 秒`;
+    }
+    case "port_open":
+      return "端口已通 · 等登录页";
+    case "ready": {
+      const secs = status.elapsed_secs;
+      return secs != null ? `就绪 · 用时 ${secs} 秒` : "就绪";
+    }
+    case "failed":
+      return `失败 · ${status.failure || "未知原因"}`;
+    default:
+      return "—";
+  }
+}
+
+/**
+ * Formats concise status label for the sidebar project list.
+ */
+export function stateShortLabel(
+  status:
+    | Pick<Status, "state" | "elapsed_secs">
+    | { state: LifeState; elapsed_secs?: number | null }
+    | null
+    | undefined
+): string {
+  if (!status) return "—";
+  switch (status.state) {
+    case "stopped":
+      return "已停止";
+    case "starting": {
+      const secs = status.elapsed_secs ?? 0;
+      return `启动中 · ${secs}s`;
+    }
+    case "port_open":
+      return "端口已通";
+    case "ready":
+      return "就绪";
+    case "failed":
+      return "失败";
+    default:
+      return "—";
+  }
+}

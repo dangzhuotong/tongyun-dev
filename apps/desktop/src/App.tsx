@@ -1,9 +1,31 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ConfigInfo, LogTail, ProjectDetail, ProjectList, Status } from "./types";
 import { LogPanel } from "./LogPanel";
 import { stateShortLabel } from "./logFormat";
 import { ProjectForm } from "./ProjectForm";
+import { countByFilter, filterProjects, STATUS_FILTERS, type StatusFilter } from "./projectFilter";
+import logoUrl from "./assets/logo.svg";
+import {
+  AlertIcon,
+  CpuIcon,
+  DoorIcon,
+  ExternalIcon,
+  FileIcon,
+  FolderIcon,
+  GearIcon,
+  MoreIcon,
+  PlayIcon,
+  PlugIcon,
+  PlusIcon,
+  PulseIcon,
+  RefreshIcon,
+  RestartIcon,
+  SearchIcon,
+  StopIcon,
+  TrashIcon,
+  XIcon,
+} from "./icons";
 
 const LOG_LINES = 500;
 
@@ -25,6 +47,45 @@ export function App() {
     mode: "create" | "edit";
     detail: ProjectDetail | null;
   }>({ open: false, mode: "create", detail: null });
+
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [menu, setMenu] = useState<"" | "settings" | "more">("");
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  // 「/」或 Cmd/Ctrl+K 聚焦项目搜索；在其他输入框里不拦截「/」
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null;
+      const typing =
+        !!target &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        searchRef.current?.focus();
+        searchRef.current?.select();
+      } else if (e.key === "/" && !typing && !document.querySelector(".modal-backdrop")) {
+        e.preventDefault();
+        searchRef.current?.focus();
+      } else if (e.key === "Escape" && menu) {
+        setMenu("");
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menu]);
+
+  // 点菜单外面关闭菜单
+  useEffect(() => {
+    if (!menu) return;
+    function onDown(e: MouseEvent) {
+      const el = e.target as HTMLElement | null;
+      if (el && el.closest(".menu-anchor")) return;
+      setMenu("");
+    }
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [menu]);
 
   const refresh = useCallback(async (id: string) => {
     const [nextStatus, nextLog] = await Promise.all([
@@ -328,267 +389,497 @@ export function App() {
     return `在浏览器中打开：${page}`;
   }
 
+  const projectList = projects?.projects ?? [];
+  const liveStatuses = useMemo(() => {
+    const merged: Record<string, Status> = { ...allStatuses };
+    if (status) merged[status.id] = status;
+    return merged;
+  }, [allStatuses, status]);
+  const counts = useMemo(
+    () => countByFilter(projectList, liveStatuses, query),
+    [projectList, liveStatuses, query]
+  );
+  const visible = useMemo(
+    () => filterProjects(projectList, liveStatuses, query, statusFilter),
+    [projectList, liveStatuses, query, statusFilter]
+  );
+  const runningCount = projectList.filter((p) => {
+    const st = liveStatuses[p.id]?.state;
+    return p.enabled && (st === "ready" || st === "port_open");
+  }).length;
+  const toolchainOf = (p: { node?: string | null; java?: string | null }) =>
+    [p.node ? `Node ${p.node}` : null, p.java ? `Java ${p.java}` : null].filter(
+      (x): x is string => Boolean(x)
+    );
+
+  function clearFilters() {
+    setQuery("");
+    setStatusFilter("all");
+  }
+
   return (
     <div className="app">
-      <aside>
+      <aside className="sidebar">
         <div className="brand">
-          <span className="mark">td</span>
-          <div>
+          <img className="brand-logo" src={logoUrl} alt="" width={30} height={34} />
+          <div className="brand-text">
             <strong>tongyun-dev</strong>
-            <p>本机项目</p>
+            <span>
+              {projects ? `${projectList.length} 个项目 · ${runningCount} 个运行中` : "本机项目"}
+            </span>
           </div>
         </div>
-        <div className="sidebar-action-wrap">
-          <button
-            type="button"
-            className="btn-add-project"
-            disabled={missingConfig}
-            onClick={handleOpenCreate}
-          >
-            + 新增项目
-          </button>
+
+        <div className="sidebar-search">
+          <label className="search-field">
+            <SearchIcon className="search-icon" />
+            <input
+              ref={searchRef}
+              type="search"
+              value={query}
+              placeholder="搜索名称、id、端口、目录"
+              aria-label="搜索项目"
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  if (query) setQuery("");
+                  else (e.target as HTMLInputElement).blur();
+                } else if (e.key === "Enter" && visible.length > 0) {
+                  setError("");
+                  if (visible[0].id !== selected) {
+                    setStatus(null);
+                    setLog(null);
+                    setSelected(visible[0].id);
+                  }
+                }
+              }}
+            />
+            {query ? (
+              <button
+                type="button"
+                className="search-clear"
+                onClick={() => {
+                  setQuery("");
+                  searchRef.current?.focus();
+                }}
+                aria-label="清空搜索"
+                title="清空 (Esc)"
+              >
+                <XIcon />
+              </button>
+            ) : (
+              <kbd className="search-kbd" title="按 / 或 ⌘K 聚焦">/</kbd>
+            )}
+          </label>
+          <div className="filter-chips" role="tablist" aria-label="按状态筛选">
+            {STATUS_FILTERS.map((f) => (
+              <button
+                key={f.key}
+                type="button"
+                role="tab"
+                aria-selected={statusFilter === f.key}
+                className={`chip chip-${f.key}${statusFilter === f.key ? " selected" : ""}`}
+                onClick={() => setStatusFilter(f.key)}
+              >
+                {f.label}
+                <span className="chip-count">{counts[f.key]}</span>
+              </button>
+            ))}
+          </div>
         </div>
+
         <ul className="projects">
-          {projects?.projects.map((project) => {
-            const toolchain = [
-              project.node ? `Node ${project.node}` : null,
-              project.java ? `Java ${project.java}` : null,
-            ]
-              .filter(Boolean)
-              .join(" · ");
-
-            const projStatus =
-              project.id === selected && status ? status : allStatuses[project.id];
-
+          {visible.map((project) => {
+            const toolchain = toolchainOf(project);
+            const projStatus = liveStatuses[project.id];
+            const isActive = project.id === selected;
             return (
               <li key={project.id}>
                 <button
                   type="button"
                   className={[
-                    project.id === selected ? "active" : "",
+                    "project-item",
+                    isActive ? "active" : "",
                     project.enabled ? "" : "disabled",
                   ]
                     .filter(Boolean)
                     .join(" ")}
+                  aria-current={isActive ? "true" : undefined}
                   disabled={busy === "stop"}
                   onClick={() => {
                     setError("");
+                    if (project.id === selected) return;
                     setStatus(null);
                     setLog(null);
                     setSelected(project.id);
                   }}
                 >
                   <div className="project-row-top">
-                    <span className="project-name">{project.name}</span>
-                    {!project.configured ? (
-                      <span className="badge-tag unconfigured">未配置</span>
-                    ) : !project.enabled ? (
-                      <span className="badge-tag disabled">已禁用</span>
-                    ) : (
-                      <span className={`status-tag ${projStatus?.state || "stopped"}`}>
-                        <span className="status-dot" />
-                        <span className="status-label">{stateShortLabel(projStatus)}</span>
+                    <span className="project-name">
+                      <Highlight text={project.name} query={query} />
+                    </span>
+                    <StatusPill project={project} status={projStatus} compact />
+                  </div>
+                  <div className="project-meta">
+                    <code>
+                      <Highlight text={project.id} query={query} />
+                    </code>
+                    {project.port > 0 && (
+                      <span className="port">
+                        :<Highlight text={String(project.port)} query={query} />
                       </span>
                     )}
+                    {toolchain.map((t) => (
+                      <span key={t} className="tool-tag">
+                        {t}
+                      </span>
+                    ))}
                   </div>
-                  <small>
-                    {project.id}
-                    {project.port > 0 ? ` · ${project.port}` : ""}
-                  </small>
-                  {toolchain && <small className="toolchain">{toolchain}</small>}
-                  {!project.enabled && <small className="reason">{project.reason}</small>}
+                  {!project.enabled && project.reason && (
+                    <div className="project-reason">{project.reason}</div>
+                  )}
                 </button>
               </li>
             );
           })}
         </ul>
-        {!projects && !error && !missingConfig && <p className="muted">正在读取配置…</p>}
-        {missingConfig && <p className="muted">未找到配置</p>}
-        {projects && projects.projects.length === 0 && <p className="muted">配置里没有项目</p>}
-        {projects && (
-          <div className="sidebar-footer">
-            <p className="config-path" title={projects.config_path}>
-              {projects.config_path}
-            </p>
-            <div className="sidebar-footer-actions">
-              <button
-                type="button"
-                className="btn-sidebar-link"
-                onClick={handleOpenConfigFile}
-                title="用系统默认编辑器打开配置文件"
-              >
-                编辑配置文件
-              </button>
-              <button
-                type="button"
-                className="btn-sidebar-link"
-                onClick={() => {
-                  loadProjects().catch((err) => setError(String(err)));
-                }}
-                title="重新加载配置文件"
-              >
-                重新加载
-              </button>
-            </div>
+
+        {!projects && !error && !missingConfig && (
+          <div className="sidebar-empty">
+            <span className="spinner" aria-hidden="true" />
+            正在读取配置…
           </div>
         )}
+        {missingConfig && <div className="sidebar-empty">还没有项目配置</div>}
+        {projects && projectList.length === 0 && (
+          <div className="sidebar-empty">
+            <p>还没有项目</p>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={handleOpenCreate}>
+              <PlusIcon /> 新增项目
+            </button>
+          </div>
+        )}
+        {projects && projectList.length > 0 && visible.length === 0 && (
+          <div className="sidebar-empty">
+            <SearchIcon className="empty-icon" />
+            <p>没有匹配的项目</p>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={clearFilters}>
+              清除筛选
+            </button>
+          </div>
+        )}
+
+        <div className="sidebar-footer">
+          <button type="button" className="btn btn-secondary btn-block" disabled={missingConfig} onClick={handleOpenCreate}>
+            <PlusIcon /> 新增项目
+          </button>
+          <div className="menu-anchor">
+            <button
+              type="button"
+              className={`btn icon-btn${menu === "settings" ? " pressed" : ""}`}
+              onClick={() => setMenu(menu === "settings" ? "" : "settings")}
+              title="设置"
+              aria-label="设置"
+              aria-expanded={menu === "settings"}
+            >
+              <GearIcon />
+            </button>
+            {menu === "settings" && (
+              <div className="menu menu-up" role="menu">
+                <div className="menu-section">
+                  <span className="menu-label">配置文件</span>
+                  <code className="menu-path" title={configInfo?.path ?? projects?.config_path ?? ""}>
+                    {projects?.config_path ?? configInfo?.path ?? configInfo?.default_path ?? "—"}
+                  </code>
+                </div>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenu("");
+                    loadProjects().catch((err) => setError(String(err)));
+                  }}
+                >
+                  <RefreshIcon /> 重新加载配置
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenu("");
+                    handlePickConfig();
+                  }}
+                >
+                  <FolderIcon /> 换一个配置文件…
+                </button>
+                <div className="menu-sep" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="menu-advanced"
+                  disabled={!projects}
+                  onClick={() => {
+                    setMenu("");
+                    handleOpenConfigFile();
+                  }}
+                  title="高级：直接用文本编辑器改 projects.toml"
+                >
+                  <FileIcon /> 用编辑器打开 projects.toml（高级）
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       </aside>
-      <main>
+
+      <main className="main">
         {missingConfig ? (
           <div className="empty-config">
-            <h2>没找到项目配置 projects.toml</h2>
-            <p className="empty-desc">
-              请选择已有的配置文件，或在默认位置创建初始配置：
-            </p>
+            <img src={logoUrl} alt="" width={56} height={64} />
+            <h2>还没有项目配置</h2>
+            <p className="empty-desc">选一个已有的 projects.toml，或者在默认位置新建一份：</p>
             <p className="config-default-path">
               <code>{configInfo?.default_path ?? "~/.config/tongyun-dev/projects.toml"}</code>
             </p>
             <div className="actions">
-              <button type="button" className="primary" onClick={handlePickConfig}>
+              <button type="button" className="btn btn-primary" onClick={handleCreateDefault}>
+                新建默认配置
+              </button>
+              <button type="button" className="btn btn-secondary" onClick={handlePickConfig}>
                 选择配置文件…
               </button>
-              <button type="button" onClick={handleCreateDefault}>
-                创建默认配置
-              </button>
             </div>
-            {error && <p className="banner">{error}</p>}
+            {error && <p className="banner danger">{error}</p>}
+          </div>
+        ) : !current ? (
+          <div className="empty-config">
+            <img src={logoUrl} alt="" width={56} height={64} />
+            <h2>{projects ? "选一个项目" : "正在读取…"}</h2>
+            {projects && <p className="empty-desc">在左边选一个项目，或者新增一个。</p>}
+            {error && <p className="banner danger">{error}</p>}
           </div>
         ) : (
           <>
-            <header>
+            <header className="detail-header">
               <div className="title-area">
                 <div className="title-row">
-                  <h1>{current?.name ?? "未选择项目"}</h1>
-                  {current && (
-                    <div className="project-crud-actions">
-                      <button
-                        type="button"
-                        className="btn-header-action"
-                        onClick={handleOpenEdit}
-                        disabled={busy !== ""}
-                      >
-                        编辑
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-header-action btn-danger"
-                        onClick={handleDeleteProject}
-                        disabled={busy !== ""}
-                      >
-                        删除
-                      </button>
-                    </div>
-                  )}
+                  <h1>{current.name}</h1>
+                  <StatusPill project={current} status={status} />
                 </div>
-                <p>{status?.root ?? current?.root ?? ""}</p>
+                <div className="subtitle">
+                  <code className="id-tag">{current.id}</code>
+                  {toolchainOf(current).map((t) => (
+                    <span key={t} className="tool-tag">
+                      {t}
+                    </span>
+                  ))}
+                  <span className="path" title={status?.root ?? current.root}>
+                    <FolderIcon />
+                    {status?.root ?? current.root}
+                  </span>
+                </div>
               </div>
-              <div className="actions" aria-busy={busy !== ""}>
+              <div className="header-actions" aria-busy={busy !== ""}>
+                <div className="btn-group">
+                  <button type="button" className="btn btn-secondary" disabled={!canStart} onClick={handleStart}>
+                    <PlayIcon className="icon-play" />
+                    {busy === "start" ? "启动中…" : "启动"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={!canStop && busy !== "stop"}
+                    onClick={handleStop}
+                  >
+                    <StopIcon className="icon-stop" />
+                    {busy === "stop" ? "停止中…" : "停止"}
+                  </button>
+                  <button type="button" className="btn btn-secondary" disabled={!canRestart} onClick={handleRestart}>
+                    <RestartIcon />
+                    {busy === "restart" ? "重启中…" : "重启"}
+                  </button>
+                </div>
                 <button
                   type="button"
-                  disabled={!canStart}
-                  onClick={handleStart}
-                >
-                  {busy === "start" ? "启动中…" : "启动"}
-                </button>
-                <button
-                  type="button"
-                  disabled={!canStop && busy !== "stop"}
-                  onClick={handleStop}
-                >
-                  {busy === "stop" ? "停止中…" : "停止"}
-                </button>
-                <button
-                  type="button"
-                  disabled={!canRestart}
-                  onClick={handleRestart}
-                >
-                  {busy === "restart" ? "重启中…" : "重启"}
-                </button>
-                <button
-                  type="button"
-                  className="primary"
+                  className="btn btn-primary"
                   disabled={!canOpenPage}
                   title={getOpenPageTitle()}
                   onClick={() => reveal("page")}
                 >
+                  <ExternalIcon />
                   打开网页
                 </button>
                 <button
                   type="button"
-                  disabled={!selected || busy !== ""}
-                  onClick={() => {
-                    setError("");
-                    refresh(selected).catch((err: unknown) => setError(String(err)));
-                  }}
+                  className="btn btn-secondary"
+                  onClick={handleOpenEdit}
+                  disabled={busy !== ""}
+                  title="编辑这个项目的目录、命令、端口、日志、Java/Node 版本"
                 >
-                  刷新状态
+                  <GearIcon />
+                  项目设置
                 </button>
+                <div className="menu-anchor">
+                  <button
+                    type="button"
+                    className={`btn icon-btn${menu === "more" ? " pressed" : ""}`}
+                    onClick={() => setMenu(menu === "more" ? "" : "more")}
+                    title="更多"
+                    aria-label="更多"
+                    aria-expanded={menu === "more"}
+                  >
+                    <MoreIcon />
+                  </button>
+                  {menu === "more" && (
+                    <div className="menu menu-down" role="menu">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={busy !== ""}
+                        onClick={() => {
+                          setMenu("");
+                          setError("");
+                          refresh(selected).catch((err: unknown) => setError(String(err)));
+                        }}
+                      >
+                        <RefreshIcon /> 刷新状态
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={!canOpenLog}
+                        onClick={() => {
+                          setMenu("");
+                          reveal("log");
+                        }}
+                      >
+                        <FileIcon /> 打开日志文件
+                      </button>
+                      <div className="menu-sep" />
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="danger"
+                        disabled={busy !== ""}
+                        onClick={() => {
+                          setMenu("");
+                          handleDeleteProject();
+                        }}
+                      >
+                        <TrashIcon /> 删除项目…
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </header>
 
-            {/* Prominent State Bar at the top of detail area */}
-            {current && (
+            <div className="detail-body">
               <DetailStateBar
                 status={status}
+                project={current}
                 onScrollToLog={() => {
                   document.getElementById("log-panel")?.scrollIntoView({ behavior: "smooth" });
                 }}
               />
-            )}
 
-            {/* Unconfigured project notice */}
-            {current && !current.configured && (
-              <div className="unconfigured-banner">
-                <div>
-                  <strong>缺少端口 / 启动命令</strong>
-                  <p>该项目缺少端口或启动配置，启动已禁用。点击右侧去配置项目。</p>
+              {!current.configured && (
+                <div className="callout warn">
+                  <AlertIcon className="callout-icon" />
+                  <div className="callout-text">
+                    <strong>这个项目还没配置好</strong>
+                    <p>缺端口或启动命令，所以先不能启动。填好就能用。</p>
+                  </div>
+                  <button type="button" className="btn btn-primary" onClick={handleOpenEdit}>
+                    <GearIcon /> 去配置
+                  </button>
                 </div>
-                <button type="button" onClick={handleOpenEdit}>
-                  去配置
-                </button>
-              </div>
-            )}
+              )}
 
-            {current && !current.enabled && <p className="banner warn">{current.reason}</p>}
-            {status?.port_conflict && (
-              <p className="banner warn">
-                端口 {status.port} 被其他进程占用
-                {status.port_holder ? `：${status.port_holder}` : "。"}
-              </p>
-            )}
-            {error && <p className="banner">{error}</p>}
+              {!current.enabled && (
+                <div className="callout muted">
+                  <AlertIcon className="callout-icon" />
+                  <div className="callout-text">
+                    <strong>已停用</strong>
+                    <p>{current.reason || "这个项目在配置里被停用了。"}</p>
+                  </div>
+                  <button type="button" className="btn btn-secondary" onClick={handleOpenEdit}>
+                    <GearIcon /> 项目设置
+                  </button>
+                </div>
+              )}
+              {status?.port_conflict && (
+                <div className="callout warn">
+                  <AlertIcon className="callout-icon" />
+                  <div className="callout-text">
+                    <strong>端口 {status.port} 被别的进程占着</strong>
+                    <p>{status.port_holder || "不是本项目启动的进程。"}</p>
+                  </div>
+                </div>
+              )}
+              {error && (
+                <div className="callout danger">
+                  <AlertIcon className="callout-icon" />
+                  <div className="callout-text">
+                    <p>{error}</p>
+                  </div>
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => setError("")}>
+                    知道了
+                  </button>
+                </div>
+              )}
 
-            <section className="status" aria-label="status">
-              <Field
-                label="running"
-                value={status ? (status.running ? "true" : "false") : "—"}
-                tone={status?.running ? "up" : "down"}
-              />
-              <Field label="pid" value={status?.pid ?? "—"} />
-              <Field
-                label="port"
-                value={status ? `${status.port}${status.port_open ? " · open" : " · closed"}` : "—"}
-              />
-              <Field
-                label="login_probe"
-                value={
-                  status
-                    ? `${status.login_probe.http_code ?? "—"} · ${status.login_probe.ok ? "ok" : "not ok"}`
-                    : "—"
-                }
-                detail={status?.login_probe.url}
-                tone={status?.login_probe.ok ? "up" : undefined}
-              />
-            </section>
+              <section className="stats" aria-label="运行信息">
+                <Stat
+                  icon={<PulseIcon />}
+                  label="运行状态"
+                  value={runLabel(status, current)}
+                  tone={runTone(status, current)}
+                />
+                <Stat
+                  icon={<CpuIcon />}
+                  label="进程"
+                  value={status?.pid ? `PID ${status.pid}` : status ? "未运行" : "—"}
+                  tone={status?.pid ? "ok" : "muted"}
+                />
+                <Stat
+                  icon={<PlugIcon />}
+                  label="端口"
+                  value={
+                    !current.port
+                      ? "未配置"
+                      : status
+                        ? `${status.port} · ${status.port_open ? "已通" : "未通"}`
+                        : String(current.port)
+                  }
+                  tone={!current.port ? "warn" : status?.port_open ? "ok" : "muted"}
+                />
+                <Stat
+                  icon={<DoorIcon />}
+                  label="登录页"
+                  value={
+                    !status
+                      ? "—"
+                      : status.login_probe.ok
+                        ? `正常 · ${status.login_probe.http_code ?? ""}`.trim()
+                        : status.login_probe.http_code
+                          ? `异常 · ${status.login_probe.http_code}`
+                          : "未响应"
+                  }
+                  detail={status?.login_probe.url}
+                  tone={status?.login_probe.ok ? "ok" : status?.login_probe.http_code ? "danger" : "muted"}
+                />
+              </section>
 
-            {/* Real-time Log Panel */}
-            <LogPanel
-              log={log}
-              logPath={logPath}
-              canOpenLog={canOpenLog}
-              onOpenLog={() => reveal("log")}
-              selected={selected}
-            />
+              <LogPanel
+                log={log}
+                logPath={logPath}
+                canOpenLog={canOpenLog}
+                onOpenLog={() => reveal("log")}
+                selected={selected}
+              />
+            </div>
           </>
         )}
       </main>
@@ -607,119 +898,176 @@ export function App() {
   );
 }
 
+type Tone = "ok" | "warn" | "danger" | "info" | "muted";
+
+function runLabel(status: Status | null, project: { enabled: boolean; configured: boolean }): string {
+  if (!project.configured) return "未配置";
+  if (!project.enabled) return "已停用";
+  if (!status) return "探测中…";
+  switch (status.state) {
+    case "ready":
+      return "就绪";
+    case "port_open":
+      return "端口已通";
+    case "starting":
+      return `启动中 · ${status.elapsed_secs ?? 0} 秒`;
+    case "failed":
+      return "启动失败";
+    default:
+      return "已停止";
+  }
+}
+
+function runTone(status: Status | null, project: { enabled: boolean; configured: boolean }): Tone {
+  if (!project.configured) return "warn";
+  if (!project.enabled || !status) return "muted";
+  switch (status.state) {
+    case "ready":
+    case "port_open":
+      return "ok";
+    case "starting":
+      return "info";
+    case "failed":
+      return "danger";
+    default:
+      return "muted";
+  }
+}
+
+function StatusPill({
+  project,
+  status,
+  compact,
+}: {
+  project: { enabled: boolean; configured: boolean };
+  status: Status | null | undefined;
+  compact?: boolean;
+}) {
+  let cls: string = status?.state || "stopped";
+  let label = compact ? stateShortLabel(status ?? { state: "stopped" }) : runLabel(status ?? null, project);
+  if (!project.configured) {
+    cls = "unconfigured";
+    label = "未配置";
+  } else if (!project.enabled) {
+    cls = "disabled";
+    label = "已停用";
+  } else if (!status && !compact) {
+    label = "探测中…";
+  }
+  return (
+    <span className={`pill pill-${cls}`}>
+      <span className="pill-dot" />
+      {label}
+    </span>
+  );
+}
+
+function Highlight({ text, query }: { text: string; query: string }) {
+  const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return <>{text}</>;
+  const lower = text.toLowerCase();
+  const marks: boolean[] = new Array(text.length).fill(false);
+  for (const t of tokens) {
+    let from = 0;
+    for (;;) {
+      const idx = lower.indexOf(t, from);
+      if (idx === -1) break;
+      for (let k = idx; k < idx + t.length; k++) marks[k] = true;
+      from = idx + Math.max(1, t.length);
+    }
+  }
+  const parts: React.ReactNode[] = [];
+  let i = 0;
+  while (i < text.length) {
+    const on = marks[i];
+    let j = i;
+    while (j < text.length && marks[j] === on) j++;
+    const seg = text.slice(i, j);
+    parts.push(on ? <mark key={i}>{seg}</mark> : seg);
+    i = j;
+  }
+  return <>{parts}</>;
+}
+
 function DetailStateBar({
   status,
+  project,
   onScrollToLog,
 }: {
   status: Status | null;
+  project: { enabled: boolean; configured: boolean };
   onScrollToLog: () => void;
 }) {
+  if (!project.configured || !project.enabled) return null;
   if (!status) {
     return (
-      <div className="detail-state-bar stopped">
-        <div className="state-bar-main">
-          <div className="state-bar-left">
-            <span className="state-bar-dot" />
-            <span className="state-bar-text">正在探测状态…</span>
-          </div>
-        </div>
+      <div className="state-bar probing">
+        <span className="state-dot" />
+        <span className="state-text">正在探测状态…</span>
       </div>
     );
   }
-
   const state = status.state;
-
-  if (state === "stopped") {
-    return (
-      <div className="detail-state-bar stopped">
-        <div className="state-bar-main">
-          <div className="state-bar-left">
-            <span className="state-bar-dot" />
-            <span className="state-bar-text">已停止</span>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   if (state === "starting") {
     const elapsed = status.elapsed_secs ?? 0;
     const timeout = status.timeout_secs || 180;
     const pct = Math.min(100, Math.round((elapsed / timeout) * 100));
-
     return (
-      <div className="detail-state-bar starting">
-        <div className="state-bar-main">
-          <div className="state-bar-left">
-            <span className="state-bar-dot" />
-            <span className="state-bar-text">启动中 · 已 {elapsed} 秒</span>
+      <div className="state-bar starting">
+        <span className="state-dot" />
+        <div className="state-main">
+          <div className="state-line">
+            <span className="state-text">启动中 · 已 {elapsed} 秒</span>
+            <span className="state-tip">
+              {status.port_open
+                ? "端口已通，正在等待服务就绪…"
+                : `端口 ${status.port} 还没通，日志在写说明在启动`}
+            </span>
+          </div>
+          <div className="progress">
+            <div className="progress-bar" style={{ width: `${Math.max(4, pct)}%` }} />
           </div>
         </div>
-        <div className="state-progress-wrap">
-          <div className="state-progress-track">
-            <div
-              className="state-progress-bar"
-              style={{ width: `${Math.max(4, pct)}%` }}
-            />
-          </div>
-          <span className="state-tip">
-            {status.port_open
-              ? "端口已通，正在等待服务就绪…"
-              : `端口 ${status.port} 还没通，日志在写说明在启动`}
-          </span>
-        </div>
+        <span className="state-timeout">最长 {timeout} 秒</span>
       </div>
     );
   }
-
   if (state === "port_open") {
     return (
-      <div className="detail-state-bar port_open">
-        <div className="state-bar-main">
-          <div className="state-bar-left">
-            <span className="state-bar-dot" />
-            <span className="state-bar-text">端口已通 · 等登录页</span>
-          </div>
-        </div>
+      <div className="state-bar port_open">
+        <span className="state-dot" />
+        <span className="state-text">端口已通 · 等登录页</span>
       </div>
     );
   }
-
   if (state === "ready") {
     const elapsed = status.elapsed_secs;
     return (
-      <div className="detail-state-bar ready">
-        <div className="state-bar-main">
-          <div className="state-bar-left">
-            <span className="state-bar-dot" />
-            <span className="state-bar-text">
-              {elapsed != null ? `就绪 · 用时 ${elapsed} 秒` : "就绪"}
-            </span>
-          </div>
-        </div>
+      <div className="state-bar ready">
+        <span className="state-dot" />
+        <span className="state-text">{elapsed != null ? `就绪 · 用时 ${elapsed} 秒` : "就绪"}</span>
+        <span className="state-tip">服务已能访问，可以点「打开网页」</span>
       </div>
     );
   }
-
   if (state === "failed") {
     return (
-      <div className="detail-state-bar failed">
-        <div className="state-bar-main">
-          <div className="state-bar-left">
-            <span className="state-bar-dot" />
-            <span className="state-bar-text">
-              失败 · {status.failure || "服务启动失败"}
-            </span>
-          </div>
-          <button type="button" className="btn-view-log" onClick={onScrollToLog}>
-            看日志
-          </button>
-        </div>
+      <div className="state-bar failed">
+        <span className="state-dot" />
+        <span className="state-text">失败 · {status.failure || "服务启动失败"}</span>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={onScrollToLog}>
+          看日志
+        </button>
       </div>
     );
   }
-
-  return null;
+  return (
+    <div className="state-bar stopped">
+      <span className="state-dot" />
+      <span className="state-text">已停止</span>
+      <span className="state-tip">点「启动」运行这个项目</span>
+    </div>
+  );
 }
 
 function pageUrl(status: Status | null, project: { port: number } | null): string {
@@ -730,22 +1078,31 @@ function pageUrl(status: Status | null, project: { port: number } | null): strin
   return "";
 }
 
-function Field({
+function Stat({
+  icon,
   label,
   value,
   detail,
   tone,
 }: {
+  icon: React.ReactNode;
   label: string;
-  value: string | number;
+  value: string;
   detail?: string;
-  tone?: "up" | "down";
+  tone: Tone;
 }) {
   return (
-    <article className={tone ? `field ${tone}` : "field"}>
-      <h2>{label}</h2>
-      <p>{value}</p>
-      {detail && <small>{detail}</small>}
+    <article className={`stat tone-${tone}`}>
+      <div className="stat-head">
+        <span className="stat-icon">{icon}</span>
+        <span className="stat-label">{label}</span>
+      </div>
+      <p className="stat-value">{value}</p>
+      {detail && (
+        <small className="stat-detail" title={detail}>
+          {detail}
+        </small>
+      )}
     </article>
   );
 }

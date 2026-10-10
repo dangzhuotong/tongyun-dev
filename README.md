@@ -107,6 +107,7 @@ npm run tauri build    # 打包
 ## 文档
 
 - [AGENTS.md](AGENTS.md) — AI 开发规则
+- [.agents/skills/tongyun-dev/SKILL.md](.agents/skills/tongyun-dev/SKILL.md) — Agent 如何用 CLI / :9099 驱动本工具
 - [docs/prd.md](docs/prd.md) — 产品范围
 - [docs/plan.md](docs/plan.md) — 排期
 - [docs/development.md](docs/development.md) — 命令、配置字段与验收

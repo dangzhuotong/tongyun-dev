@@ -17,6 +17,7 @@
 | 配置格式 | [config/projects.example.toml](config/projects.example.toml)、[config/projects.template.toml](config/projects.template.toml) |
 | 扫描规则 | `crates/tongyun-dev-core/src/scan.rs` |
 | 架构决定 | [docs/decisions/0001-cli-first.md](docs/decisions/0001-cli-first.md) |
+| Agent 驱动（CLI / :9099） | [.agents/skills/tongyun-dev/SKILL.md](.agents/skills/tongyun-dev/SKILL.md) |
 
 ## 开发与验证
 

@@ -5,7 +5,7 @@
 ## 项目与修改入口
 
 - 用途：本机开发服务启停 / 状态 / 日志；服务 AI 与人。范围见 [docs/prd.md](docs/prd.md)。
-- 技术栈：Rust CLI 优先；Tauri 2 + React 桌面壳后补。
+- 技术栈：Rust `tongyun-dev-core` 放全部项目逻辑（启停、状态、日志、add/remove、打开页面/目录）；CLI、网页控制台（`tongyun-dev ui`，:9099，`crates/tongyun-dev-cli/src/server.rs`）和 Tauri 2 + React 桌面壳都只调用它，不要在入口层重复实现。
 - 密钥、数据库密码、Token：**不进仓、不打印**。项目路径写配置文件，可用环境变量覆盖。
 - 不碰 服务器安全组；不依赖 IDEA Ultimate。
 

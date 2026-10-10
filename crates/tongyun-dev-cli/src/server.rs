@@ -1,318 +1,349 @@
-use anyhow::Result;
-use serde_json::json;
+//! Web console for tongyun-dev (`tongyun-dev ui`, default http://127.0.0.1:9099).
+//!
+//! A tiny std-only HTTP server bound to 127.0.0.1. Every request re-reads
+//! config/projects.toml through `tongyun-dev-core`, so the console, the CLI and the
+//! desktop shell always see the same projects and the same start/stop/status logic.
+use anyhow::{bail, Result};
+use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
+use tongyun_dev_core::{Loaded, NewProject};
 
-use crate::config::{expand_user, render, save_config, FileConfig, Project};
-use crate::runner::{cmd_start, cmd_stop, open_path, open_url, read_last_lines, status_of};
+pub const DEFAULT_UI_PORT: u16 = 9099;
+const MAX_HEADER: usize = 16 * 1024;
+const MAX_BODY: usize = 64 * 1024;
+const LOG_LINES: usize = 120;
 
 struct AppState {
     config_path: PathBuf,
-    config: FileConfig,
+    port: u16,
+    /// Serializes config writes (add / remove).
+    write_lock: Mutex<()>,
 }
 
-pub fn start_ui_server(config_path: PathBuf, config: FileConfig, initial_port: u16, auto_open: bool) -> Result<()> {
-    let mut port = initial_port;
-    let listener = loop {
-        let addr = format!("127.0.0.1:{port}");
-        match TcpListener::bind(&addr) {
-            Ok(l) => break l,
-            Err(e) => {
-                if port < initial_port + 20 {
-                    port += 1;
-                } else {
-                    anyhow::bail!("could not bind UI server to any port between {initial_port} and {port}: {e}");
-                }
-            }
-        }
-    };
-    let addr = format!("127.0.0.1:{port}");
-    let url = format!("http://{addr}");
-
+/// Bind 127.0.0.1:`initial_port` (or the next free port up to +20) and serve forever.
+pub fn start_ui_server(config_path: PathBuf, initial_port: u16, auto_open: bool) -> Result<()> {
+    let (listener, port) = bind_from(initial_port)?;
+    let url = format!("http://127.0.0.1:{port}");
     println!();
-    println!("┌────────────────────────────────────────────────────────┐");
-    println!("│  🚀 tongyun-dev 可视化控制台已就绪!                     │");
-    println!("│  访问地址: {url:<43} │", url = url);
-    println!("│  支持在界面中一键启停、查看实时状态、看日志、添加项目   │");
-    println!("│  按 Ctrl+C 可停止控制台服务                            │");
-    println!("└────────────────────────────────────────────────────────┘");
+    println!("tongyun-dev 网页控制台已就绪：{url}");
+    println!("  配置 {}", config_path.display());
+    println!("  一键启停、看状态和日志、注册/移除项目；Ctrl+C 停止");
     println!();
-
     if auto_open {
-        let _ = open_url(&url);
+        if let Err(e) = tongyun_dev_core::open_url(&url) {
+            eprintln!("could not open browser: {e:#}");
+        }
     }
+    serve(listener, config_path, port)
+}
 
-    let state = Arc::new(Mutex::new(AppState {
+fn bind_from(initial_port: u16) -> Result<(TcpListener, u16)> {
+    let last = initial_port.saturating_add(20);
+    let mut port = initial_port;
+    loop {
+        match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(l) => {
+                let actual = l.local_addr()?.port();
+                return Ok((l, actual));
+            }
+            Err(e) if port < last => {
+                eprintln!("port {port} busy ({e}), trying {}", port + 1);
+                port += 1;
+            }
+            Err(e) => bail!("could not bind UI server on 127.0.0.1:{initial_port}..={last}: {e}"),
+        }
+    }
+}
+
+/// Serve on an already-bound listener (used by tests with an ephemeral port).
+pub fn serve(listener: TcpListener, config_path: PathBuf, port: u16) -> Result<()> {
+    let state = Arc::new(AppState {
         config_path,
-        config,
-    }));
-
+        port,
+        write_lock: Mutex::new(()),
+    });
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let state_clone = Arc::clone(&state);
+                let state = Arc::clone(&state);
                 thread::spawn(move || {
-                    let _ = handle_connection(stream, state_clone);
+                    let _ = handle_connection(stream, &state);
                 });
             }
-            Err(e) => {
-                eprintln!("UI server connection error: {e}");
-            }
+            Err(e) => eprintln!("UI server connection error: {e}"),
         }
     }
-
     Ok(())
 }
 
-fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<AppState>>) -> Result<()> {
-    let mut buffer = [0u8; 8192];
-    let bytes_read = stream.read(&mut buffer)?;
-    if bytes_read == 0 {
-        return Ok(());
-    }
+struct Request {
+    method: String,
+    path: String,
+    host: String,
+    origin: Option<String>,
+    body: Vec<u8>,
+}
 
-    let req_str = String::from_utf8_lossy(&buffer[..bytes_read]);
-    let mut lines = req_str.lines();
-    let first_line = lines.next().unwrap_or("");
-    let parts: Vec<&str> = first_line.split_whitespace().collect();
-    if parts.len() < 2 {
-        return Ok(());
-    }
-
-    let method = parts[0];
-    let path = parts[1];
-
-    // Find body if present
-    let body = if let Some(idx) = req_str.find("\r\n\r\n") {
-        &req_str[idx + 4..]
-    } else {
-        ""
+fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let header_end = loop {
+        if let Some(i) = find(&buf, b"\r\n\r\n") {
+            break i;
+        }
+        if buf.len() > MAX_HEADER {
+            bail!("header too large");
+        }
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        buf.extend_from_slice(&chunk[..n]);
     };
-
-    match (method, path) {
-        ("GET", "/") => {
-            send_response(&mut stream, 200, "text/html; charset=utf-8", UI_HTML.as_bytes())?;
-        }
-        ("GET", "/api/projects") => {
-            let projects_json = {
-                let st = state.lock().unwrap();
-                let mut list = Vec::new();
-                for (id, p) in &st.config.projects {
-                    let status = status_of(id, p);
-                    list.push(status);
-                }
-                list.sort_by(|a, b| a.id.cmp(&b.id));
-                serde_json::to_string(&list).unwrap_or_else(|_| "[]".into())
-            };
-            send_response(&mut stream, 200, "application/json", projects_json.as_bytes())?;
-        }
-        ("POST", p) if p.starts_with("/api/projects/") && p.ends_with("/start") => {
-            let id = p
-                .strip_prefix("/api/projects/")
-                .and_then(|s| s.strip_suffix("/start"))
-                .unwrap_or("");
-            let proj_opt = {
-                let st = state.lock().unwrap();
-                st.config.projects.get(id).cloned()
-            };
-            match proj_opt {
-                Some(proj) => {
-                    let res = cmd_start(id, &proj);
-                    let st = status_of(id, &proj);
-                    let body = json!({
-                        "ok": res.is_ok(),
-                        "error": res.err().map(|e| e.to_string()),
-                        "status": st
-                    });
-                    send_response(&mut stream, 200, "application/json", body.to_string().as_bytes())?;
-                }
-                None => {
-                    send_response(&mut stream, 404, "application/json", b"{\"error\":\"not found\"}")?;
-                }
-            }
-        }
-        ("POST", p) if p.starts_with("/api/projects/") && p.ends_with("/stop") => {
-            let id = p
-                .strip_prefix("/api/projects/")
-                .and_then(|s| s.strip_suffix("/stop"))
-                .unwrap_or("");
-            let proj_opt = {
-                let st = state.lock().unwrap();
-                st.config.projects.get(id).cloned()
-            };
-            match proj_opt {
-                Some(proj) => {
-                    let res = cmd_stop(id, &proj);
-                    let st = status_of(id, &proj);
-                    let body = json!({
-                        "ok": res.is_ok(),
-                        "error": res.err().map(|e| e.to_string()),
-                        "status": st
-                    });
-                    send_response(&mut stream, 200, "application/json", body.to_string().as_bytes())?;
-                }
-                None => {
-                    send_response(&mut stream, 404, "application/json", b"{\"error\":\"not found\"}")?;
-                }
-            }
-        }
-        ("POST", p) if p.starts_with("/api/projects/") && p.ends_with("/open") => {
-            let id = p
-                .strip_prefix("/api/projects/")
-                .and_then(|s| s.strip_suffix("/open"))
-                .unwrap_or("");
-            let proj_opt = {
-                let st = state.lock().unwrap();
-                st.config.projects.get(id).cloned()
-            };
-            match proj_opt {
-                Some(proj) => {
-                    let target_url = if !proj.login_url.is_empty() {
-                        &proj.login_url
-                    } else {
-                        &format!("http://127.0.0.1:{}", proj.port)
-                    };
-                    let res = open_url(target_url);
-                    let body = json!({
-                        "ok": res.is_ok(),
-                        "url": target_url,
-                        "error": res.err().map(|e| e.to_string())
-                    });
-                    send_response(&mut stream, 200, "application/json", body.to_string().as_bytes())?;
-                }
-                None => {
-                    send_response(&mut stream, 404, "application/json", b"{\"error\":\"not found\"}")?;
-                }
-            }
-        }
-        ("POST", p) if p.starts_with("/api/projects/") && p.ends_with("/open-dir") => {
-            let id = p
-                .strip_prefix("/api/projects/")
-                .and_then(|s| s.strip_suffix("/open-dir"))
-                .unwrap_or("");
-            let proj_opt = {
-                let st = state.lock().unwrap();
-                st.config.projects.get(id).cloned()
-            };
-            match proj_opt {
-                Some(proj) => {
-                    let root_path = expand_user(&proj.root);
-                    let res = open_path(&root_path);
-                    let body = json!({
-                        "ok": res.is_ok(),
-                        "path": root_path.display().to_string(),
-                        "error": res.err().map(|e| e.to_string())
-                    });
-                    send_response(&mut stream, 200, "application/json", body.to_string().as_bytes())?;
-                }
-                None => {
-                    send_response(&mut stream, 404, "application/json", b"{\"error\":\"not found\"}")?;
-                }
-            }
-        }
-        ("GET", p) if p.starts_with("/api/projects/") && p.contains("/logs") => {
-            let id = p
-                .strip_prefix("/api/projects/")
-                .and_then(|s| s.split('/').next())
-                .unwrap_or("");
-            let proj_opt = {
-                let st = state.lock().unwrap();
-                st.config.projects.get(id).cloned()
-            };
-            match proj_opt {
-                Some(proj) => {
-                    let log_path = expand_user(&render(&proj.log_file, &proj));
-                    match read_last_lines(&log_path, 120) {
-                        Ok(lines) => {
-                            let body = json!({ "ok": true, "path": log_path.display().to_string(), "lines": lines });
-                            send_response(&mut stream, 200, "application/json", body.to_string().as_bytes())?;
-                        }
-                        Err(e) => {
-                            let body = json!({ "ok": false, "path": log_path.display().to_string(), "error": e.to_string() });
-                            send_response(&mut stream, 200, "application/json", body.to_string().as_bytes())?;
-                        }
-                    }
-                }
-                None => {
-                    send_response(&mut stream, 404, "application/json", b"{\"error\":\"not found\"}")?;
-                }
-            }
-        }
-        ("POST", "/api/projects") => {
-            #[derive(serde::Deserialize)]
-            struct AddReq {
-                id: String,
-                name: String,
-                root: String,
-                start: String,
-                stop: Option<String>,
-                port: Option<u16>,
-                login_url: Option<String>,
-                log_file: Option<String>,
-            }
-            if let Ok(req) = serde_json::from_str::<AddReq>(body) {
-                let mut st = state.lock().unwrap();
-                let port = req.port.unwrap_or(8080);
-                let login_url = req.login_url.unwrap_or_else(|| format!("http://127.0.0.1:{port}"));
-                let log_file = req.log_file.unwrap_or_default();
-                let start_cmd: Vec<String> = if cfg!(windows) {
-                    vec!["cmd".into(), "/c".into(), req.start]
-                } else {
-                    vec!["bash".into(), "-lc".into(), req.start]
-                };
-                let stop_cmd: Vec<String> = req.stop.map(|s| {
-                    if cfg!(windows) {
-                        vec!["cmd".into(), "/c".into(), s]
-                    } else {
-                        vec!["bash".into(), "-lc".into(), s]
-                    }
-                }).unwrap_or_default();
-
-                let project = Project {
-                    name: req.name,
-                    root: req.root,
-                    start: start_cmd,
-                    stop: stop_cmd,
-                    tomcat: String::new(),
-                    log_dir: String::new(),
-                    log_file,
-                    pid_file: String::new(),
-                    port,
-                    login_url,
-                };
-                st.config.projects.insert(req.id, project);
-                let _ = save_config(&st.config_path, &st.config);
-                let body = json!({ "ok": true });
-                send_response(&mut stream, 200, "application/json", body.to_string().as_bytes())?;
-            } else {
-                send_response(&mut stream, 400, "application/json", b"{\"error\":\"bad payload\"}")?;
-            }
-        }
-        ("DELETE", p) if p.starts_with("/api/projects/") => {
-            let id = p.strip_prefix("/api/projects/").unwrap_or("");
-            let mut st = state.lock().unwrap();
-            if st.config.projects.remove(id).is_some() {
-                let _ = save_config(&st.config_path, &st.config);
-                let body = json!({ "ok": true });
-                send_response(&mut stream, 200, "application/json", body.to_string().as_bytes())?;
-            } else {
-                send_response(&mut stream, 404, "application/json", b"{\"error\":\"not found\"}")?;
-            }
-        }
-        _ => {
-            send_response(&mut stream, 404, "text/plain", b"Not Found")?;
+    let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+    let mut lines = head.lines();
+    let mut parts = lines.next().unwrap_or("").split_whitespace();
+    let method = parts.next().unwrap_or("").to_string();
+    let path = parts.next().unwrap_or("").to_string();
+    let mut host = String::new();
+    let mut origin = None;
+    let mut len = 0usize;
+    for line in lines {
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let v = v.trim();
+        match k.trim().to_ascii_lowercase().as_str() {
+            "host" => host = v.to_string(),
+            "origin" => origin = Some(v.to_string()),
+            "content-length" => len = v.parse().unwrap_or(0),
+            _ => {}
         }
     }
-
-    Ok(())
+    if len > MAX_BODY {
+        bail!("body too large");
+    }
+    let mut body = buf[header_end + 4..].to_vec();
+    while body.len() < len {
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..n]);
+    }
+    body.truncate(len);
+    Ok(Some(Request {
+        method,
+        path,
+        host,
+        origin,
+        body,
+    }))
 }
 
-fn send_response(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) -> Result<()> {
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Only our own page may talk to the API: Host must be loopback (blocks DNS
+/// rebinding) and state-changing requests from another Origin are refused (CSRF).
+fn trusted(req: &Request, port: u16) -> bool {
+    let allowed = [format!("127.0.0.1:{port}"), format!("localhost:{port}")];
+    if !allowed.iter().any(|a| req.host.eq_ignore_ascii_case(a)) {
+        return false;
+    }
+    if req.method == "GET" {
+        return true;
+    }
+    match &req.origin {
+        None => true,
+        Some(o) => allowed
+            .iter()
+            .any(|a| o.eq_ignore_ascii_case(&format!("http://{a}"))),
+    }
+}
+
+fn handle_connection(mut stream: TcpStream, state: &AppState) -> Result<()> {
+    let Some(req) = read_request(&mut stream)? else {
+        return Ok(());
+    };
+    if !trusted(&req, state.port) {
+        return send_json(
+            &mut stream,
+            403,
+            &json!({"ok": false, "error": "forbidden origin"}),
+        );
+    }
+    let (code, ctype, body) = route(&req, state);
+    send_response(&mut stream, code, ctype, &body)
+}
+
+fn project_route<'a>(path: &'a str, action: &str) -> Option<&'a str> {
+    let rest = path.strip_prefix("/api/projects/")?;
+    let id = if action.is_empty() {
+        rest
+    } else {
+        rest.strip_suffix(action)?.strip_suffix('/')?
+    };
+    (!id.is_empty() && !id.contains('/')).then_some(id)
+}
+
+fn json_body(code: u16, v: Value) -> (u16, &'static str, Vec<u8>) {
+    (
+        code,
+        "application/json; charset=utf-8",
+        v.to_string().into_bytes(),
+    )
+}
+
+fn err_json(code: u16, e: impl std::fmt::Display) -> (u16, &'static str, Vec<u8>) {
+    json_body(code, json!({"ok": false, "error": e.to_string()}))
+}
+
+fn load(state: &AppState) -> Result<Loaded> {
+    tongyun_dev_core::load(Some(&state.config_path))
+}
+
+/// Status plus list fields (enabled / reason / node / java) for every project.
+pub fn overview(loaded: &Loaded) -> Result<Vec<Value>> {
+    let list = loaded.list()?;
+    let mut out = Vec::with_capacity(list.projects.len());
+    for row in list.projects {
+        let mut v = serde_json::to_value(loaded.status(&row.id)?)?;
+        if let Value::Object(m) = &mut v {
+            m.insert("enabled".into(), json!(row.enabled));
+            m.insert("reason".into(), json!(row.reason));
+            m.insert("node".into(), json!(row.node));
+            m.insert("java".into(), json!(row.java));
+        }
+        out.push(v);
+    }
+    Ok(out)
+}
+
+fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
+    let path = req.path.split('?').next().unwrap_or("");
+    let method = req.method.as_str();
+    if method == "GET" && path == "/" {
+        return (200, "text/html; charset=utf-8", UI_HTML.as_bytes().to_vec());
+    }
+    let loaded = match load(state) {
+        Ok(l) => l,
+        Err(e) => return err_json(500, format!("{e:#}")),
+    };
+    match method {
+        "GET" if path == "/api/projects" => match overview(&loaded) {
+            Ok(list) => json_body(200, Value::Array(list)),
+            Err(e) => err_json(500, format!("{e:#}")),
+        },
+        "GET" => {
+            if let Some(id) = project_route(path, "logs") {
+                return match loaded.log_tail(id, LOG_LINES) {
+                    Ok(t) => json_body(
+                        200,
+                        json!({"ok": true, "path": t.path, "missing": t.missing,
+                               "lines": t.text.lines().collect::<Vec<_>>()}),
+                    ),
+                    Err(e) => err_json(404, format!("{e:#}")),
+                };
+            }
+            err_json(404, "not found")
+        }
+        "POST" if path == "/api/projects" => {
+            let new: NewProject = match serde_json::from_slice(&req.body) {
+                Ok(n) => n,
+                Err(e) => return err_json(400, format!("bad payload: {e}")),
+            };
+            let _guard = state.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+            // Reload under the lock so concurrent adds see each other.
+            let mut loaded = match load(state) {
+                Ok(l) => l,
+                Err(e) => return err_json(500, format!("{e:#}")),
+            };
+            match loaded.add_project(new) {
+                Ok(row) => json_body(200, json!({"ok": true, "project": row})),
+                Err(e) => err_json(400, format!("{e:#}")),
+            }
+        }
+        "POST" => {
+            let action = ["start", "stop", "open", "open-dir"]
+                .into_iter()
+                .find_map(|a| project_route(path, a).map(|id| (a, id)));
+            let Some((action, id)) = action else {
+                return err_json(404, "not found");
+            };
+            let res: Result<Value> = match action {
+                "start" => loaded.start(id).map(|st| json!({"status": st})),
+                "stop" => loaded.stop(id).map(|st| json!({"status": st})),
+                "open" => loaded
+                    .page_url(id)
+                    .and_then(|u| tongyun_dev_core::open_url(&u).map(|_| json!({"url": u}))),
+                _ => loaded
+                    .root_dir(id)
+                    .and_then(|p| tongyun_dev_core::open_path(&p).map(|_| json!({"path": p}))),
+            };
+            match res {
+                Ok(mut v) => {
+                    v["ok"] = json!(true);
+                    json_body(200, v)
+                }
+                Err(e) => {
+                    let status = loaded.status(id).ok();
+                    json_body(
+                        200,
+                        json!({"ok": false, "error": format!("{e:#}"), "status": status}),
+                    )
+                }
+            }
+        }
+        "DELETE" => {
+            let Some(id) = project_route(path, "") else {
+                return err_json(404, "not found");
+            };
+            let _guard = state.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut loaded = match load(state) {
+                Ok(l) => l,
+                Err(e) => return err_json(500, format!("{e:#}")),
+            };
+            match loaded.remove_project(id) {
+                Ok(()) => json_body(200, json!({"ok": true})),
+                Err(e) => err_json(404, format!("{e:#}")),
+            }
+        }
+        _ => err_json(405, "method not allowed"),
+    }
+}
+
+fn send_json(stream: &mut TcpStream, code: u16, v: &Value) -> Result<()> {
+    send_response(
+        stream,
+        code,
+        "application/json; charset=utf-8",
+        v.to_string().as_bytes(),
+    )
+}
+
+fn reason(code: u16) -> &'static str {
+    match code {
+        200 => "OK",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        _ => "Internal Server Error",
+    }
+}
+
+fn send_response(stream: &mut TcpStream, code: u16, content_type: &str, body: &[u8]) -> Result<()> {
     let header = format!(
-        "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {code} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        reason(code),
         body.len()
     );
     stream.write_all(header.as_bytes())?;
@@ -420,6 +451,13 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
     .val-ok { color: #34d399; }
     .val-down { color: #94a3b8; }
 
+    .card.disabled { opacity: 0.5; }
+    .card.disabled .card-actions button.btn-start { cursor: not-allowed; }
+    .reason { font-size: 12px; color: #fbbf24; }
+    .warn { font-size: 12px; color: #fbbf24; background: rgba(251,191,36,0.12); padding: 6px 8px; border-radius: 6px; }
+    .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+    .chip { font-size: 11px; font-family: var(--font-mono); background: #1e293b; color: #cbd5e1; padding: 2px 7px; border-radius: 10px; }
+    button:disabled { opacity: 0.6; cursor: progress; }
     .card-actions {
       display: flex;
       flex-wrap: wrap;
@@ -505,8 +543,8 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
         <input id="addId" placeholder="例如：acme_fe" required />
       </div>
       <div class="form-group">
-        <label>显示名称</label>
-        <input id="addName" placeholder="例如：前端开发服务" required />
+        <label>显示名称（可选，默认同 ID）</label>
+        <input id="addName" placeholder="例如：前端开发服务" />
       </div>
       <div class="form-group">
         <label>项目根路径</label>
@@ -518,15 +556,23 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
       </div>
       <div class="form-group">
         <label>停止命令（可选）</label>
-        <input id="addStop" placeholder="例如：kill -9 {{pid}}" />
+        <input id="addStop" placeholder="不填则按 pid 进程组停，并清掉本端口监听" />
       </div>
       <div class="form-group">
         <label>端口号</label>
-        <input id="addPort" type="number" value="3000" />
+        <input id="addPort" type="number" value="8080" />
       </div>
       <div class="form-group">
-        <label>访问/登录页面 URL</label>
-        <input id="addUrl" placeholder="例如：http://127.0.0.1:3000" />
+        <label>就绪探针 URL（可选；返回 200/301/302 才算启动完成，不填则端口能连上即可）</label>
+        <input id="addUrl" placeholder="例如：http://127.0.0.1:3000/login" />
+      </div>
+      <div class="form-group">
+        <label>Node 版本（可选，走 fnm，如 22）</label>
+        <input id="addNode" placeholder="例如：22" />
+      </div>
+      <div class="form-group">
+        <label>Java 版本（可选，走 sdkman，如 17.0.10-tem）</label>
+        <input id="addJava" placeholder="例如：17.0.10-tem" />
       </div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="closeAddModal()">取消</button>
@@ -552,11 +598,36 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
 
   <script>
     let currentLogId = null;
+    let lastProjects = [];
+    const busyIds = {};
+
+    async function postJson(url, opts) {
+      const res = await fetch(url, Object.assign({ method: 'POST' }, opts || {}));
+      let data = {};
+      try { data = await res.json(); } catch (e) {}
+      if (!res.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + res.status));
+      return data;
+    }
+
+    async function runAction(id, label, path, failText) {
+      busyIds[id] = label;
+      renderProjects(lastProjects);
+      try {
+        await postJson(`/api/projects/${id}/${path}`);
+      } catch (e) {
+        alert(failText + '：' + e.message);
+      } finally {
+        delete busyIds[id];
+        fetchProjects();
+      }
+    }
 
     async function fetchProjects() {
       try {
         const res = await fetch('/api/projects');
         const data = await res.json();
+        if (!Array.isArray(data)) throw new Error(data.error || '加载失败');
+        lastProjects = data;
         renderProjects(data);
       } catch (e) {
         console.error(e);
@@ -571,12 +642,29 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
       }
       grid.innerHTML = projects.map(p => {
         const isRunning = p.running;
+        const enabled = p.enabled !== false;
         const portOpen = p.port_open;
         const probeOk = p.login_probe.ok;
         const code = p.login_probe.http_code;
+        const busy = busyIds[p.id];
+        const chips = [p.node ? `node ${escapeHtml(p.node)}` : '', p.java ? `java ${escapeHtml(p.java)}` : '']
+          .filter(Boolean).map(c => `<span class="chip">${c}</span>`).join('');
+        const conflict = p.port_conflict
+          ? `<div class="warn">⚠ 端口 ${p.port} 被占用${p.port_holder ? '：' + escapeHtml(p.port_holder) : '（非本项目进程）'}</div>`
+          : '';
+        let primary;
+        if (!enabled) {
+          primary = `<button class="btn-start" disabled title="${escapeHtml(p.reason)}">▶ 启动</button>`;
+        } else if (busy) {
+          primary = `<button class="btn-secondary" disabled>${busy}</button>`;
+        } else if (isRunning) {
+          primary = `<button class="btn-stop" onclick="stopProject('${p.id}')">⏹ 停止</button>`;
+        } else {
+          primary = `<button class="btn-start" onclick="startProject('${p.id}')">▶ 启动</button>`;
+        }
 
         return `
-          <div class="card">
+          <div class="card ${enabled ? '' : 'disabled'}">
             <div class="card-head">
               <div class="card-title">
                 <h3>${escapeHtml(p.name)}</h3>
@@ -584,9 +672,12 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
               </div>
               <div class="badge ${isRunning ? 'badge-running' : 'badge-stopped'}">
                 <span class="dot"></span>
-                <span>${isRunning ? '运行中' : '未启动'}</span>
+                <span>${!enabled ? '已停用' : (isRunning ? '运行中' : '未启动')}</span>
               </div>
             </div>
+            ${!enabled ? `<div class="reason">停用原因：${escapeHtml(p.reason)}</div>` : ''}
+            ${chips ? `<div class="chips">${chips}</div>` : ''}
+            ${conflict}
 
             <div class="meta-list">
               <div class="meta-item">
@@ -599,7 +690,7 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
               </div>
               <div class="meta-item">
                 <span class="meta-label">探针响应</span>
-                <span class="meta-val ${probeOk ? 'val-ok' : 'val-down'}">${code ? code + ' OK' : (isRunning ? '未就绪' : '-')}</span>
+                <span class="meta-val ${probeOk ? 'val-ok' : 'val-down'}">${code ? code + (probeOk ? ' OK' : '') : (isRunning ? '未就绪' : '-')}</span>
               </div>
               <div class="meta-item" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(p.root)}">
                 <span class="meta-label">根路径</span>
@@ -608,10 +699,7 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
             </div>
 
             <div class="card-actions">
-              ${isRunning 
-                ? `<button class="btn-stop" onclick="stopProject('${p.id}')">⏹ 停止</button>`
-                : `<button class="btn-start" onclick="startProject('${p.id}')">▶ 启动</button>`
-              }
+              ${primary}
               <button class="btn-outline" onclick="openProjectInBrowser('${p.id}')" title="在系统浏览器打开登录/访问页面">🌐 页面</button>
               <button class="btn-outline" onclick="openProjectDir('${p.id}')" title="在系统文件管理器中打开源码目录">📁 目录</button>
               <button class="btn-outline" onclick="openLogModal('${p.id}', '${escapeHtml(p.name)}')">📜 日志</button>
@@ -624,45 +712,35 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
 
     async function openProjectDir(id) {
       try {
-        await fetch(`/api/projects/${id}/open-dir`, { method: 'POST' });
+        await postJson(`/api/projects/${id}/open-dir`);
       } catch (e) {
-        alert('打开目录失败: ' + e);
+        alert('打开目录失败：' + e.message);
       }
     }
 
-    async function startProject(id) {
-      try {
-        const res = await fetch(`/api/projects/${id}/start`, { method: 'POST' });
-        fetchProjects();
-      } catch (e) {
-        alert('启动失败: ' + e);
-      }
+    function startProject(id) {
+      return runAction(id, '启动中…', 'start', '启动失败');
     }
 
-    async function stopProject(id) {
-      try {
-        const res = await fetch(`/api/projects/${id}/stop`, { method: 'POST' });
-        fetchProjects();
-      } catch (e) {
-        alert('停止失败: ' + e);
-      }
+    function stopProject(id) {
+      return runAction(id, '停止中…', 'stop', '停止失败');
     }
 
     async function openProjectInBrowser(id) {
       try {
-        await fetch(`/api/projects/${id}/open`, { method: 'POST' });
+        await postJson(`/api/projects/${id}/open`);
       } catch (e) {
-        alert('打开浏览器失败: ' + e);
+        alert('打开页面失败：' + e.message);
       }
     }
 
     async function deleteProject(id) {
       if (!confirm(`确定要移除项目 ${id} 的注册吗？（不会删除本地源码）`)) return;
       try {
-        await fetch(`/api/projects/${id}`, { method: 'DELETE' });
+        await postJson(`/api/projects/${id}`, { method: 'DELETE' });
         fetchProjects();
       } catch (e) {
-        alert('删除失败: ' + e);
+        alert('删除失败：' + e.message);
       }
     }
 
@@ -681,9 +759,11 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
       const stop = document.getElementById('addStop').value.trim();
       const port = parseInt(document.getElementById('addPort').value) || 8080;
       const url = document.getElementById('addUrl').value.trim();
+      const node = document.getElementById('addNode').value.trim();
+      const java = document.getElementById('addJava').value.trim();
 
-      if (!id || !name || !root || !start) {
-        alert('请补全 ID、名称、路径和启动命令！');
+      if (!id || !root || !start) {
+        alert('请补全 ID、路径和启动命令！');
         return;
       }
 
@@ -691,23 +771,20 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
         id, name, root, start,
         stop: stop || null,
         port,
-        login_url: url || null
+        login_url: url || null,
+        node: node || null,
+        java: java || null
       };
 
       try {
-        const res = await fetch('/api/projects', {
-          method: 'POST',
+        await postJson('/api/projects', {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
-        if (res.ok) {
-          closeAddModal();
-          fetchProjects();
-        } else {
-          alert('添加失败');
-        }
+        closeAddModal();
+        fetchProjects();
       } catch (e) {
-        alert('网络错误: ' + e);
+        alert('添加失败：' + e.message);
       }
     }
 
@@ -729,7 +806,9 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
       try {
         const res = await fetch(`/api/projects/${currentLogId}/logs`);
         const data = await res.json();
-        if (data.ok && data.lines) {
+        if (data.ok && data.missing) {
+          box.innerText = '日志文件还没生成：' + data.path;
+        } else if (data.ok && data.lines) {
           box.innerText = data.lines.join('\n') || '（日志文件暂无新内容）';
           box.scrollTop = box.scrollHeight;
         } else {
@@ -742,7 +821,7 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
 
     function escapeHtml(str) {
       if (!str) return '';
-      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     // 初始加载与轮询刷新

@@ -6,6 +6,7 @@ import { stateShortLabel } from "./logFormat";
 import { ProjectForm } from "./ProjectForm";
 import { ScanDialog } from "./ScanDialog";
 import { countByFilter, filterProjects, STATUS_FILTERS, type StatusFilter } from "./projectFilter";
+import { canStopProject, stopButtonTitle } from "./buttonState";
 import logoUrl from "./assets/logo.svg";
 import {
   AlertIcon,
@@ -382,13 +383,7 @@ export function App() {
       isStoppedOrFailed
   );
 
-  const canStop = Boolean(
-    selected &&
-      busy === "" &&
-      current?.enabled &&
-      status &&
-      status.state !== "stopped"
-  );
+  const canStop = canStopProject({ selected, busy });
 
   const isReadyOrPortOpenOrFailed =
     status?.state === "ready" ||
@@ -767,7 +762,8 @@ export function App() {
                   <button
                     type="button"
                     className="btn btn-secondary"
-                    disabled={!canStop && busy !== "stop"}
+                    disabled={!canStop}
+                    title={stopButtonTitle(status)}
                     onClick={handleStop}
                   >
                     <StopIcon className="icon-stop" />

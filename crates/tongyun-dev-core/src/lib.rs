@@ -448,8 +448,12 @@ impl Loaded {
     }
 
     pub fn start(&self, id: &str) -> Result<StatusJson> {
-        let project = self.resolve(id)?;
         let initial_st = self.start_detached(id)?;
+        self.wait_for_start(id, initial_st)
+    }
+
+    fn wait_for_start(&self, id: &str, initial_st: StatusJson) -> Result<StatusJson> {
+        let project = self.resolve(id)?;
         if initial_st.state == LifeState::Ready {
             return Ok(initial_st);
         }
@@ -526,6 +530,22 @@ impl Loaded {
                 }
             }
         }
+    }
+
+    /// Restart only after a verified successful stop. GUI callers return while starting.
+    pub fn restart_detached(&self, id: &str) -> Result<StatusJson> {
+        let project = self.resolve(id)?;
+        if !project.enabled {
+            bail!("project `{id}` is disabled: {}", project.reason);
+        }
+        self.stop(id)?;
+        self.start_detached(id)
+    }
+
+    /// Restart and wait for readiness, as with `start`.
+    pub fn restart(&self, id: &str) -> Result<StatusJson> {
+        let st = self.restart_detached(id)?;
+        self.wait_for_start(id, st)
     }
 
     pub fn stop(&self, id: &str) -> Result<StatusJson> {
@@ -2037,6 +2057,10 @@ fn cmd_start_detached(p: &Resolved) -> Result<()> {
         };
         bail!("project `{}` is disabled: {why}", p.id);
     }
+    // A live tracked process may still be opening its port. Never overwrite its PID.
+    if !tracked_pids(p).is_empty() {
+        return Ok(());
+    }
     let timeout_secs = start_ready_timeout_secs(p);
     let roots = ToolchainRoots::from_env();
     let tc_env = toolchain_env(
@@ -2270,8 +2294,10 @@ fn cmd_stop(p: &Resolved) -> Result<()> {
         }
     }
 
-    // 4. 等待
-    let _ = wait_until(Duration::from_secs(3), || is_down(p));
+    // Keep tracking information if shutdown did not actually succeed.
+    if !wait_until(Duration::from_secs(3), || is_down(p)) {
+        bail!("{} 未完全停止：{}", p.id, listener_hint(p.port));
+    }
 
     // 5. 结束后删除 pid 文件和启动标记
     let _ = std::fs::remove_file(&p.pid_file);

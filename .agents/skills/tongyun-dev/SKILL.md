@@ -29,6 +29,7 @@ tongyun-dev ui [--port 9099]   # 网页控制台，默认 http://127.0.0.1:9099
 | `list [--json]` | 已登记项目 | 先 list 再 start |
 | `status [id] [--json]` | 单项目或全部生命周期 | **解析 `--json`** |
 | `start <id> [--open]` | 启到端口通/探针成功；`--open` 就绪后开页 | 可能先 `installing` |
+| `restart <id> [--open]` | 停止成功后重新启动并等待就绪 | 停止失败不会继续启动 |
 | `stop <id>` | 停进程组 | 失败也要读 status |
 | `logs <id> [--follow] [--lines N]` | 读日志 | 大日志用 lines |
 | `open <id> [--dir]` | 开页面或目录 | |
@@ -61,8 +62,10 @@ Agent 驱动建议：`start` → 轮询 `status --json` 直到 `state` 为 `read
 | 方法 | 路径 | 作用 |
 | --- | --- | --- |
 | GET | `/api/projects` | 概览 |
+| GET | `/api/projects/{id}` | 项目设置详情 |
+| PATCH | `/api/projects/{id}` | 部分更新项目设置 |
 | GET | `/api/projects/{id}/logs` | 日志 |
-| POST | `/api/projects/{id}/start\|stop\|install\|open\|open-dir` | 动作 |
+| POST | `/api/projects/{id}/start\|stop\|restart\|install\|open\|open-dir` | 动作 |
 | POST | `/api/projects` | 新增登记 |
 | DELETE | `/api/projects/{id}` | 删登记 |
 | POST | `/api/scan` | 扫描预览 |

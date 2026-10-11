@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use tongyun_dev_core::{Loaded, NewProject};
+use tongyun_dev_core::{Loaded, NewProject, ProjectEdit};
 
 pub const DEFAULT_UI_PORT: u16 = 9099;
 const MAX_HEADER: usize = 16 * 1024;
@@ -265,7 +265,31 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                     Err(e) => err_json(404, format!("{e:#}")),
                 };
             }
+            if let Some(id) = project_route(path, "") {
+                return match loaded.project_detail(id) {
+                    Ok(detail) => json_body(200, json!({"ok": true, "project": detail})),
+                    Err(e) => err_json(404, format!("{e:#}")),
+                };
+            }
             err_json(404, "not found")
+        }
+        "PATCH" => {
+            let Some(id) = project_route(path, "") else {
+                return err_json(404, "not found");
+            };
+            let edit: ProjectEdit = match serde_json::from_slice(&req.body) {
+                Ok(edit) => edit,
+                Err(e) => return err_json(400, format!("bad payload: {e}")),
+            };
+            let _guard = state.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut loaded = match load(state) {
+                Ok(l) => l,
+                Err(e) => return err_json(500, format!("{e:#}")),
+            };
+            match loaded.update_project(id, edit) {
+                Ok(row) => json_body(200, json!({"ok": true, "project": row})),
+                Err(e) => err_json(400, format!("{e:#}")),
+            }
         }
         "POST" if path == "/api/scan" => {
             #[derive(serde::Deserialize)]
@@ -325,7 +349,7 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
             }
         }
         "POST" => {
-            let action = ["start", "stop", "install", "open", "open-dir"]
+            let action = ["start", "stop", "restart", "install", "open", "open-dir"]
                 .into_iter()
                 .find_map(|a| project_route(path, a).map(|id| (a, id)));
             let Some((action, id)) = action else {
@@ -334,6 +358,7 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
             let res: Result<Value> = match action {
                 "start" => loaded.start_detached(id).map(|st| json!({"status": st})),
                 "stop" => loaded.stop(id).map(|st| json!({"status": st})),
+                "restart" => loaded.restart_detached(id).map(|st| json!({"status": st})),
                 "install" => loaded.install_deps(id).map(|st| json!({"status": st})),
                 "open" => loaded
                     .page_url(id)
@@ -637,6 +662,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
     .log-box .ll.warn { color: #e8c983; background: rgba(217,180,106,.08); box-shadow: inset 2px 0 0 #d9b46a; }
     @media (max-width: 720px) { .search { width: 100%; } .summary { display: none; } }
     .empty-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+    .form-group input[type="checkbox"] { width: auto; }
     .scan-bar { display: flex; gap: 8px; align-items: center; }
     .scan-bar #scanDir { flex: 1; }
     .scan-depth { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ty-text-muted); white-space: nowrap; }
@@ -698,7 +724,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
   <div class="modal-backdrop" id="addModal">
     <div class="modal">
       <div class="modal-head">
-        <h3>新增项目</h3>
+        <h3 id="projectFormTitle">新增项目</h3>
         <button class="btn-icon" onclick="closeAddModal()" aria-label="关闭">×</button>
       </div>
       <div class="form-group">
@@ -737,9 +763,18 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         <label>Java 版本（可选，如 17；自动找 sdkman / Adoptium / Zulu 装的 JDK）</label>
         <input id="addJava" placeholder="例如：17" />
       </div>
+      <div id="editOptions" hidden>
+        <div class="form-group"><label>备用健康探针 URL</label><input id="editHealth" /></div>
+        <div class="form-group"><label>日志文件</label><input id="editLog" /></div>
+        <div class="form-group"><label>启动超时（秒；留空保持原值）</label><input id="editTimeout" type="number" min="1" /></div>
+        <div class="form-group"><label>停止宽限（秒；留空保持原值）</label><input id="editGrace" type="number" min="1" /></div>
+        <div class="form-group"><label><input id="editEnabled" type="checkbox" /> 启用项目</label></div>
+        <div class="form-group"><label>停用原因</label><input id="editReason" /></div>
+        <div class="form-group"><label><input id="editAutoInstall" type="checkbox" /> 启动前自动安装缺失依赖</label></div>
+      </div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="closeAddModal()">取消</button>
-        <button class="btn-primary" onclick="submitAddProject()">保存</button>
+        <button class="btn-primary" id="projectSave" onclick="submitAddProject()">保存</button>
       </div>
     </div>
   </div>
@@ -865,8 +900,8 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         if (data.skipped.length) alert(msg.join('\n'));
         fetchProjects();
       } catch (e) {
-        alert('添加失败：' + e.message);
-      }
+        alert('保存失败：' + e.message);
+      } finally { save.disabled = false; }
     }
     let currentLogId = null;
     let lastProjects = [];
@@ -1061,7 +1096,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
               </div>
             </div>
             ${!enabled ? `<div class="reason">停用原因：${escapeHtml(p.reason)}</div>` : ''}
-            ${!configured ? `<div class="note">还没配置好：缺端口或启动命令。在桌面 App 里打开这个项目的「项目设置」填好就能启动。</div>` : ''}
+            ${!configured ? `<div class="note">还没配置好：缺端口或启动命令。打开这个项目的「设置」填好就能启动。</div>` : ''}
             ${conflict}
             ${configured && enabled && state === 'failed' && p.failure ? `<div class="fail">${escapeHtml(p.failure)}</div>` : ''}
             <div class="meta-list">
@@ -1073,9 +1108,11 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
             ${chips ? `<div class="chips">${chips}</div>` : ''}
             <div class="card-actions">
               ${actionBtns}
+              <button class="btn-outline" ${enabled && configured && !busy ? `onclick="restartProject('${p.id}')"` : 'disabled'}>重启</button>
+              <button class="btn-outline" onclick="editProject('${p.id}')">设置</button>
               <button class="btn-outline" ${canOpenPage ? `onclick="openProjectInBrowser('${p.id}')"` : 'disabled'} title="在系统浏览器打开登录/访问页面">网页</button>
               <button class="btn-outline" onclick="openProjectDir('${p.id}')" title="在系统文件管理器中打开源码目录">目录</button>
-              <button class="btn-outline" onclick="openLogModal('${p.id}', '${escapeHtml(p.name)}')">日志</button>
+              <button class="btn-outline" data-id="${escapeHtml(p.id)}" data-name="${escapeHtml(p.name)}" onclick="openLogModal(this.dataset.id, this.dataset.name)">日志</button>
               <button class="btn-danger-text" onclick="deleteProject('${p.id}')" title="从配置里删除这个项目" aria-label="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg></button>
             </div>
           </div>
@@ -1121,8 +1158,39 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       }
     }
 
+    let editingProject = null;
     function openAddModal() {
+      editingProject = null;
+      document.getElementById('editOptions').hidden = true;
+      document.getElementById('projectFormTitle').textContent = '新增项目';
+      for (const key of ['Id', 'Name', 'Root', 'Start', 'Stop', 'Url', 'Node', 'Java']) {
+        const input = document.getElementById('add' + key);
+        input.value = ''; input.disabled = false;
+      }
+      document.getElementById('addPort').value = '8080';
       document.getElementById('addModal').style.display = 'flex';
+    }
+    async function editProject(id) {
+      try {
+        const res = await fetch(`/api/projects/${id}`);
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || '读取失败');
+        openAddModal();
+        editingProject = data.project;
+        document.getElementById('editOptions').hidden = false;
+        for (const [key, field] of Object.entries({Health: 'health_url', Log: 'log_file', Timeout: 'start_timeout_secs', Grace: 'stop_grace_secs', Reason: 'reason'})) document.getElementById('edit' + key).value = editingProject[field] ?? '';
+        document.getElementById('editEnabled').checked = editingProject.enabled;
+        document.getElementById('editAutoInstall').checked = editingProject.auto_install;
+        const fields = {Id: 'id', Name: 'name', Root: 'root', Start: 'start', Stop: 'stop', Port: 'port', Url: 'login_url', Node: 'node', Java: 'java'};
+        for (const [key, field] of Object.entries(fields)) document.getElementById('add' + key).value = editingProject[field] ?? '';
+        document.getElementById('addId').disabled = true;
+        document.getElementById('addStart').disabled = !editingProject.start_editable;
+        document.getElementById('addStop').disabled = !editingProject.stop_editable;
+        document.getElementById('projectFormTitle').textContent = '项目设置';
+      } catch (e) { alert('读取设置失败：' + e.message); }
+    }
+    function restartProject(id) {
+      return runAction(id, '重启中…', 'restart', '重启失败');
     }
     function closeAddModal() {
       document.getElementById('addModal').style.display = 'none';
@@ -1134,16 +1202,18 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       const root = document.getElementById('addRoot').value.trim();
       const start = document.getElementById('addStart').value.trim();
       const stop = document.getElementById('addStop').value.trim();
-      const port = parseInt(document.getElementById('addPort').value) || 8080;
+      const port = Number(document.getElementById('addPort').value);
       const url = document.getElementById('addUrl').value.trim();
       const node = document.getElementById('addNode').value.trim();
       const java = document.getElementById('addJava').value.trim();
 
-      if (!id || !root || !start) {
+      if (!id || !root || (!editingProject && !start)) {
         alert('请补全 ID、路径和启动命令！');
         return;
       }
 
+      const minimumPort = editingProject && !document.getElementById('editEnabled').checked ? 0 : 1;
+      if (!Number.isInteger(port) || port < minimumPort || port > 65535) { alert('启用项目的端口须为 1–65535 的整数'); return; }
       const payload = {
         id, name, root, start,
         stop: stop || null,
@@ -1153,16 +1223,42 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         java: java || null
       };
 
+      const save = document.getElementById('projectSave');
+      if (save.disabled) return;
+      save.disabled = true;
       try {
-        await postJson('/api/projects', {
+        if (editingProject) {
+          delete payload.id;
+          payload.enabled = document.getElementById('editEnabled').checked;
+          payload.auto_install = document.getElementById('editAutoInstall').checked;
+          payload.reason = document.getElementById('editReason').value.trim();
+          payload.health_url = document.getElementById('editHealth').value.trim();
+          payload.log_file = document.getElementById('editLog').value.trim();
+          for (const [key, field] of Object.entries({Timeout: 'start_timeout_secs', Grace: 'stop_grace_secs'})) {
+            const value = document.getElementById('edit' + key).value.trim();
+            if (value) {
+              const n = Number(value);
+              if (!Number.isSafeInteger(n) || n < 1) throw new Error('超时和宽限须为正整数');
+              payload[field] = n;
+            }
+          }
+          payload.stop = stop;
+          payload.login_url = url;
+          payload.node = node;
+          payload.java = java;
+          if (!editingProject.start_editable) delete payload.start;
+          if (!editingProject.stop_editable) delete payload.stop;
+        }
+        await postJson(editingProject ? `/api/projects/${editingProject.id}` : '/api/projects', {
+          method: editingProject ? 'PATCH' : 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
         closeAddModal();
         fetchProjects();
       } catch (e) {
-        alert('添加失败：' + e.message);
-      }
+        alert('保存失败：' + e.message);
+      } finally { save.disabled = false; }
     }
 
     async function openLogModal(id, name) {

@@ -123,3 +123,12 @@ npm run tauri build    # 打包
 ## License
 
 MIT
+
+## 重启与网页项目设置
+
+- `tongyun-dev restart <id> [--open]`：停止成功后重新启动并等待就绪。桌面和网页的重启使用相同 core；停止未成功时返回错误，不继续启动。
+- 网页卡片的「设置」支持名称、目录、命令、端口、探针、日志、Java/Node 版本、启用/停用和超时。数组形式的复杂命令保持只读，避免保存时改变参数含义。清空版本或探针会移除该配置字段；原有注释保留。
+- HTTP：`GET /api/projects/<id>` 读取详情，`PATCH /api/projects/<id>` 提交部分更新，`POST /api/projects/<id>/restart` 重启。修改接口沿用 Host / Origin 检查。
+- 重复启动不会替换仍存活的已追踪进程；停止未成功时保留 PID 与启动标记，便于重试和排查。
+
+自动检查见 `.github/workflows/check.yml`：macOS / Linux 执行 Rust 测试；macOS 执行桌面 typecheck、测试、前端构建和 Tauri Rust 检查。它不代替图形界面真机验收。

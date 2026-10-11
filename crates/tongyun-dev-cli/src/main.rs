@@ -36,6 +36,12 @@ enum Cmd {
         #[arg(long)]
         open: bool,
     },
+    /// Stop, start again and wait for readiness
+    Restart {
+        id: String,
+        #[arg(long)]
+        open: bool,
+    },
     /// Stop a project and wait until its port is free
     Stop { id: String },
     /// Install frontend dependencies (pnpm / yarn / npm picked by lockfile); output goes to the project log
@@ -199,25 +205,31 @@ fn main() -> Result<()> {
     };
     match cmd {
         Cmd::List { json } => print_list(&loaded, json)?,
-        Cmd::Start { id, open } => match loaded.start(&id) {
-            Ok(st) => {
-                print_status(&st, false)?;
-                if open {
-                    if let Err(e) = loaded
-                        .page_url(&id)
-                        .and_then(|u| tongyun_dev_core::open_url(&u))
-                    {
-                        eprintln!("could not open page: {e:#}");
+        Cmd::Start { ref id, open } | Cmd::Restart { ref id, open } => {
+            match if matches!(cmd, Cmd::Restart { .. }) {
+                loaded.restart(id)
+            } else {
+                loaded.start(id)
+            } {
+                Ok(st) => {
+                    print_status(&st, false)?;
+                    if open {
+                        if let Err(e) = loaded
+                            .page_url(&id)
+                            .and_then(|u| tongyun_dev_core::open_url(&u))
+                        {
+                            eprintln!("could not open page: {e:#}");
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                if let Ok(st) = loaded.status(&id) {
-                    print_status(&st, false)?;
+                Err(e) => {
+                    if let Ok(st) = loaded.status(&id) {
+                        print_status(&st, false)?;
+                    }
+                    return Err(e);
                 }
-                return Err(e);
             }
-        },
+        }
         Cmd::Install { id } => {
             let st = loaded.status(&id)?;
             eprintln!(

@@ -163,6 +163,28 @@ fn web_console_lists_adds_and_removes_through_core() {
     assert!(text.contains("java = \"17\""));
     assert!(get("/api/projects").contains("\"id\":\"web_app\""));
 
+    // Read and edit through the same core used by the desktop.
+    let detail = get("/api/projects/web_app");
+    assert!(detail.contains("\"start_editable\":true"), "{detail}");
+    let patch = |body: &str, origin: &str| {
+        http(ui, &format!(
+        "PATCH /api/projects/web_app HTTP/1.1\r\nHost: 127.0.0.1:{ui}\r\nOrigin: {origin}\r\nContent-Length: {}\r\n\r\n{body}", body.len()))
+    };
+    let edit =
+        r#"{"name":"Renamed","port":5180,"node":"","health_url":"http://127.0.0.1:5180/health"}"#;
+    assert!(patch(edit, "http://evil.example").starts_with("HTTP/1.1 403"));
+    assert_eq!(fs::read_to_string(&cfg).unwrap(), text);
+    let resp = patch(edit, &format!("http://127.0.0.1:{ui}"));
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let text = fs::read_to_string(&cfg).unwrap();
+    assert!(text.contains("# test config"));
+    let detail = get("/api/projects/web_app");
+    assert!(detail.contains("Renamed") && detail.contains("5180"));
+    assert!(detail.contains("\"node\":null"));
+    let bad = patch(r#"{"port":0}"#, &format!("http://127.0.0.1:{ui}"));
+    assert!(bad.starts_with("HTTP/1.1 400"), "{bad}");
+    assert_eq!(fs::read_to_string(&cfg).unwrap(), text);
+
     // Duplicate id is refused and the file is unchanged.
     let resp = post_json(ui, "/api/projects", &add, None);
     assert!(resp.starts_with("HTTP/1.1 400"), "{resp}");
@@ -511,4 +533,63 @@ log_dir = "{d}/logs"
     let stop_st = loaded.stop("py_srv").unwrap();
     assert_eq!(stop_st.state, tongyun_dev_core::LifeState::Stopped);
     assert!(!stop_st.port_open);
+}
+
+#[test]
+fn repeated_start_keeps_pid_and_restart_replaces_it() {
+    let dir = temp_dir("restart");
+    let cfg = dir.join("projects.toml");
+    fs::write(
+        &cfg,
+        format!(
+            r#"[projects.worker]
+root = "{}"
+start = ["sh", "-c", "sleep 300 & wait"]
+background = true
+port = {}
+log_dir = "{}/logs"
+"#,
+            dir.display(),
+            free_port(),
+            dir.display()
+        ),
+    )
+    .unwrap();
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    let _guard = CleanupGuard::new(&loaded, "worker", dir.clone());
+    let first = loaded.start_detached("worker").unwrap().pid.unwrap();
+    let second = loaded.start_detached("worker").unwrap().pid.unwrap();
+    assert_eq!(first, second, "starting process must not be replaced");
+    let next = loaded.restart_detached("worker").unwrap();
+    assert_eq!(next.state, tongyun_dev_core::LifeState::Starting);
+    assert_ne!(next.pid.unwrap(), first);
+    assert!(!is_process_alive(first));
+    loaded.stop("worker").unwrap();
+    assert_eq!(
+        loaded.status("worker").unwrap().state,
+        tongyun_dev_core::LifeState::Stopped
+    );
+}
+
+#[test]
+fn foreign_listener_blocks_restart_without_running_start_command() {
+    let dir = temp_dir("blocked_restart");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let cfg = write_config(&dir, listener.local_addr().unwrap().port());
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    assert!(
+        loaded.stop("mock").is_err(),
+        "occupied port is not a successful stop"
+    );
+    assert!(loaded.restart_detached("mock").is_err());
+    assert!(
+        !dir.join("logs/mock.pid.start").exists(),
+        "must not start after failed stop"
+    );
+    assert!(
+        listener.local_addr().is_ok(),
+        "foreign listener must survive"
+    );
+    drop(listener);
+    fs::remove_dir_all(dir).unwrap();
 }

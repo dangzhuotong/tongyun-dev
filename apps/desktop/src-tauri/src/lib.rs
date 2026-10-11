@@ -72,8 +72,7 @@ async fn install_deps(id: String) -> Result<StatusJson, String> {
 async fn restart_project(id: String) -> Result<StatusJson, String> {
     blocking(move || {
         let loaded = tongyun_dev_core::load(None).map_err(report)?;
-        let _ = loaded.stop(&id);
-        loaded.start_detached(&id).map_err(report)
+        loaded.restart_detached(&id).map_err(report)
     })
     .await
 }

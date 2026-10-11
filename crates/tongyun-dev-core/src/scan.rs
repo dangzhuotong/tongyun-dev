@@ -245,7 +245,7 @@ pub(crate) fn display_path(p: &Path, home: Option<&Path>) -> String {
             };
         }
     }
-    p.to_string_lossy().into_owned()
+    p.to_string_lossy().replace('\\', "/")
 }
 
 fn base_candidate(dir: &Path, home: Option<&Path>, kind: &str, label: &str) -> Candidate {

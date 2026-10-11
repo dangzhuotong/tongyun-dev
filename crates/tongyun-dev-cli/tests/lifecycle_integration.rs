@@ -25,7 +25,7 @@ fn free_port() -> u16 {
 }
 
 fn write_config(dir: &Path, port: u16) -> PathBuf {
-    let d = dir.display();
+    let d = dir.to_string_lossy().replace('\\', "/");
     let cfg = dir.join("projects.toml");
     fs::write(
         &cfg,
@@ -145,9 +145,9 @@ fn web_console_lists_adds_and_removes_through_core() {
     assert!(list.contains("\"port_conflict\""));
 
     // Add with toolchain fields, from our own origin.
+    let d_str = dir.to_string_lossy().replace('\\', "/");
     let add = format!(
-        r#"{{"id":"web_app","name":"Web App","root":"{}","start":"pnpm dev","port":5173,"node":"22","java":"17"}}"#,
-        dir.display()
+        r#"{{"id":"web_app","name":"Web App","root":"{d_str}","start":"pnpm dev","port":5173,"node":"22","java":"17"}}"#
     );
     let resp = post_json(
         ui,
@@ -258,13 +258,31 @@ impl<'a> Drop for CleanupGuard<'a> {
 }
 
 fn is_process_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    #[cfg(windows)]
+    {
+        if pid <= 1 {
+            return false;
+        }
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output()
+            .map(|o| {
+                let s = String::from_utf8_lossy(&o.stdout);
+                s.contains(&pid.to_string())
+            })
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
 }
 
+#[cfg(unix)]
 fn pgroup_pids(pgid: u32) -> Vec<u32> {
     let output = std::process::Command::new("pgrep")
         .args(["-g", &pgid.to_string()])
@@ -282,11 +300,12 @@ fn pgroup_pids(pgid: u32) -> Vec<u32> {
 }
 
 #[test]
+#[cfg(unix)]
 fn process_group_stop_cleans_children_and_markers() {
     let dir = temp_dir("pg_stop");
     let port = free_port();
     let cfg = dir.join("projects.toml");
-    let d = dir.display();
+    let d = dir.to_string_lossy().replace('\\', "/");
     fs::write(
         &cfg,
         format!(
@@ -348,11 +367,12 @@ log_dir = "{d}/logs"
 }
 
 #[test]
+#[cfg(unix)]
 fn trap_term_killed_after_grace_period() {
     let dir = temp_dir("trap_term");
     let port = free_port();
     let cfg = dir.join("projects.toml");
-    let d = dir.display();
+    let d = dir.to_string_lossy().replace('\\', "/");
     fs::write(
         &cfg,
         format!(
@@ -401,14 +421,19 @@ fn stale_pid_file_reported_stopped_and_cleaned() {
     let dir = temp_dir("stale_pid");
     let port = free_port();
     let cfg = dir.join("projects.toml");
-    let d = dir.display();
+    let d = dir.to_string_lossy().replace('\\', "/");
+    let (shell_cmd, shell_arg) = if cfg!(windows) {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
     fs::write(
         &cfg,
         format!(
             r#"[projects.mock]
 name = "Mock"
 root = "{d}"
-start = ["sh", "-c", "echo start"]
+start = ["{shell_cmd}", "{shell_arg}", "echo start"]
 port = {port}
 log_dir = "{d}/logs"
 "#
@@ -437,14 +462,19 @@ fn fast_exit_transitions_to_failed_within_four_seconds() {
     let dir = temp_dir("fast_exit");
     let port = free_port();
     let cfg = dir.join("projects.toml");
-    let d = dir.display();
+    let d = dir.to_string_lossy().replace('\\', "/");
+    let (shell_cmd, shell_arg) = if cfg!(windows) {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
     fs::write(
         &cfg,
         format!(
             r#"[projects.exiter]
 name = "Exiter"
 root = "{d}"
-start = ["sh", "-c", "exit 3"]
+start = ["{shell_cmd}", "{shell_arg}", "exit 3"]
 background = true
 port = {port}
 log_dir = "{d}/logs"
@@ -496,14 +526,19 @@ fn delayed_listen_transitions_from_starting_to_ready() {
     let dir = temp_dir("py_listen");
     let port = free_port();
     let cfg = dir.join("projects.toml");
-    let d = dir.display();
+    let d = dir.to_string_lossy().replace('\\', "/");
+    let (shell_cmd, shell_arg, script) = if cfg!(windows) {
+        ("cmd", "/C", format!("python3 -m http.server {port} --bind 127.0.0.1"))
+    } else {
+        ("sh", "-c", format!("sleep 2; exec python3 -m http.server {port} --bind 127.0.0.1"))
+    };
     fs::write(
         &cfg,
         format!(
             r#"[projects.py_srv]
 name = "Python Server"
 root = "{d}"
-start = ["sh", "-c", "sleep 2; exec python3 -m http.server {port} --bind 127.0.0.1"]
+start = ["{shell_cmd}", "{shell_arg}", "{script}"]
 background = true
 port = {port}
 log_dir = "{d}/logs"
@@ -539,19 +574,23 @@ log_dir = "{d}/logs"
 fn repeated_start_keeps_pid_and_restart_replaces_it() {
     let dir = temp_dir("restart");
     let cfg = dir.join("projects.toml");
+    let d = dir.to_string_lossy().replace('\\', "/");
+    let (shell_cmd, shell_arg, script) = if cfg!(windows) {
+        ("cmd", "/C", "ping -n 300 127.0.0.1")
+    } else {
+        ("sh", "-c", "sleep 300 & wait")
+    };
     fs::write(
         &cfg,
         format!(
             r#"[projects.worker]
-root = "{}"
-start = ["sh", "-c", "sleep 300 & wait"]
+root = "{d}"
+start = ["{shell_cmd}", "{shell_arg}", "{script}"]
 background = true
 port = {}
-log_dir = "{}/logs"
+log_dir = "{d}/logs"
 "#,
-            dir.display(),
-            free_port(),
-            dir.display()
+            free_port()
         ),
     )
     .unwrap();

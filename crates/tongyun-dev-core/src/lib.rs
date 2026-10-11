@@ -909,7 +909,7 @@ fn walk_for_config(start: PathBuf) -> Option<PathBuf> {
 }
 
 fn path_to_string(p: &Path) -> String {
-    p.to_string_lossy().into_owned()
+    p.to_string_lossy().replace('\\', "/")
 }
 
 fn current_home() -> Option<PathBuf> {
@@ -971,7 +971,7 @@ fn expand_path(label: &str, raw: &str, home: Option<&Path>) -> Result<PathBuf> {
         bail!("{label} has an unresolved template: {expanded}");
     }
     let path = PathBuf::from(&expanded);
-    if !path.is_absolute() && !is_windows_absolute(&expanded) {
+    if !path.is_absolute() && !is_windows_absolute(&expanded) && !expanded.starts_with('/') {
         bail!("{label} must be an absolute path after expansion, got `{expanded}`");
     }
     Ok(path)
@@ -1164,6 +1164,25 @@ fn read_pid(path: &Path) -> Option<u32> {
     }
 }
 
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| {
+            let s = String::from_utf8_lossy(&o.stdout);
+            s.contains(&pid.to_string())
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
 fn process_alive(pid: u32) -> bool {
     if pid <= 1 {
         return false;
@@ -1178,6 +1197,29 @@ fn process_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(windows)]
+fn ps_field(pid: u32, _field: &str) -> Option<String> {
+    let out = Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let first = text.lines().next()?;
+    let name = first.split(',').next()?.trim_matches('"');
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+#[cfg(not(windows))]
 fn ps_field(pid: u32, field: &str) -> Option<String> {
     let out = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", field])
@@ -2147,6 +2189,19 @@ fn cmd_start(p: &Resolved) -> Result<()> {
     cmd_start_detached(p)
 }
 
+#[cfg(windows)]
+fn signal_pid(pid: u32, _sig: &str) -> bool {
+    Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
 fn signal_pid(pid: u32, sig: &str) -> bool {
     Command::new("kill")
         .args([sig, &pid.to_string()])
@@ -2158,6 +2213,22 @@ fn signal_pid(pid: u32, sig: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(windows)]
+fn signal_group(pid: u32, _sig: &str) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    Command::new("taskkill")
+        .args(["/F", "/T", "/PID", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
 fn signal_group(pid: u32, sig: &str) -> bool {
     if pid <= 1 {
         return false;
@@ -2172,6 +2243,12 @@ fn signal_group(pid: u32, sig: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(windows)]
+fn group_alive(pid: u32) -> bool {
+    process_alive(pid)
+}
+
+#[cfg(not(windows))]
 fn group_alive(pid: u32) -> bool {
     if pid <= 1 {
         return false;
@@ -2676,7 +2753,25 @@ pub struct ProjectDetail {
 fn unpack_command(argv: &[String]) -> (String, bool) {
     if argv.is_empty() {
         (String::new(), true)
-    } else if argv.len() == 3 && argv[0] == "bash" && (argv[1] == "-c" || argv[1] == "-lc") {
+    } else if argv.len() == 3
+        && (argv[0] == "bash" || argv[0] == "sh")
+        && (argv[1] == "-c" || argv[1] == "-lc")
+    {
+        (argv[2].clone(), true)
+    } else if argv.len() == 3
+        && argv[0].eq_ignore_ascii_case("cmd")
+        && (argv[1].eq_ignore_ascii_case("/c") || argv[1].eq_ignore_ascii_case("-c"))
+    {
+        (argv[2].clone(), true)
+    } else if argv.len() == 6
+        && argv[0].eq_ignore_ascii_case("powershell")
+        && argv[4].eq_ignore_ascii_case("-command")
+    {
+        (argv[5].clone(), true)
+    } else if argv.len() == 3
+        && argv[0].eq_ignore_ascii_case("powershell")
+        && (argv[1].eq_ignore_ascii_case("-command") || argv[1].eq_ignore_ascii_case("-c"))
+    {
         (argv[2].clone(), true)
     } else {
         (argv.join(" "), false)
@@ -3640,7 +3735,7 @@ port = 9
             assert!(p.background, "{id}");
             assert!(!p.start.is_empty(), "{id}");
             assert_ne!(p.port, 0, "{id}");
-            assert!(p.root.is_absolute(), "{id}");
+            assert!(p.root.is_absolute() || path_to_string(&p.root).starts_with('/'), "{id}");
             assert!(!path_to_string(&p.root).contains('~'), "{id}");
             assert!(!path_to_string(&p.log_file).contains("{{"), "{id}");
         }
@@ -3914,9 +4009,14 @@ port = 8080
         assert_eq!(p.node.as_deref(), Some("22"));
         assert_eq!(p.java.as_deref(), Some("17.0.10-tem"));
         // Toolchain declared -> non-login shell so fnm / sdkman are not reset.
-        assert_eq!(p.start, vec!["bash", "-c", "pnpm dev"]);
+        let expected_start = if cfg!(windows) {
+            vec!["cmd", "/C", "pnpm dev"]
+        } else {
+            vec!["bash", "-c", "pnpm dev"]
+        };
+        assert_eq!(p.start, expected_start);
         let resolved = reloaded.resolve("web_app").unwrap();
-        assert_eq!(resolved.assembled_start(), vec!["bash", "-c", "pnpm dev"]);
+        assert_eq!(resolved.assembled_start(), expected_start);
 
         let mut loaded = reloaded;
         loaded.remove_project("web_app").unwrap();
@@ -3965,8 +4065,18 @@ port = 8080
         r.stop = Some("pkill -f vite".into());
         loaded.add_project(r).unwrap();
         let p = loaded.config.projects.get("plain").unwrap();
-        assert_eq!(p.start, vec!["bash", "-c", "pnpm dev"]);
-        assert_eq!(p.stop, vec!["bash", "-c", "pkill -f vite"]);
+        let expected_start = if cfg!(windows) {
+            vec!["cmd", "/C", "pnpm dev"]
+        } else {
+            vec!["bash", "-c", "pnpm dev"]
+        };
+        let expected_stop = if cfg!(windows) {
+            vec!["cmd", "/C", "pkill -f vite"]
+        } else {
+            vec!["bash", "-c", "pkill -f vite"]
+        };
+        assert_eq!(p.start, expected_start);
+        assert_eq!(p.stop, expected_stop);
         assert_eq!(loaded.page_url("plain").unwrap(), "http://127.0.0.1:5173/");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -4364,13 +4474,16 @@ echo starting proj_b
         };
         loaded.update_project("proj_a", edit).unwrap();
 
+        let expected_shell = if cfg!(windows) { "cmd" } else { "bash" };
+        let expected_flag = if cfg!(windows) { "/C" } else { "-c" };
+        let expected_snippet = format!(r#"start = ["{expected_shell}", "{expected_flag}", "pnpm dev --port 8080"]"#);
         let text_after = std::fs::read_to_string(&path).unwrap();
-        assert!(text_after.contains(r#"start = ["bash", "-c", "pnpm dev --port 8080"]"#));
+        assert!(text_after.contains(&expected_snippet));
 
         let reloaded = load(Some(&path)).unwrap();
         assert_eq!(
             reloaded.config.projects.get("proj_a").unwrap().start,
-            vec!["bash", "-c", "pnpm dev --port 8080"]
+            vec![expected_shell, expected_flag, "pnpm dev --port 8080"]
         );
     }
 

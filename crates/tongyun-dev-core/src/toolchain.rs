@@ -1017,8 +1017,8 @@ mod tests {
         let path_val = env.iter().find(|(k, _)| k == "PATH").unwrap().1.clone();
         let parts: Vec<&str> = path_val.split(';').collect();
         assert!(parts.len() >= 4, "{path_val}");
-        assert_eq!(parts[0], tem17.join("bin").to_string_lossy());
-        assert_eq!(parts[1], fnm_inst.to_string_lossy());
+        assert_eq!(Path::new(parts[0]), tem17.join("bin"));
+        assert_eq!(Path::new(parts[1]), fnm_inst);
         assert_eq!(parts[2], "C:\\Windows\\System32");
         assert_eq!(parts[3], "C:\\Windows");
     }
@@ -1070,7 +1070,27 @@ mod tests {
         assert_eq!(java_home, explicit_jdk.to_string_lossy());
 
         let path = env.iter().find(|(k, _)| k == "PATH").unwrap().1.clone();
-        let parts: Vec<&str> = path.split(':').collect();
+        let parts: Vec<String> = if cfg!(windows) {
+            let raw: Vec<&str> = path.split(':').collect();
+            let mut res = Vec::new();
+            let mut i = 0;
+            while i < raw.len() {
+                if raw[i].len() == 1
+                    && raw[i].chars().all(|c| c.is_ascii_alphabetic())
+                    && i + 1 < raw.len()
+                    && (raw[i + 1].starts_with('\\') || raw[i + 1].starts_with('/'))
+                {
+                    res.push(format!("{}:{}", raw[i], raw[i + 1]));
+                    i += 2;
+                } else {
+                    res.push(raw[i].to_string());
+                    i += 1;
+                }
+            }
+            res
+        } else {
+            path.split(':').map(|s| s.to_string()).collect()
+        };
 
         let jdk_bin = explicit_jdk.join("bin");
         let node_bin = explicit_node.join("bin");
@@ -1082,9 +1102,9 @@ mod tests {
         assert_eq!(parts[4], brew_bin.to_string_lossy());
 
         // Deduplication worked
-        assert_eq!(parts.iter().filter(|&&p| p == "/usr/bin").count(), 1);
+        assert_eq!(parts.iter().filter(|p| *p == "/usr/bin").count(), 1);
         // Nonexistent common dir was not included
-        assert!(!parts.iter().any(|&p| p.contains("nonexistent_bin")));
+        assert!(!parts.iter().any(|p| p.contains("nonexistent_bin")));
     }
 
     #[test]

@@ -528,9 +528,17 @@ fn delayed_listen_transitions_from_starting_to_ready() {
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
     let (shell_cmd, shell_arg, script) = if cfg!(windows) {
-        ("cmd", "/C", format!("python3 -m http.server {port} --bind 127.0.0.1"))
+        (
+            "cmd",
+            "/C",
+            format!("python3 -m http.server {port} --bind 127.0.0.1"),
+        )
     } else {
-        ("sh", "-c", format!("sleep 2; exec python3 -m http.server {port} --bind 127.0.0.1"))
+        (
+            "sh",
+            "-c",
+            format!("sleep 2; exec python3 -m http.server {port} --bind 127.0.0.1"),
+        )
     };
     fs::write(
         &cfg,

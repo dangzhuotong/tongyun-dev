@@ -3735,7 +3735,10 @@ port = 9
             assert!(p.background, "{id}");
             assert!(!p.start.is_empty(), "{id}");
             assert_ne!(p.port, 0, "{id}");
-            assert!(p.root.is_absolute() || path_to_string(&p.root).starts_with('/'), "{id}");
+            assert!(
+                p.root.is_absolute() || path_to_string(&p.root).starts_with('/'),
+                "{id}"
+            );
             assert!(!path_to_string(&p.root).contains('~'), "{id}");
             assert!(!path_to_string(&p.log_file).contains("{{"), "{id}");
         }
@@ -4476,7 +4479,8 @@ echo starting proj_b
 
         let expected_shell = if cfg!(windows) { "cmd" } else { "bash" };
         let expected_flag = if cfg!(windows) { "/C" } else { "-c" };
-        let expected_snippet = format!(r#"start = ["{expected_shell}", "{expected_flag}", "pnpm dev --port 8080"]"#);
+        let expected_snippet =
+            format!(r#"start = ["{expected_shell}", "{expected_flag}", "pnpm dev --port 8080"]"#);
         let text_after = std::fs::read_to_string(&path).unwrap();
         assert!(text_after.contains(&expected_snippet));
 

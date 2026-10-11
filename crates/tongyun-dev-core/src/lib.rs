@@ -409,6 +409,18 @@ impl Loaded {
             };
             bail!("project `{}` is disabled: {why}", project.id);
         }
+        // Do not reinstall dependencies or replace markers for an existing process.
+        if !tracked_pids(&project).is_empty() {
+            return self.status(id);
+        }
+        let current = self.status(id)?;
+        if current.port_conflict {
+            bail!(
+                "端口 {} 被其他进程占用：{}",
+                current.port,
+                current.port_holder
+            );
+        }
         // 正在装依赖：装完会自己接着启动，不重复起。
         if install_in_progress(&project.pid_file) {
             return self.status(id);
@@ -448,87 +460,78 @@ impl Loaded {
     }
 
     pub fn start(&self, id: &str) -> Result<StatusJson> {
-        let initial_st = self.start_detached(id)?;
-        self.wait_for_start(id, initial_st)
+        self.start_with_timeout(id, None)
     }
 
-    fn wait_for_start(&self, id: &str, initial_st: StatusJson) -> Result<StatusJson> {
+    /// The wait budget begins after the start command returns. It does not cancel the service.
+    pub fn start_with_timeout(&self, id: &str, timeout: Option<Duration>) -> Result<StatusJson> {
+        let initial = self.start_detached(id)?;
+        let budget = timeout.unwrap_or_else(|| Duration::from_secs(initial.timeout_secs));
+        self.finish_start(id, initial, budget)
+    }
+
+    fn finish_start(&self, id: &str, initial: StatusJson, budget: Duration) -> Result<StatusJson> {
+        let result = self.wait_for_ready(id, initial, budget);
         let project = self.resolve(id)?;
-        if initial_st.state == LifeState::Ready {
-            return Ok(initial_st);
-        }
-        if initial_st.state == LifeState::Failed {
-            let fail = initial_st.failure.unwrap_or_else(|| "启动失败".into());
-            bail!("{fail}");
-        }
-
-        let timeout = Duration::from_secs(initial_st.timeout_secs);
-        if initial_st.state == LifeState::Installing {
-            eprintln!(
-                "缺 node_modules，先装依赖：{}（日志 {}）",
-                initial_st.install_command, initial_st.log_path
-            );
-        }
-        if project.login_url.is_empty() {
-            eprintln!(
-                "waiting up to {}s for port {}",
-                timeout.as_secs(),
-                project.port
-            );
-        } else {
-            eprintln!(
-                "waiting up to {}s for {}",
-                timeout.as_secs(),
-                project.login_url
-            );
-        }
-
-        let start_time = Instant::now();
-        let mut last_log_time = Instant::now();
-
-        loop {
-            thread::sleep(Duration::from_millis(400));
-            let st = self.status(id)?;
-            match st.state {
-                LifeState::Ready => {
-                    eprintln!("就绪");
-                    return Ok(st);
-                }
-                LifeState::Failed => {
-                    let fail = st.failure.unwrap_or_else(|| "启动失败".into());
-                    bail!("{fail}");
-                }
-                LifeState::PortOpen => {
-                    if last_log_time.elapsed() >= Duration::from_secs(5) {
-                        let elapsed = st
-                            .elapsed_secs
-                            .unwrap_or_else(|| start_time.elapsed().as_secs());
-                        eprintln!("端口已通 已 {} 秒", elapsed);
-                        last_log_time = Instant::now();
-                    }
-                }
-                LifeState::Starting => {
-                    if last_log_time.elapsed() >= Duration::from_secs(5) {
-                        let elapsed = st
-                            .elapsed_secs
-                            .unwrap_or_else(|| start_time.elapsed().as_secs());
-                        eprintln!("启动中 已 {} 秒", elapsed);
-                        last_log_time = Instant::now();
-                    }
-                }
-                LifeState::Installing => {
-                    if last_log_time.elapsed() >= Duration::from_secs(5) {
-                        let elapsed = st
-                            .elapsed_secs
-                            .unwrap_or_else(|| start_time.elapsed().as_secs());
-                        eprintln!("安装依赖中（{}）已 {} 秒", st.install_command, elapsed);
-                        last_log_time = Instant::now();
-                    }
-                }
-                LifeState::Stopped => {
-                    bail!("服务已停止");
-                }
+        // Automatic installation is supervised by this process. Do not leave an
+        // installer orphaned when a blocking CLI call exits after a timeout.
+        if let Err(ref error) = result {
+            let own_install = read_install_marker(&project.pid_file).is_some_and(|m| {
+                m.supervisor == std::process::id() && m.then_start && m.error.is_none()
+            });
+            if own_install && install_in_progress(&project.pid_file) {
+                cancel_install(&project)?;
+                let message = format!("{error:#}；自动依赖安装已取消");
+                write_start_marker(
+                    &project.pid_file,
+                    &StartMarker {
+                        started_at: current_time_secs(),
+                        timeout_secs: start_ready_timeout_secs(&project),
+                        error: Some(message.clone()),
+                    },
+                )?;
+                bail!("{message}");
             }
+        }
+        result
+    }
+
+    /// Observe an existing service without starting, stopping or resetting its startup timer.
+    pub fn wait_ready(&self, id: &str, timeout: Duration) -> Result<StatusJson> {
+        self.wait_for_ready(id, self.status(id)?, timeout)
+    }
+
+    fn wait_for_ready(
+        &self,
+        id: &str,
+        mut st: StatusJson,
+        timeout: Duration,
+    ) -> Result<StatusJson> {
+        let began = Instant::now();
+        let mut last_state = None;
+        loop {
+            if st.port_conflict {
+                bail!("端口 {} 被其他进程占用：{}", st.port, st.port_holder);
+            }
+            match st.state {
+                LifeState::Ready => return Ok(st),
+                LifeState::Failed => bail!("{}", st.failure.unwrap_or_else(|| "启动失败".into())),
+                LifeState::Stopped => bail!("服务已停止"),
+                _ => {}
+            }
+            if began.elapsed() >= timeout {
+                bail!(
+                    "等待就绪超过 {} 秒（当前 {}）；服务未被停止，请查看状态和日志",
+                    timeout.as_secs(),
+                    st.state
+                );
+            }
+            if last_state != Some(st.state) {
+                eprintln!("{}：{}（日志 {}）", st.id, st.state, st.log_path);
+                last_state = Some(st.state);
+            }
+            thread::sleep(Duration::from_millis(200).min(timeout.saturating_sub(began.elapsed())));
+            st = self.status(id)?;
         }
     }
 
@@ -544,13 +547,18 @@ impl Loaded {
 
     /// Restart and wait for readiness, as with `start`.
     pub fn restart(&self, id: &str) -> Result<StatusJson> {
-        let st = self.restart_detached(id)?;
-        self.wait_for_start(id, st)
+        self.restart_with_timeout(id, None)
+    }
+
+    pub fn restart_with_timeout(&self, id: &str, timeout: Option<Duration>) -> Result<StatusJson> {
+        let initial = self.restart_detached(id)?;
+        let budget = timeout.unwrap_or_else(|| Duration::from_secs(initial.timeout_secs));
+        self.finish_start(id, initial, budget)
     }
 
     pub fn stop(&self, id: &str) -> Result<StatusJson> {
         let project = self.resolve(id)?;
-        cancel_install(&project);
+        cancel_install(&project)?;
         cmd_stop(&project)?;
         let peers = self.peer_pids(&project.id);
         Ok(status_of(&project, &peers))
@@ -601,7 +609,6 @@ impl Loaded {
     /// Last lines of the catalina log. `missing` is true when the file is not there yet.
     pub fn log_tail(&self, id: &str, lines: usize) -> Result<LogTail> {
         let project = self.resolve(id)?;
-        ensure_log_parent(&project.log_file)?;
         let path = path_to_string(&project.log_file);
         let lines = lines.clamp(1, LOG_TAIL_MAX_LINES);
         if !project.log_file.is_file() {
@@ -1501,7 +1508,15 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
         .next()
         .or_else(|| read_pid(&p.pid_file).filter(|&pid| process_alive(pid)));
     let process_alive = pid.is_some();
-    let probe = login_probe(&p.login_url);
+    let probe = if open && !port_conflict {
+        login_probe(&p.login_url)
+    } else {
+        LoginProbe {
+            url: p.login_url.clone(),
+            http_code: None,
+            ok: false,
+        }
+    };
     let has_probe = !p.login_url.is_empty();
 
     let marker = read_start_marker(&p.pid_file);
@@ -1876,14 +1891,22 @@ fn spawn_install(p: &Resolved, then_start: bool) -> Result<thread::JoinHandle<()
 }
 
 /// 停止时顺手取消正在跑的安装（整个进程组），并清掉安装标记。
-fn cancel_install(p: &Resolved) {
-    let Some(m) = read_install_marker(&p.pid_file) else {
-        return;
+fn cancel_install(p: &Resolved) -> Result<()> {
+    let Some(mut marker) = read_install_marker(&p.pid_file) else {
+        return Ok(());
     };
-    let _ = clear_install_marker(&p.pid_file);
-    if let Some(pid) = m.pid.filter(|&pid| process_alive(pid)) {
-        let _ = terminate_pid_with_grace(pid, true, 3);
+    clear_install_marker(&p.pid_file)?;
+    if let Some(pid) = marker
+        .pid
+        .filter(|&pid| process_alive(pid) || group_alive(pid))
+    {
+        if let Err(error) = terminate_pid_with_grace(pid, true, 3) {
+            marker.error = Some(format!("取消依赖安装失败：{error:#}"));
+            write_install_marker(&p.pid_file, &marker)?;
+            return Err(error);
+        }
     }
+    Ok(())
 }
 
 fn is_down(p: &Resolved) -> bool {
@@ -1903,7 +1926,10 @@ fn run_cmd(argv: &[String], dir: Option<&Path>, env: &[(String, String)]) -> Res
         bail!("empty command");
     }
     let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..]).stdin(Stdio::null());
+    // Child diagnostics must not contaminate the CLI's machine-readable stdout.
+    cmd.args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(std::io::stderr()));
     for (k, v) in env {
         if !v.is_empty() {
             cmd.env(k, v);

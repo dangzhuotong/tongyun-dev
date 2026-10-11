@@ -558,7 +558,12 @@ log_dir = "{}/logs"
     let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
     let _guard = CleanupGuard::new(&loaded, "worker", dir.clone());
     let first = loaded.start_detached("worker").unwrap().pid.unwrap();
+    // Dependency metadata can appear while a process is starting. A repeated
+    // start must not launch an installer or replace that process's marker.
+    fs::write(dir.join("package.json"), "{}").unwrap();
     let second = loaded.start_detached("worker").unwrap().pid.unwrap();
+    assert!(!dir.join("logs/worker.pid.install").exists());
+    fs::remove_file(dir.join("package.json")).unwrap();
     assert_eq!(first, second, "starting process must not be replaced");
     let next = loaded.restart_detached("worker").unwrap();
     assert_eq!(next.state, tongyun_dev_core::LifeState::Starting);

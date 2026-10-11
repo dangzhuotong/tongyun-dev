@@ -132,3 +132,16 @@ MIT
 - 重复启动不会替换仍存活的已追踪进程；停止未成功时保留 PID 与启动标记，便于重试和排查。
 
 自动检查见 `.github/workflows/check.yml`：macOS / Linux 执行 Rust 测试；macOS 执行桌面 typecheck、测试、前端构建和 Tauri Rust 检查。它不代替图形界面真机验收。
+
+## AI 调用与人工接管
+
+AI 用 CLI / JSON 操作本机服务，人用桌面 / 网页查看状态和接管；需求判断、代码分析、测试选择交给 AI。
+
+```bash
+tongyun-dev start demo_api --timeout 60 --json
+tongyun-dev wait demo_api --timeout 30 --json
+tongyun-dev logs demo_api --lines 80 --json
+tongyun-dev stop demo_api --json
+```
+
+启停 / 重启 / 安装 / 等待 / 日志的 JSON 返回 `{ok, action, id, status, logs, error}`，操作失败退出码为 1；`status --json` 与 `list --json` 保持原有结构。等待超时后已启动的服务仍可查询和停止，自动依赖安装则会取消；`wait` 本身不会启停服务。完整协议和超时范围见 [开发文档](docs/development.md#ai-操作协议与等待上限)。

@@ -1099,6 +1099,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
             ${!configured ? `<div class="note">还没配置好：缺端口或启动命令。打开这个项目的「设置」填好就能启动。</div>` : ''}
             ${conflict}
             ${configured && enabled && state === 'failed' && p.failure ? `<div class="fail">${escapeHtml(p.failure)}</div>` : ''}
+            ${state === 'failed' && p.pid ? `<div class="note">进程 PID ${p.pid} 仍在，停止可清理，重启可重新尝试。</div>` : ''}
             <div class="meta-list">
               <div class="meta-item"><span class="meta-label">端口</span><span class="meta-val ${portCls}">${portText}</span></div>
               <div class="meta-item"><span class="meta-label">进程</span><span class="meta-val ${p.pid ? '' : 'val-down'}">${p.pid ? 'PID ' + p.pid : '未运行'}</span></div>

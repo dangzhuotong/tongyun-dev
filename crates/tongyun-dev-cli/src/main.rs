@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::time::Duration;
 use tongyun_dev_cli::server::{start_ui_server, DEFAULT_UI_PORT};
 use tongyun_dev_core::{
     Loaded, NewProject, ScanReport, StatusJson, DEFAULT_ADD_PORT, DEFAULT_SCAN_DEPTH,
@@ -11,7 +12,7 @@ use tongyun_dev_core::{
 #[derive(Parser, Debug)]
 #[command(
     name = "tongyun-dev",
-    about = "Local project runner (start/stop/status/logs/open/add/remove/ui). No subcommand = web console on :9099"
+    about = "Local project runner (start/stop/restart/wait/status/logs/install/scan/ui). No subcommand = web console on :9099"
 )]
 struct Cli {
     /// Config file path (lookup order: --config -> $TONGYUN_DEV_CONFIG -> ~/.config/tongyun-dev/settings.json -> ~/.config/tongyun-dev/projects.toml -> ./config/projects.toml)
@@ -33,19 +34,45 @@ enum Cmd {
     Start {
         id: String,
         /// Open the project page in the browser after starting
-        #[arg(long)]
+        #[arg(long, conflicts_with = "json")]
         open: bool,
+        #[arg(long)]
+        json: bool,
+        /// Wait budget in seconds after launching; timeout leaves the service running
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        timeout: Option<u64>,
     },
     /// Stop, start again and wait for readiness
     Restart {
         id: String,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "json")]
         open: bool,
+        #[arg(long)]
+        json: bool,
+        /// Wait budget in seconds after launching; timeout leaves the service running
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        timeout: Option<u64>,
     },
     /// Stop a project and wait until its port is free
-    Stop { id: String },
+    Stop {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Install frontend dependencies (pnpm / yarn / npm picked by lockfile); output goes to the project log
-    Install { id: String },
+    Install {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Wait for an existing service; never starts or stops it
+    Wait {
+        id: String,
+        #[arg(long, default_value_t = 180, value_parser = clap::value_parser!(u64).range(1..))]
+        timeout: u64,
+        #[arg(long)]
+        json: bool,
+    },
     /// Show status (process + port + login probe). Without ID, shows all projects.
     Status {
         id: Option<String>,
@@ -57,6 +84,8 @@ enum Cmd {
         id: String,
         #[arg(long)]
         follow: bool,
+        #[arg(long, conflicts_with = "follow")]
+        json: bool,
         #[arg(long, default_value_t = 80)]
         lines: usize,
     },
@@ -141,6 +170,59 @@ enum Cmd {
     },
 }
 
+// Existing list/status JSON keeps its original shape. Operations use a stable envelope.
+fn machine_operation(cmd: &Cmd) -> Option<(&str, &str)> {
+    match cmd {
+        Cmd::Start { id, json: true, .. } => Some(("start", id)),
+        Cmd::Restart { id, json: true, .. } => Some(("restart", id)),
+        Cmd::Stop { id, json: true } => Some(("stop", id)),
+        Cmd::Install { id, json: true } => Some(("install", id)),
+        Cmd::Wait { id, json: true, .. } => Some(("wait", id)),
+        Cmd::Logs { id, json: true, .. } => Some(("logs", id)),
+        _ => None,
+    }
+}
+
+fn run_machine_operation(config: Option<&std::path::Path>, cmd: &Cmd) -> Result<()> {
+    let (action, id) = machine_operation(cmd).expect("JSON operation");
+    let loaded = tongyun_dev_core::load(config);
+    let mut status = None;
+    let mut logs = None;
+    let result: Result<()> = (|| {
+        let loaded = loaded.as_ref().map_err(|e| anyhow::anyhow!("{e:#}"))?;
+        let next = match cmd {
+            Cmd::Start { timeout, .. } => {
+                loaded.start_with_timeout(id, timeout.map(Duration::from_secs))?
+            }
+            Cmd::Restart { timeout, .. } => {
+                loaded.restart_with_timeout(id, timeout.map(Duration::from_secs))?
+            }
+            Cmd::Stop { .. } => loaded.stop(id)?,
+            Cmd::Install { .. } => loaded.install_deps_blocking(id)?,
+            Cmd::Wait { timeout, .. } => loaded.wait_ready(id, Duration::from_secs(*timeout))?,
+            Cmd::Logs { lines, .. } => {
+                logs = Some(loaded.log_tail(id, *lines)?);
+                return Ok(());
+            }
+            _ => unreachable!(),
+        };
+        status = Some(next);
+        Ok(())
+    })();
+    if status.is_none() {
+        status = loaded.as_ref().ok().and_then(|l| l.status(id).ok());
+    }
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "ok": result.is_ok(), "action": action, "id": id,
+            "status": status, "logs": logs,
+            "error": result.as_ref().err().map(|e| format!("{e:#}")),
+        }))?
+    );
+    result
+}
+
 fn print_status(st: &StatusJson, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(st)?);
@@ -184,6 +266,9 @@ fn main() -> Result<()> {
         port: DEFAULT_UI_PORT,
         no_open: false,
     });
+    if machine_operation(&cmd).is_some() {
+        return run_machine_operation(cli.config.as_deref(), &cmd);
+    }
     if let Cmd::Scan {
         dir,
         depth,
@@ -205,11 +290,22 @@ fn main() -> Result<()> {
     };
     match cmd {
         Cmd::List { json } => print_list(&loaded, json)?,
-        Cmd::Start { ref id, open } | Cmd::Restart { ref id, open } => {
+        Cmd::Start {
+            ref id,
+            open,
+            timeout,
+            ..
+        }
+        | Cmd::Restart {
+            ref id,
+            open,
+            timeout,
+            ..
+        } => {
             match if matches!(cmd, Cmd::Restart { .. }) {
-                loaded.restart(id)
+                loaded.restart_with_timeout(id, timeout.map(Duration::from_secs))
             } else {
-                loaded.start(id)
+                loaded.start_with_timeout(id, timeout.map(Duration::from_secs))
             } {
                 Ok(st) => {
                     print_status(&st, false)?;
@@ -230,7 +326,7 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Install { id } => {
+        Cmd::Install { id, .. } => {
             let st = loaded.status(&id)?;
             eprintln!(
                 "安装依赖：{}（输出写到 {}）",
@@ -254,9 +350,15 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Stop { id } => {
+        Cmd::Stop { id, .. } => {
             loaded.stop(&id)?;
             print_status(&loaded.status(&id)?, false)?;
+        }
+        Cmd::Wait { id, timeout, .. } => {
+            print_status(
+                &loaded.wait_ready(&id, Duration::from_secs(timeout))?,
+                false,
+            )?;
         }
         Cmd::Status { id: Some(id), json } => print_status(&loaded.status(&id)?, json)?,
         Cmd::Status { id: None, json } => {
@@ -274,7 +376,9 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Logs { id, follow, lines } => {
+        Cmd::Logs {
+            id, follow, lines, ..
+        } => {
             if follow {
                 loaded.follow_log(&id, lines)?;
             } else {
@@ -491,7 +595,7 @@ mod tests {
         assert!(matches!(cli.cmd, Some(Cmd::List { json: true })));
 
         let cli = Cli::try_parse_from(["tongyun-dev", "start", "my_api", "--open"]).unwrap();
-        assert!(matches!(cli.cmd, Some(Cmd::Start { ref id, open: true }) if id == "my_api"));
+        assert!(matches!(cli.cmd, Some(Cmd::Start { ref id, open: true, .. }) if id == "my_api"));
 
         let cli = Cli::try_parse_from(["tongyun-dev", "status", "my_api", "--json"]).unwrap();
         assert!(
@@ -508,7 +612,7 @@ mod tests {
         ));
 
         let cli = Cli::try_parse_from(["tongyun-dev", "install", "my_web"]).unwrap();
-        assert!(matches!(cli.cmd, Some(Cmd::Install { ref id }) if id == "my_web"));
+        assert!(matches!(cli.cmd, Some(Cmd::Install { ref id, .. }) if id == "my_web"));
 
         let cli = Cli::try_parse_from(["tongyun-dev"]).unwrap();
         assert!(

@@ -174,3 +174,32 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 - 重复启动不会替换仍存活的已追踪进程；停止未成功时保留 PID 与启动标记，便于重试和排查。
 
 自动检查见 `.github/workflows/check.yml`：macOS / Linux 执行 Rust 测试；macOS 执行桌面 typecheck、测试、前端构建和 Tauri Rust 检查。它不代替图形界面真机验收。
+
+## AI 操作协议与等待上限
+
+```bash
+tongyun-dev start demo_api --timeout 60 --json
+tongyun-dev restart demo_api --timeout 60 --json
+tongyun-dev stop demo_api --json
+tongyun-dev install demo_web --json
+tongyun-dev wait demo_api --timeout 30 --json
+tongyun-dev logs demo_api --lines 80 --json
+```
+
+上述 `--json` 操作的 stdout 恰为一个 JSON 对象，进度与启动/停止脚本输出走 stderr，后台服务输出仍写项目日志。对象固定包含：
+
+| 字段 | 含义 |
+| --- | --- |
+| `ok` | 本次操作是否完成；与退出码一致 |
+| `action` / `id` | 请求的动作与项目 ID |
+| `status` | 操作后的状态快照；失败时也尽量提供，配置或项目不存在时为 null |
+| `logs` | 日志读取结果 `{path, missing, text}`；其他动作时为 null |
+| `error` | 错误原因字符串；成功时为 null |
+
+退出码：成功 0，操作失败 1，参数错误 2。参数解析错误由 CLI 输出到 stderr，不输出 JSON。`list --json` 与 `status --json` 的成功输出保持原有数组/状态对象结构，不包装上述对象。
+
+- `wait` 只观察已存在的服务；停止、启动失败或端口冲突会立即返回错误，等待超时不会取消其他调用启动的服务或安装。
+- `start` / `restart` 的 `--timeout` 是启动命令返回后的就绪等待预算，覆盖自动安装阶段；不改配置里的 `start_timeout_secs`，也不限制前置停止或自定义启动脚本本身的执行时长。不传时采用项目的启动超时。一次状态探测最多可能额外花费约 5 秒。
+- 等待超时不是服务已停止。若服务进程已启动，保持 PID / 启动标记，读取 `status` 后可继续等待或显式停止。若本次启动仍在自动安装依赖，则取消安装进程组并记录失败，避免 CLI 退出后留下无人监督的安装。
+- `logs --json` 在日志尚未生成（包括目录未创建）时成功返回 `missing: true`，便于 Agent 继续等待；`--follow` 与 `--json` 互斥，`--open` 与 `--json` 互斥。
+- 重复启动已追踪进程不会重装依赖；陌生进程占用端口时不会执行启动命令。

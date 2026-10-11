@@ -1197,6 +1197,7 @@ function DetailStateBar({
       <div className="state-bar failed">
         <span className="state-dot" />
         <span className="state-text">失败 · {status.failure || "服务启动失败"}</span>
+        {status.pid != null && <span className="state-tip">进程 PID {status.pid} 仍在，停止可清理，重启可重新尝试</span>}
         {status.install_command && (status.deps_missing || (status.failure ?? "").includes("依赖")) && installBtn}
         <button type="button" className="btn btn-ghost btn-sm" onClick={onScrollToLog}>
           看日志

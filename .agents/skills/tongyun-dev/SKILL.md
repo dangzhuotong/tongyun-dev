@@ -28,12 +28,13 @@ tongyun-dev ui [--port 9099]   # 网页控制台，默认 http://127.0.0.1:9099
 | --- | --- | --- |
 | `list [--json]` | 已登记项目 | 先 list 再 start |
 | `status [id] [--json]` | 单项目或全部生命周期 | **解析 `--json`** |
-| `start <id> [--open]` | 启到端口通/探针成功；`--open` 就绪后开页 | 可能先 `installing` |
-| `restart <id> [--open]` | 停止成功后重新启动并等待就绪 | 停止失败不会继续启动 |
-| `stop <id>` | 停进程组 | 失败也要读 status |
-| `logs <id> [--follow] [--lines N]` | 读日志 | 大日志用 lines |
+| `start <id> [--timeout N] [--json] [--open]` | 启到端口通/探针成功；`--open` 就绪后开页 | 可能先 `installing` |
+| `restart <id> [--timeout N] [--json] [--open]` | 停止成功后重新启动并等待就绪 | 停止失败不会继续启动 |
+| `stop <id> [--json]` | 停进程组 | 失败也要读 status |
+| `logs <id> [--follow] [--lines N] [--json]` | 读日志 | 大日志用 lines |
+| `wait <id> --timeout N [--json]` | 观察已有服务直到就绪 | 不启动、不停止；超时返回非零 |
 | `open <id> [--dir]` | 开页面或目录 | |
-| `install <id>` | 装前端依赖 | |
+| `install <id> [--json]` | 装前端依赖 | |
 | `scan <dir> [--depth N] [--apply] [--json]` | 扫描识别项目；`--apply` 写入配置 | 先无 apply 预览 |
 | `add` / `remove` | 登记 / 删登记 | 不动项目文件 |
 | `ui` | 起控制台 | 默认 9099 |
@@ -44,7 +45,7 @@ tongyun-dev ui [--port 9099]   # 网页控制台，默认 http://127.0.0.1:9099
 
 | 字段 | 含义 |
 | --- | --- |
-| `running` | 是否有进程 |
+| `running` | 仅 `ready` / `port_open` 为 true；进程是否存活看 `pid` |
 | `state` | `stopped` / `installing` / `starting` / `port_open` / `ready` / `failed` |
 | `elapsed_secs` | 进入当前态时长 |
 | `failure` | 失败原因（失败时） |
@@ -53,7 +54,11 @@ tongyun-dev ui [--port 9099]   # 网页控制台，默认 http://127.0.0.1:9099
 | `log_path` | 日志路径 |
 | `port_conflict` / `port_holder` | 端口冲突信息 |
 
-Agent 驱动建议：`start` → 轮询 `status --json` 直到 `state` 为 `ready` 或 `failed`（设超时）→ 需要时 `logs` → 结束 `stop`。
+Agent 驱动建议：`start <id> --timeout 60 --json` → 检查退出码和 `ok` → 需要时 `logs <id> --json`；超时后读 `status <id> --json`，可再 `wait <id> --timeout 30 --json` 或显式 `stop <id> --json`。不要把等待超时当成进程已停止。
+
+启停 / 重启 / 安装 / 等待 / 日志的 JSON stdout 是单个 `{ok, action, id, status, logs, error}`。失败也尽量带当前状态；配置或项目不存在时 `status: null`。日志尚未生成时 `ok: true, logs.missing: true`。成功退出 0、操作失败 1、参数错误 2。参数错误只写 stderr。`--follow` / `--open` 不能和 `--json` 同用。`list` / `status` 的成功 JSON 结构不变。
+
+`start` / `restart` 的等待预算从启动命令返回后计算，不限制自定义脚本本身；慢探针可能额外约 5 秒。自动安装阶段等待失败会取消安装；只读 `wait` 不取消任何进程。
 
 ## 4. HTTP 控制台（:9099）
 

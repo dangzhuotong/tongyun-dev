@@ -87,6 +87,14 @@ tongyun-dev ui [--port 9099] [--no-open]
 - GUI App 的 PATH 很短，core 会补上常见目录（`/opt/homebrew/bin`、`/usr/local/bin`、sdkman 的 maven / gradle、`~/.local/bin` 等）。
 - 项目自带的启动脚本不要 `source sdkman-init.sh`（在 `set -u` 下会报 `SDKMAN_CANDIDATES_API: unbound variable`），直接调用 `mvn` / `java` 即可。
 
+## 日志与 PID
+
+- 每个项目默认把输出写到 `~/.tongyun-dev/logs/<id>.out`，PID 记在 `~/.tongyun-dev/logs/<id>.pid`。
+- 想换位置：在该项目的配置里写 `log_dir = "~/somewhere"`；也可以单独指定 `log_file` / `pid_file`，里面能用 `{{log_dir}}`、`{{root}}`。
+- 看日志：`tongyun-dev logs <id> [--follow]`，或者桌面 App / 网页控制台的日志面板。
+
+**从旧版升级**：默认日志目录已经改成 `~/.tongyun-dev/logs`。升级后第一次打开，App 可能认不出用旧位置启动、还在跑的进程（显示为未运行）。手动停掉旧进程再从 App 启动即可；想沿用旧目录，就在对应项目里设 `log_dir`。
+
 ## 桌面 App
 
 需要 Node.js 20+；macOS 还要 Xcode Command Line Tools；桌面壳需要 Rust 1.88+（Tauri 依赖要求）。

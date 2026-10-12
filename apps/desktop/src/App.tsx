@@ -27,6 +27,7 @@ import {
   RestartIcon,
   SearchIcon,
   StopIcon,
+  TerminalIcon,
   TrashIcon,
   XIcon,
 } from "./icons";
@@ -88,6 +89,8 @@ export function App() {
   const [dragOverGroup, setDragOverGroup] = useState<string | null>(null);
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
   const [newGroupLabel, setNewGroupLabel] = useState("");
+  const [selectedProfile, setSelectedProfile] = useState<string>("");
+  const [pagesDropdownOpen, setPagesDropdownOpen] = useState(false);
 
   const toggleGroupCollapse = useCallback((key: string) => {
     setCollapsedGroups((prev) => {
@@ -231,6 +234,15 @@ export function App() {
     };
   }, [selected, refresh]);
 
+  useEffect(() => {
+    if (!selected) {
+      setSelectedProfile("");
+      return;
+    }
+    const proj = projects?.projects.find((p) => p.id === selected);
+    setSelectedProfile(status?.active_profile || proj?.default_profile || "");
+  }, [selected, projects, status?.active_profile]);
+
   async function handlePickConfig() {
     setError("");
     try {
@@ -329,14 +341,15 @@ export function App() {
     }
   }
 
-  async function handleStart() {
+  async function handleStart(profileOverride?: string) {
     if (!selected || busyRef.current) return;
     const project = projects?.projects.find((row) => row.id === selected);
     if (!project || !project.enabled || !project.configured) return;
     setBusy("start");
     setError("");
     try {
-      const next = await invoke<Status>("start_project", { id: selected });
+      const prof = profileOverride !== undefined ? profileOverride : (selectedProfile || undefined);
+      const next = await invoke<Status>("start_project", { id: selected, profile: prof });
       setStatus(next);
       setAllStatuses((prev) => ({ ...prev, [next.id]: next }));
     } catch (err: unknown) {
@@ -379,12 +392,13 @@ export function App() {
     }
   }
 
-  async function handleRestart() {
+  async function handleRestart(profileOverride?: string) {
     if (!selected || busyRef.current) return;
     setBusy("restart");
     setError("");
     try {
-      const next = await invoke<Status>("restart_project", { id: selected });
+      const prof = profileOverride !== undefined ? profileOverride : (selectedProfile || undefined);
+      const next = await invoke<Status>("restart_project", { id: selected, profile: prof });
       setStatus(next);
       setAllStatuses((prev) => ({ ...prev, [next.id]: next }));
     } catch (err: unknown) {
@@ -392,6 +406,30 @@ export function App() {
     } finally {
       await refresh(selected).catch(() => undefined);
       setBusy("");
+    }
+  }
+
+  async function handleOpenTerminal(profileOverride?: string) {
+    if (!selected) return;
+    setError("");
+    try {
+      const prof = profileOverride !== undefined ? profileOverride : (selectedProfile || undefined);
+      await invoke("open_terminal", { id: selected, profile: prof });
+    } catch (err: unknown) {
+      setError(String(err));
+    }
+  }
+
+  async function handleOpenAllPages() {
+    setError("");
+    try {
+      if (current?.links && current.links.length > 0) {
+        await invoke("open_pages", { urls: current.links.map((l) => l.url) });
+      } else {
+        await reveal("page");
+      }
+    } catch (err: unknown) {
+      setError(String(err));
     }
   }
 
@@ -972,6 +1010,11 @@ export function App() {
                 <div className="title-row">
                   <h1>{current.name}</h1>
                   <StatusPill project={current} status={status} />
+                  {status?.active_profile && (
+                    <span className="profile-active-tag" title={`当前运行环境：${status.active_profile}`}>
+                      ⚡ {current.profiles?.[status.active_profile]?.label || status.active_profile}
+                    </span>
+                  )}
                 </div>
                 <div className="subtitle">
                   <code className="id-tag">{current.id}</code>
@@ -987,8 +1030,30 @@ export function App() {
                 </div>
               </div>
               <div className="header-actions" aria-busy={busy !== ""}>
+                {current.profiles && Object.keys(current.profiles).length > 0 && (
+                  <div className="profile-selector-container">
+                    <label htmlFor="header-profile-select" className="profile-selector-label">
+                      环境:
+                    </label>
+                    <select
+                      id="header-profile-select"
+                      className="profile-selector-select"
+                      value={selectedProfile}
+                      disabled={busy !== ""}
+                      onChange={(e) => setSelectedProfile(e.target.value)}
+                      title="选择启动环境预设"
+                    >
+                      <option value="">默认配置</option>
+                      {Object.entries(current.profiles).map(([key, prof]) => (
+                        <option key={key} value={key}>
+                          {prof.label ? `${prof.label} (${key})` : key}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
                 <div className="btn-group">
-                  <button type="button" className="btn btn-secondary" disabled={!canStart} onClick={handleStart}>
+                  <button type="button" className="btn btn-secondary" disabled={!canStart} onClick={() => handleStart()}>
                     <PlayIcon className="icon-play" />
                     {busy === "start" ? "启动中…" : "启动"}
                   </button>
@@ -1002,20 +1067,84 @@ export function App() {
                     <StopIcon className="icon-stop" />
                     {busy === "stop" ? "停止中…" : "停止"}
                   </button>
-                  <button type="button" className="btn btn-secondary" disabled={!canRestart} onClick={handleRestart}>
+                  <button type="button" className="btn btn-secondary" disabled={!canRestart} onClick={() => handleRestart()}>
                     <RestartIcon />
                     {busy === "restart" ? "重启中…" : "重启"}
                   </button>
                 </div>
+                {current.links && current.links.length > 1 ? (
+                  <div className="pages-split-btn">
+                    <button
+                      type="button"
+                      className="btn btn-primary pages-primary-btn"
+                      disabled={!canOpenPage}
+                      title={current.links[0].url}
+                      onClick={() => invoke("open_page", { url: current.links![0].url })}
+                    >
+                      <ExternalIcon />
+                      {current.links[0].title || "打开网页"}
+                    </button>
+                    <button
+                      type="button"
+                      className={`btn btn-primary pages-dropdown-toggle${pagesDropdownOpen ? " active" : ""}`}
+                      disabled={!canOpenPage}
+                      onClick={() => setPagesDropdownOpen((prev) => !prev)}
+                      title="展开全部网页链接"
+                      aria-label="展开全部网页链接"
+                    >
+                      <ChevronDownIcon />
+                    </button>
+                    {pagesDropdownOpen && (
+                      <div className="menu menu-down pages-menu" role="menu">
+                        {current.links.map((link, idx) => (
+                          <button
+                            key={idx}
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setPagesDropdownOpen(false);
+                              invoke("open_page", { url: link.url }).catch((e) => setError(String(e)));
+                            }}
+                            title={link.url}
+                          >
+                            <ExternalIcon /> {link.title || link.url}
+                          </button>
+                        ))}
+                        <div className="menu-sep" />
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="pages-open-all-btn"
+                          onClick={() => {
+                            setPagesDropdownOpen(false);
+                            handleOpenAllPages();
+                          }}
+                        >
+                          全部打开 ({current.links.length})
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={!canOpenPage}
+                    title={getOpenPageTitle()}
+                    onClick={() => reveal("page")}
+                  >
+                    <ExternalIcon />
+                    {current.links?.[0]?.title || "打开网页"}
+                  </button>
+                )}
                 <button
                   type="button"
-                  className="btn btn-primary"
-                  disabled={!canOpenPage}
-                  title={getOpenPageTitle()}
-                  onClick={() => reveal("page")}
+                  className="btn btn-secondary btn-terminal-header"
+                  onClick={() => handleOpenTerminal()}
+                  title="在系统独立终端中运行项目（支持上下键选择与按键交互）"
                 >
-                  <ExternalIcon />
-                  打开网页
+                  <TerminalIcon />
+                  终端
                 </button>
                 <button
                   type="button"
@@ -1051,6 +1180,17 @@ export function App() {
                         }}
                       >
                         <RefreshIcon /> 刷新状态
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setMenu("");
+                          handleOpenTerminal();
+                        }}
+                        title="在系统独立终端中交互运行"
+                      >
+                        <TerminalIcon /> 在系统终端中运行
                       </button>
                       <button
                         type="button"
@@ -1214,6 +1354,7 @@ export function App() {
                 onOpenLog={() => reveal("log")}
                 selected={selected}
                 running={status?.running ?? false}
+                onOpenTerminal={() => handleOpenTerminal()}
               />
             </div>
           </>

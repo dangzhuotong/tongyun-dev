@@ -1,5 +1,17 @@
 export type LifeState = "stopped" | "installing" | "starting" | "port_open" | "ready" | "failed";
 
+export type WebLink = {
+  title: string;
+  url: string;
+};
+
+export type ProfileConfig = {
+  label?: string | null;
+  start?: string | null;
+  port?: number | null;
+  env?: Record<string, string>;
+};
+
 export type Project = {
   id: string;
   name: string;
@@ -25,6 +37,9 @@ export type Project = {
   env?: Record<string, string>;
   auto_answers?: AutoAnswer[];
   hints?: string[];
+  links?: WebLink[];
+  default_profile?: string | null;
+  profiles?: Record<string, ProfileConfig>;
 };
 
 export type AutoAnswer = {
@@ -76,6 +91,7 @@ export type Status = {
   /** 装依赖的命令，例如 "pnpm install"；不是前端项目时为空。 */
   install_command?: string;
   hints?: string[];
+  active_profile?: string | null;
 };
 
 export type LogTail = {
@@ -117,6 +133,9 @@ export type ProjectDetail = {
   env?: Record<string, string>;
   auto_answers?: AutoAnswer[];
   hints?: string[];
+  links?: WebLink[];
+  default_profile?: string | null;
+  profiles?: Record<string, ProfileConfig>;
 };
 
 export type NewProjectReq = {
@@ -145,6 +164,9 @@ export type NewProjectReq = {
   pty?: boolean;
   env?: Record<string, string>;
   auto_answers?: AutoAnswer[];
+  links?: WebLink[];
+  default_profile?: string | null;
+  profiles?: Record<string, ProfileConfig>;
 };
 
 export type ProjectEditReq = {
@@ -170,6 +192,9 @@ export type ProjectEditReq = {
   pty?: boolean;
   env?: Record<string, string>;
   auto_answers?: AutoAnswer[];
+  links?: WebLink[];
+  default_profile?: string | null;
+  profiles?: Record<string, ProfileConfig>;
 };
 
 export type Confidence = "high" | "medium" | "low";

@@ -64,6 +64,24 @@ pub struct AutoAnswer {
     pub regex: bool,
 }
 
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct WebLink {
+    pub title: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+pub struct ProfileConfig {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 struct Project {
     #[serde(default)]
@@ -135,6 +153,15 @@ struct Project {
     /// 自动应答规则（可选）。
     #[serde(default)]
     pub auto_answers: Vec<AutoAnswer>,
+    /// 自定义快捷网页链接（可选）。
+    #[serde(default)]
+    pub links: Vec<WebLink>,
+    /// 默认启动环境预设（可选）。
+    #[serde(default)]
+    pub default_profile: Option<String>,
+    /// 启动环境预设表（可选）。
+    #[serde(default)]
+    pub profiles: std::collections::BTreeMap<String, ProfileConfig>,
 }
 
 struct Vars {
@@ -177,6 +204,7 @@ struct Resolved {
     pub env: std::collections::BTreeMap<String, String>,
     pub pty: bool,
     pub auto_answers: Vec<AutoAnswer>,
+    pub links: Vec<WebLink>,
 }
 
 impl Resolved {
@@ -262,6 +290,12 @@ pub struct ProjectRow {
     pub pty: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auto_answers: Vec<AutoAnswer>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<WebLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub profiles: std::collections::BTreeMap<String, ProfileConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -402,6 +436,9 @@ pub struct StatusJson {
     /// 诊断建议
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
+    /// 当前生效的启动预设环境（可选）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -458,6 +495,9 @@ impl Loaded {
                 env: resolved.env.clone(),
                 pty: resolved.pty,
                 auto_answers: resolved.auto_answers.clone(),
+                links: resolved.links.clone(),
+                default_profile: self.config.projects.get(&id).and_then(|p| p.default_profile.clone()),
+                profiles: self.config.projects.get(&id).map(|p| p.profiles.clone()).unwrap_or_default(),
             });
         }
         let groups = self.groups();
@@ -722,7 +762,11 @@ impl Loaded {
     }
 
     pub fn start_detached(&self, id: &str) -> Result<StatusJson> {
-        let project = self.resolve(id)?;
+        self.start_detached_with_profile(id, None)
+    }
+
+    pub fn start_detached_with_profile(&self, id: &str, profile_name: Option<&str>) -> Result<StatusJson> {
+        let project = self.resolve_with_profile(id, profile_name)?;
         if !project.enabled {
             let why = if project.reason.is_empty() {
                 "disabled"
@@ -763,6 +807,15 @@ impl Loaded {
             return self.status(id);
         }
         let _ = clear_install_marker(&project.pid_file);
+
+        let prof_marker = profile_marker_path(&project.pid_file);
+        let effective_prof = profile_name.or(self.config.projects.get(id).and_then(|p| p.default_profile.as_deref()));
+        if let Some(prof) = effective_prof {
+            let _ = std::fs::write(&prof_marker, prof);
+        } else {
+            let _ = std::fs::remove_file(&prof_marker);
+        }
+
         if let Err(e) = cmd_start_detached(&project) {
             let err_msg = format!("{e:#}");
             let marker = StartMarker {
@@ -787,7 +840,16 @@ impl Loaded {
 
     /// The wait budget begins after the start command returns. It does not cancel the service.
     pub fn start_with_timeout(&self, id: &str, timeout: Option<Duration>) -> Result<StatusJson> {
-        let initial = self.start_detached(id)?;
+        self.start_with_profile(id, None, timeout)
+    }
+
+    pub fn start_with_profile(
+        &self,
+        id: &str,
+        profile_name: Option<&str>,
+        timeout: Option<Duration>,
+    ) -> Result<StatusJson> {
+        let initial = self.start_detached_with_profile(id, profile_name)?;
         let budget = timeout.unwrap_or_else(|| Duration::from_secs(initial.timeout_secs));
         self.finish_start(id, initial, budget)
     }
@@ -861,12 +923,16 @@ impl Loaded {
 
     /// Restart only after a verified successful stop. GUI callers return while starting.
     pub fn restart_detached(&self, id: &str) -> Result<StatusJson> {
-        let project = self.resolve(id)?;
+        self.restart_detached_with_profile(id, None)
+    }
+
+    pub fn restart_detached_with_profile(&self, id: &str, profile_name: Option<&str>) -> Result<StatusJson> {
+        let project = self.resolve_with_profile(id, profile_name)?;
         if !project.enabled {
             bail!("project `{id}` is disabled: {}", project.reason);
         }
         self.stop(id)?;
-        self.start_detached(id)
+        self.start_detached_with_profile(id, profile_name)
     }
 
     /// Restart and wait for readiness, as with `start`.
@@ -875,7 +941,16 @@ impl Loaded {
     }
 
     pub fn restart_with_timeout(&self, id: &str, timeout: Option<Duration>) -> Result<StatusJson> {
-        let initial = self.restart_detached(id)?;
+        self.restart_with_profile(id, None, timeout)
+    }
+
+    pub fn restart_with_profile(
+        &self,
+        id: &str,
+        profile_name: Option<&str>,
+        timeout: Option<Duration>,
+    ) -> Result<StatusJson> {
+        let initial = self.restart_detached_with_profile(id, profile_name)?;
         let budget = timeout.unwrap_or_else(|| Duration::from_secs(initial.timeout_secs));
         self.finish_start(id, initial, budget)
     }
@@ -883,6 +958,7 @@ impl Loaded {
     pub fn stop(&self, id: &str) -> Result<StatusJson> {
         let project = self.resolve(id)?;
         cancel_install(&project)?;
+        let _ = std::fs::remove_file(profile_marker_path(&project.pid_file));
         cmd_stop(&project)?;
         let peers = self.peer_pids(&project.id);
         Ok(status_of(&project, &peers))
@@ -1057,12 +1133,16 @@ impl Loaded {
     }
 
     fn resolve(&self, id: &str) -> Result<Resolved> {
+        self.resolve_with_profile(id, None)
+    }
+
+    pub(crate) fn resolve_with_profile(&self, id: &str, profile_name: Option<&str>) -> Result<Resolved> {
         let project = self
             .config
             .projects
             .get(id)
             .with_context(|| format!("unknown project id `{id}`; try `tongyun-dev list`"))?;
-        resolve_project(id, project, current_home().as_deref())
+        resolve_project_with_profile(id, project, current_home().as_deref(), profile_name)
     }
 }
 
@@ -1615,7 +1695,39 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
         env: p.env.clone(),
         pty: p.pty,
         auto_answers: p.auto_answers.clone(),
+        links: p.links.clone(),
     })
+}
+
+fn resolve_project_with_profile(
+    id: &str,
+    p: &Project,
+    home: Option<&Path>,
+    profile_name: Option<&str>,
+) -> Result<Resolved> {
+    let mut project = p.clone();
+    let effective_profile = profile_name.or(project.default_profile.as_deref());
+    if let Some(name) = effective_profile {
+        if let Some(prof) = project.profiles.get(name) {
+            if let Some(ref start_cmd) = prof.start {
+                let trimmed = start_cmd.trim();
+                if !trimmed.is_empty() {
+                    project.start = crate::toolchain::shell_argv(trimmed, project.shell.as_deref());
+                }
+            }
+            if let Some(port) = prof.port {
+                if port > 0 {
+                    project.port = port;
+                }
+            }
+            for (k, v) in &prof.env {
+                project.env.insert(k.clone(), v.clone());
+            }
+        } else if profile_name.is_some() {
+            bail!("unknown profile `{name}` for project `{id}`");
+        }
+    }
+    resolve_project(id, &project, home)
 }
 
 fn parse_config(text: &str) -> Result<FileConfig> {
@@ -2003,6 +2115,12 @@ pub fn start_marker_path(pid_file: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
+pub fn profile_marker_path(pid_file: &Path) -> PathBuf {
+    let mut p = pid_file.as_os_str().to_os_string();
+    p.push(".profile");
+    PathBuf::from(p)
+}
+
 pub fn read_start_marker(pid_file: &Path) -> Option<StartMarker> {
     let path = start_marker_path(pid_file);
     let text = std::fs::read_to_string(&path).ok()?;
@@ -2085,6 +2203,7 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
 
     if state == LifeState::Stopped && !process_alive {
         let _ = std::fs::remove_file(start_marker_path(&p.pid_file));
+        let _ = std::fs::remove_file(profile_marker_path(&p.pid_file));
     }
 
     let mut started_at = started_at;
@@ -2105,6 +2224,15 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
         LifeState::Stopped => None,
     };
     let running = matches!(state, LifeState::PortOpen | LifeState::Ready);
+
+    let active_profile = if process_alive {
+        std::fs::read_to_string(profile_marker_path(&p.pid_file))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
 
     StatusJson {
         id: p.id.clone(),
@@ -2128,6 +2256,7 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
             .map(|pm| pm.install_command().to_string())
             .unwrap_or_default(),
         hints,
+        active_profile,
     }
 }
 
@@ -3451,6 +3580,15 @@ pub struct NewProject {
     /// 自动应答规则（可选）。
     #[serde(default)]
     pub auto_answers: Vec<AutoAnswer>,
+    /// 快捷网页链接（可选）。
+    #[serde(default)]
+    pub links: Vec<WebLink>,
+    /// 默认启动环境预设（可选）。
+    #[serde(default)]
+    pub default_profile: Option<String>,
+    /// 启动环境预设表（可选）。
+    #[serde(default)]
+    pub profiles: std::collections::BTreeMap<String, ProfileConfig>,
 }
 
 fn non_empty(v: &Option<String>) -> Option<String> {
@@ -3569,6 +3707,9 @@ impl NewProject {
             env: self.env.clone(),
             pty: self.pty,
             auto_answers: self.auto_answers,
+            links: self.links,
+            default_profile: non_empty(&self.default_profile),
+            profiles: self.profiles,
         };
         Ok((id, project))
     }
@@ -3669,6 +3810,19 @@ fn project_table(p: &Project) -> toml_edit::Table {
             auto_answers_to_toml_array(&p.auto_answers),
         ));
     }
+    if !p.links.is_empty() {
+        t["links"] = toml_edit::Item::Value(toml_edit::Value::Array(
+            links_to_toml_array(&p.links),
+        ));
+    }
+    if let Some(ref dp) = p.default_profile {
+        if !dp.is_empty() {
+            t["default_profile"] = value(dp.as_str());
+        }
+    }
+    if !p.profiles.is_empty() {
+        t["profiles"] = toml_edit::Item::Table(profiles_to_toml_table(&p.profiles));
+    }
     t
 }
 
@@ -3687,6 +3841,56 @@ fn auto_answers_to_toml_array(answers: &[AutoAnswer]) -> toml_edit::Array {
         arr.push(toml_edit::Value::InlineTable(inline));
     }
     arr
+}
+
+fn links_to_toml_array(links: &[WebLink]) -> toml_edit::Array {
+    let mut arr = toml_edit::Array::new();
+    for l in links {
+        let mut inline = toml_edit::InlineTable::new();
+        inline.insert("title", toml_edit::Value::from(l.title.as_str()));
+        inline.insert("url", toml_edit::Value::from(l.url.as_str()));
+        arr.push(toml_edit::Value::InlineTable(inline));
+    }
+    arr
+}
+
+fn profiles_to_toml_table(
+    profiles: &std::collections::BTreeMap<String, ProfileConfig>,
+) -> toml_edit::Table {
+    let mut table = toml_edit::Table::new();
+    for (name, prof) in profiles {
+        let mut prof_tab = toml_edit::Table::new();
+        if !prof.label.is_empty() {
+            prof_tab.insert(
+                "label",
+                toml_edit::Item::Value(toml_edit::Value::from(prof.label.as_str())),
+            );
+        }
+        if let Some(ref start) = prof.start {
+            prof_tab.insert(
+                "start",
+                toml_edit::Item::Value(toml_edit::Value::from(start.as_str())),
+            );
+        }
+        if let Some(port) = prof.port {
+            prof_tab.insert(
+                "port",
+                toml_edit::Item::Value(toml_edit::Value::from(port as i64)),
+            );
+        }
+        if !prof.env.is_empty() {
+            let mut inline = toml_edit::InlineTable::new();
+            for (k, v) in &prof.env {
+                inline.insert(k, toml_edit::Value::from(v.as_str()));
+            }
+            prof_tab.insert(
+                "env",
+                toml_edit::Item::Value(toml_edit::Value::InlineTable(inline)),
+            );
+        }
+        table.insert(name, toml_edit::Item::Table(prof_tab));
+    }
+    table
 }
 
 /// Result of [`Loaded::import_scanned`].
@@ -3780,6 +3984,15 @@ pub struct ProjectEdit {
     /// 自动应答规则（可选）。
     #[serde(default)]
     pub auto_answers: Option<Vec<AutoAnswer>>,
+    /// 快捷网页链接（可选）。
+    #[serde(default)]
+    pub links: Option<Vec<WebLink>>,
+    /// 默认启动环境预设（可选）。
+    #[serde(default)]
+    pub default_profile: Option<String>,
+    /// 启动环境预设表（可选）。
+    #[serde(default)]
+    pub profiles: Option<std::collections::BTreeMap<String, ProfileConfig>>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -3818,6 +4031,12 @@ pub struct ProjectDetail {
     pub auto_answers: Vec<AutoAnswer>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<WebLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub profiles: std::collections::BTreeMap<String, ProfileConfig>,
 }
 
 #[allow(clippy::if_same_then_else)]
@@ -3956,6 +4175,9 @@ impl Loaded {
             env: r.env.clone(),
             pty: r.pty,
             auto_answers: r.auto_answers.clone(),
+            links: r.links.clone(),
+            default_profile: self.config.projects.get(&id).and_then(|p| p.default_profile.clone()),
+            profiles: self.config.projects.get(&id).map(|p| p.profiles.clone()).unwrap_or_default(),
         })
     }
 
@@ -4101,6 +4323,9 @@ impl Loaded {
             pty: p.pty,
             auto_answers: p.auto_answers.clone(),
             hints,
+            links: p.links.clone(),
+            default_profile: p.default_profile.clone(),
+            profiles: p.profiles.clone(),
         })
     }
 
@@ -4398,6 +4623,35 @@ impl Loaded {
             }
         }
 
+        if let Some(ref links) = edit.links {
+            if links.is_empty() {
+                proj_table.remove("links");
+            } else {
+                set_table_val(
+                    proj_table,
+                    "links",
+                    toml_edit::Value::Array(links_to_toml_array(links)),
+                );
+            }
+        }
+
+        if let Some(ref default_profile) = edit.default_profile {
+            let trimmed = default_profile.trim();
+            if trimmed.is_empty() {
+                proj_table.remove("default_profile");
+            } else {
+                set_table_val(proj_table, "default_profile", toml_edit::Value::from(trimmed));
+            }
+        }
+
+        if let Some(ref profiles) = edit.profiles {
+            if profiles.is_empty() {
+                proj_table.remove("profiles");
+            } else {
+                proj_table.insert("profiles", toml_edit::Item::Table(profiles_to_toml_table(profiles)));
+            }
+        }
+
         if let Some(ref grp) = group_to_ensure {
             let groups = doc
                 .entry("group")
@@ -4456,6 +4710,9 @@ impl Loaded {
             env: r.env.clone(),
             pty: r.pty,
             auto_answers: r.auto_answers.clone(),
+            links: r.links.clone(),
+            default_profile: self.config.projects.get(id).and_then(|p| p.default_profile.clone()),
+            profiles: self.config.projects.get(id).map(|p| p.profiles.clone()).unwrap_or_default(),
         })
     }
 
@@ -4600,9 +4857,14 @@ impl Loaded {
         )
     }
 
-    /// Page to open in the browser: `login_url`, else `health_url`, else `http://127.0.0.1:<port>/`.
+    /// Page to open in the browser: first link if configured, else `login_url`, else `health_url`, else `http://127.0.0.1:<port>/`.
     pub fn page_url(&self, id: &str) -> Result<String> {
         let p = self.resolve(id)?;
+        if let Some(first) = p.links.first() {
+            if !first.url.trim().is_empty() {
+                return Ok(first.url.trim().to_string());
+            }
+        }
         if !p.login_url.is_empty() {
             return Ok(p.login_url);
         }
@@ -4612,9 +4874,86 @@ impl Loaded {
         Ok(format!("http://127.0.0.1:{}/", p.port))
     }
 
+    /// All configured links, falling back to a single link from `page_url`.
+    pub fn page_urls(&self, id: &str) -> Result<Vec<WebLink>> {
+        let p = self.resolve(id)?;
+        if !p.links.is_empty() {
+            return Ok(p.links);
+        }
+        let fallback = self.page_url(id)?;
+        Ok(vec![WebLink {
+            title: "主页".to_string(),
+            url: fallback,
+        }])
+    }
+
+    /// Open project in interactive native terminal.
+    pub fn open_in_terminal(&self, id: &str, profile_name: Option<&str>) -> Result<()> {
+        let p = self.resolve_with_profile(id, profile_name)?;
+        let start_cmd = p.active_start().join(" ");
+        if start_cmd.trim().is_empty() {
+            bail!("project `{id}` has no start command to run in terminal");
+        }
+        open_terminal_command(&p.root, &start_cmd, &p.name)
+    }
+
     /// Absolute project root.
     pub fn root_dir(&self, id: &str) -> Result<PathBuf> {
         Ok(self.resolve(id)?.root)
+    }
+}
+
+pub fn open_terminal_command(dir: &Path, cmd_str: &str, title: &str) -> Result<()> {
+    if !dir.is_dir() {
+        bail!("directory does not exist: {}", dir.display());
+    }
+    let dir_str = path_to_string(dir);
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut c = Command::new("cmd");
+        let shell_cmd = format!("cd /d \"{}\" && {}", dir_str, cmd_str);
+        c.args(["/C", "start", title, "cmd.exe", "/K", &shell_cmd]);
+        c.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to open terminal for {title}"))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "tell application \"Terminal\" to do script \"cd {:?}; {}\"",
+            dir_str, cmd_str
+        );
+        let mut c = Command::new("osascript");
+        c.args(["-e", &script, "-e", "tell application \"Terminal\" to activate"]);
+        c.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to open terminal for {title}"))?;
+        Ok(())
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let terms = ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"];
+        for term in terms {
+            if let Ok(mut c) = Command::new(term)
+                .current_dir(dir)
+                .args(["-e", cmd_str])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                return Ok(());
+            }
+        }
+        bail!("no supported terminal emulator found (tried: {})", terms.join(", "));
     }
 }
 
@@ -4822,6 +5161,7 @@ login_url = "http://127.0.0.1:8080/legacy_app/admin/login.html"
             deps_missing: false,
             install_command: String::new(),
             hints: Vec::new(),
+            active_profile: None,
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
@@ -5312,6 +5652,9 @@ port = 3002
             env: Default::default(),
             pty: false,
             auto_answers: Vec::new(),
+            links: Vec::new(),
+            default_profile: None,
+            profiles: Default::default(),
         };
         let json_fs: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row_fs).unwrap()).unwrap();
@@ -5342,6 +5685,9 @@ port = 3002
             env: Default::default(),
             pty: false,
             auto_answers: Vec::new(),
+            links: Vec::new(),
+            default_profile: None,
+            profiles: Default::default(),
         };
         let json_none: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row_none).unwrap()).unwrap();
@@ -6351,6 +6697,94 @@ auto_answers = [
         assert_eq!(reloaded_detail.auto_answers[1].expect, "Continue?");
         assert!(!reloaded_detail.auto_answers[1].once);
         assert!(reloaded_detail.auto_answers[1].regex);
+    }
+
+    #[test]
+    fn test_13_links_and_profiles_read_write_and_resolution() {
+        let dir = std::env::temp_dir().join(format!("tongyun_dev_prof_{}", current_time_secs()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("projects.toml");
+        let toml = r#"
+# multi-profile project
+[projects.web_app]
+name = "Web App"
+root = "/tmp"
+port = 3000
+default_profile = "dev"
+start = ["bash", "-c", "exec pnpm dev"]
+links = [
+    { title = "前端主页", url = "http://127.0.0.1:3000" },
+    { title = "接口文档", url = "http://127.0.0.1:3000/docs" }
+]
+
+[projects.web_app.profiles.dev]
+label = "开发环境"
+start = "pnpm dev"
+port = 3000
+
+[projects.web_app.profiles.mock]
+label = "Mock 模式"
+start = "pnpm dev:mock"
+port = 3001
+[projects.web_app.profiles.mock.env]
+USE_MOCK = "true"
+"#;
+        std::fs::write(&path, toml).unwrap();
+        let mut loaded = load(Some(&path)).unwrap();
+
+        let detail = loaded.project_detail("web_app").unwrap();
+        assert_eq!(detail.links.len(), 2);
+        assert_eq!(detail.links[0].title, "前端主页");
+        assert_eq!(detail.links[1].url, "http://127.0.0.1:3000/docs");
+        assert_eq!(detail.default_profile.as_deref(), Some("dev"));
+        assert_eq!(detail.profiles.len(), 2);
+        assert_eq!(detail.profiles.get("mock").unwrap().port, Some(3001));
+
+        // Resolution with default profile
+        let res_default = loaded.resolve("web_app").unwrap();
+        assert_eq!(res_default.port, 3000);
+
+        // Resolution with mock profile
+        let res_mock = loaded.resolve_with_profile("web_app", Some("mock")).unwrap();
+        assert_eq!(res_mock.port, 3001);
+        assert_eq!(res_mock.env.get("USE_MOCK").map(|s| s.as_str()), Some("true"));
+
+        // Update links and profiles
+        let mut new_profiles = std::collections::BTreeMap::new();
+        new_profiles.insert(
+            "prod".to_string(),
+            ProfileConfig {
+                label: "生产预览".to_string(),
+                start: Some("pnpm preview".to_string()),
+                port: Some(4000),
+                env: Default::default(),
+            },
+        );
+        let updated = loaded
+            .update_project(
+                "web_app",
+                ProjectEdit {
+                    links: Some(vec![WebLink {
+                        title: "主页".to_string(),
+                        url: "http://127.0.0.1:4000".to_string(),
+                    }]),
+                    default_profile: Some("prod".to_string()),
+                    profiles: Some(new_profiles),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(updated.links.len(), 1);
+        assert_eq!(updated.default_profile.as_deref(), Some("prod"));
+        assert_eq!(updated.profiles.len(), 1);
+
+        let reloaded = load(Some(&path)).unwrap();
+        let reloaded_detail = reloaded.project_detail("web_app").unwrap();
+        assert_eq!(reloaded_detail.links.len(), 1);
+        assert_eq!(reloaded_detail.default_profile.as_deref(), Some("prod"));
+        assert_eq!(reloaded_detail.profiles.len(), 1);
+        assert_eq!(reloaded_detail.profiles.get("prod").unwrap().port, Some(4000));
     }
 }
 

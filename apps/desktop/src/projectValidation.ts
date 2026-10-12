@@ -1,4 +1,4 @@
-import type { AutoAnswer } from "./types";
+import type { AutoAnswer, ProfileConfig, WebLink } from "./types";
 
 export interface ProjectFormData {
   id: string;
@@ -24,6 +24,9 @@ export interface ProjectFormData {
   pty?: boolean;
   env_text?: string;
   auto_answers_text?: string;
+  links_text?: string;
+  default_profile?: string;
+  profiles_text?: string;
 }
 
 /**
@@ -116,6 +119,123 @@ export function formatAutoAnswersLines(
   return answers.map((a) => `${a.expect} => ${a.send}`).join("\n");
 }
 
+/**
+ * 解析每行「标题 => URL」或纯「URL」的网页链接。
+ */
+export function parseLinksLines(text: string): {
+  links: WebLink[];
+  error?: string;
+} {
+  const links: WebLink[] = [];
+  if (!text || text.trim() === "") return { links };
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.includes("=>")) {
+      const arrowIdx = line.indexOf("=>");
+      const title = line.slice(0, arrowIdx).trim();
+      const url = line.slice(arrowIdx + 2).trim();
+      if (!url) {
+        return {
+          links: [],
+          error: `第 ${i + 1} 行网页链接 URL 不能为空：${line}`,
+        };
+      }
+      links.push({ title: title || url, url });
+    } else {
+      links.push({ title: line, url: line });
+    }
+  }
+  return { links };
+}
+
+/**
+ * 将网页链接数组格式化为每行「标题 => URL」或「URL」文本。
+ */
+export function formatLinksLines(links?: WebLink[] | null): string {
+  if (!links || links.length === 0) return "";
+  return links
+    .map((l) => (l.title && l.title !== l.url ? `${l.title} => ${l.url}` : l.url))
+    .join("\n");
+}
+
+/**
+ * 解析每行「标识: 启动命令」或「标识: 标签 | 启动命令 [| 端口]」的环境预设。
+ */
+export function parseProfilesLines(text: string): {
+  profiles: Record<string, ProfileConfig>;
+  error?: string;
+} {
+  const profiles: Record<string, ProfileConfig> = {};
+  if (!text || text.trim() === "") return { profiles };
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const line = raw.trim();
+    if (!line) continue;
+    const colonIdx = line.indexOf(":");
+    if (colonIdx === -1) {
+      return {
+        profiles: {},
+        error: `第 ${i + 1} 行环境配置格式错误（必须为 标识: 启动命令 或 标识: 标签 | 启动命令）：${line}`,
+      };
+    }
+    const key = line.slice(0, colonIdx).trim();
+    if (!key || !/^[a-zA-Z0-9_-]+$/.test(key)) {
+      return {
+        profiles: {},
+        error: `第 ${i + 1} 行环境配置标识只能包含字母、数字、下划线和连字符：${key}`,
+      };
+    }
+    const rest = line.slice(colonIdx + 1).trim();
+    const parts = rest.split("|").map((p) => p.trim());
+    if (parts.length === 1) {
+      profiles[key] = { start: parts[0] || null };
+    } else if (parts.length === 2) {
+      const maybePort = Number(parts[1]);
+      if (!isNaN(maybePort) && Number.isInteger(maybePort) && maybePort > 0 && maybePort <= 65535) {
+        profiles[key] = { start: parts[0] || null, port: maybePort };
+      } else {
+        profiles[key] = { label: parts[0] || null, start: parts[1] || null };
+      }
+    } else if (parts.length >= 3) {
+      const maybePort = Number(parts[2]);
+      const port =
+        !isNaN(maybePort) && Number.isInteger(maybePort) && maybePort > 0 && maybePort <= 65535
+          ? maybePort
+          : null;
+      profiles[key] = {
+        label: parts[0] || null,
+        start: parts[1] || null,
+        port,
+      };
+    }
+  }
+  return { profiles };
+}
+
+/**
+ * 将环境预设映射格式化为文本。
+ */
+export function formatProfilesLines(profiles?: Record<string, ProfileConfig> | null): string {
+  if (!profiles) return "";
+  return Object.entries(profiles)
+    .map(([key, prof]) => {
+      if (prof.label && prof.port) {
+        return `${key}: ${prof.label} | ${prof.start ?? ""} | ${prof.port}`;
+      } else if (prof.label) {
+        return `${key}: ${prof.label} | ${prof.start ?? ""}`;
+      } else if (prof.port) {
+        return `${key}: ${prof.start ?? ""} | ${prof.port}`;
+      } else {
+        return `${key}: ${prof.start ?? ""}`;
+      }
+    })
+    .join("\n");
+}
+
 export function validateProjectForm(
   data: Partial<ProjectFormData>,
   isEditing = false
@@ -182,6 +302,20 @@ export function validateProjectForm(
     }
   }
 
+  if (data.links_text !== undefined) {
+    const { error: linksError } = parseLinksLines(data.links_text);
+    if (linksError) {
+      errors.links_text = linksError;
+    }
+  }
+
+  if (data.profiles_text !== undefined) {
+    const { error: profilesError } = parseProfilesLines(data.profiles_text);
+    if (profilesError) {
+      errors.profiles_text = profilesError;
+    }
+  }
+
   return errors;
 }
 
@@ -209,6 +343,9 @@ export interface EditBaseline {
   pty?: boolean;
   env?: Record<string, string>;
   auto_answers?: AutoAnswer[];
+  links?: WebLink[];
+  default_profile?: string | null;
+  profiles?: Record<string, ProfileConfig>;
 }
 
 /**
@@ -319,6 +456,27 @@ export function buildEditRequest(
     }
     if (answersChanged) {
       out.auto_answers = parsedAnswers;
+    }
+  }
+
+  // default_profile
+  text("default_profile", base.default_profile, form.default_profile ?? "");
+
+  // links
+  if (form.links_text !== undefined) {
+    const { links: parsedLinks } = parseLinksLines(form.links_text);
+    const baseLinks = base.links ?? [];
+    if (JSON.stringify(parsedLinks) !== JSON.stringify(baseLinks)) {
+      out.links = parsedLinks;
+    }
+  }
+
+  // profiles
+  if (form.profiles_text !== undefined) {
+    const { profiles: parsedProfiles } = parseProfilesLines(form.profiles_text);
+    const baseProfiles = base.profiles ?? {};
+    if (JSON.stringify(parsedProfiles) !== JSON.stringify(baseProfiles)) {
+      out.profiles = parsedProfiles;
     }
   }
 

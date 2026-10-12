@@ -5,8 +5,12 @@ import {
   buildEditRequest,
   formatAutoAnswersLines,
   formatEnvLines,
+  formatLinksLines,
+  formatProfilesLines,
   parseAutoAnswersLines,
   parseEnvLines,
+  parseLinksLines,
+  parseProfilesLines,
   validateProjectForm,
   type ProjectFormData,
 } from "./projectValidation";
@@ -61,6 +65,9 @@ export function ProjectForm({
     pty: initialDetail?.pty ?? false,
     env_text: formatEnvLines(initialDetail?.env),
     auto_answers_text: formatAutoAnswersLines(initialDetail?.auto_answers),
+    links_text: formatLinksLines(initialDetail?.links),
+    default_profile: initialDetail?.default_profile ?? "",
+    profiles_text: formatProfilesLines(initialDetail?.profiles),
   }));
 
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -195,6 +202,15 @@ export function ProjectForm({
           auto_answers: (() => {
             const { answers: parsed } = parseAutoAnswersLines(form.auto_answers_text ?? "");
             return parsed.length > 0 ? parsed : undefined;
+          })(),
+          links: (() => {
+            const { links: parsed } = parseLinksLines(form.links_text ?? "");
+            return parsed.length > 0 ? parsed : undefined;
+          })(),
+          default_profile: form.default_profile?.trim() || undefined,
+          profiles: (() => {
+            const { profiles: parsed } = parseProfilesLines(form.profiles_text ?? "");
+            return Object.keys(parsed).length > 0 ? parsed : undefined;
           })(),
         };
         await invoke<ProjectRow>("add_project", { req: createReq });
@@ -567,6 +583,46 @@ export function ProjectForm({
             {errors.auto_answers_text && (
               <span className="field-error">{errors.auto_answers_text}</span>
             )}
+          </div>
+
+          {/* 快捷网页链接 */}
+          <div className="form-group">
+            <label htmlFor="field-links">快捷网页链接</label>
+            <textarea
+              id="field-links"
+              rows={2}
+              value={form.links_text ?? ""}
+              placeholder={"每行「标题 => URL」或纯「URL」，例如：\n管理后台 => http://localhost:8080/admin\nSwagger => http://localhost:8080/swagger-ui.html"}
+              onChange={(e) => handleChange("links_text", e.target.value)}
+              className={errors.links_text ? "invalid" : ""}
+            />
+            {errors.links_text && <span className="field-error">{errors.links_text}</span>}
+          </div>
+
+          {/* 多环境预设 Profiles */}
+          <div className="form-group">
+            <label htmlFor="field-profiles">环境预设 (Profiles)</label>
+            <textarea
+              id="field-profiles"
+              rows={3}
+              value={form.profiles_text ?? ""}
+              placeholder={"每行「标识: 启动命令」或「标识: 标签 | 启动命令 [| 端口]」，例如：\ndev: 本地开发 | pnpm dev | 3000\nprod: 生产预览 | pnpm preview | 4173"}
+              onChange={(e) => handleChange("profiles_text", e.target.value)}
+              className={errors.profiles_text ? "invalid" : ""}
+            />
+            {errors.profiles_text && <span className="field-error">{errors.profiles_text}</span>}
+          </div>
+
+          {/* 默认环境 */}
+          <div className="form-group">
+            <label htmlFor="field-default-profile">默认启动环境</label>
+            <input
+              id="field-default-profile"
+              type="text"
+              value={form.default_profile ?? ""}
+              placeholder="留空则使用默认启动命令，或填写上面的环境标识（如 dev）"
+              onChange={(e) => handleChange("default_profile", e.target.value)}
+            />
           </div>
 
           {!form.enabled && (

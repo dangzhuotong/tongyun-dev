@@ -26,7 +26,7 @@ java = "17"
 health_url = "http://127.0.0.1:8081/actuator/health"
 start = ["bash", "-c", "exec mvn spring-boot:run"]
 
-# Vite 前端（pnpm），Node 20。使用 port_mode = "arg" 自动追加端口参数。
+# Vite 前端（pnpm），Node 20。使用 port_mode = "arg" 自动追加端口参数。支持配置多个网页链接及多环境预设。
 [projects.demo_web]
 name = "Demo Web"
 group = "demo"
@@ -37,6 +37,20 @@ background = true
 node = "20"
 health_url = "http://127.0.0.1:5173/"
 start = ["bash", "-c", "exec pnpm dev --host 127.0.0.1"]
+links = [
+  { title = "前端主页", url = "http://127.0.0.1:5173/" },
+  { title = "管理后台", url = "http://127.0.0.1:5173/admin" },
+]
+default_profile = "dev"
+
+[projects.demo_web.profiles.dev]
+label = "开发环境"
+start = "pnpm dev --host 127.0.0.1"
+
+[projects.demo_web.profiles.mock]
+label = "Mock 联调"
+start = "pnpm dev:mock"
+port = 5174
 
 # Monorepo 前端（Turbo / pnpm workspaces）：脚本自带参数解析或不接受 --port，端口传递方式选 none（端口仅用于探活）。
 [projects.demo_monorepo]

@@ -36,6 +36,9 @@ enum Cmd {
     /// Start a project and wait until the login page / port responds
     Start {
         id: String,
+        /// Profile name to launch with (e.g. dev, prod)
+        #[arg(long)]
+        profile: Option<String>,
         /// Open the project page in the browser after starting
         #[arg(long, conflicts_with = "json")]
         open: bool,
@@ -48,6 +51,9 @@ enum Cmd {
     /// Stop, start again and wait for readiness
     Restart {
         id: String,
+        /// Profile name to launch with (e.g. dev, prod)
+        #[arg(long)]
+        profile: Option<String>,
         #[arg(long, conflicts_with = "json")]
         open: bool,
         #[arg(long)]
@@ -92,11 +98,21 @@ enum Cmd {
         #[arg(long, default_value_t = 80)]
         lines: usize,
     },
-    /// Open the project page in the browser (or the project folder with --dir)
+    /// Open the project page in the browser (or the project folder with --dir, or all links with --all)
     Open {
         id: String,
         #[arg(long)]
         dir: bool,
+        /// Open all configured web links
+        #[arg(long, conflicts_with = "dir")]
+        all: bool,
+    },
+    /// Launch the project in an interactive external system terminal
+    Terminal {
+        id: String,
+        /// Profile name to launch with
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Register a new project in your config file (comments are kept)
     Add {
@@ -302,11 +318,11 @@ fn run_machine_operation(config: Option<&std::path::Path>, cmd: &Cmd) -> Result<
     let result: Result<()> = (|| {
         let loaded = loaded.as_ref().map_err(|e| anyhow::anyhow!("{e:#}"))?;
         let next = match cmd {
-            Cmd::Start { timeout, .. } => {
-                loaded.start_with_timeout(id, timeout.map(Duration::from_secs))?
+            Cmd::Start { timeout, profile, .. } => {
+                loaded.start_with_profile(id, profile.as_deref(), timeout.map(Duration::from_secs))?
             }
-            Cmd::Restart { timeout, .. } => {
-                loaded.restart_with_timeout(id, timeout.map(Duration::from_secs))?
+            Cmd::Restart { timeout, profile, .. } => {
+                loaded.restart_with_profile(id, profile.as_deref(), timeout.map(Duration::from_secs))?
             }
             Cmd::Stop { .. } => loaded.stop(id)?,
             Cmd::Install { .. } => loaded.install_deps_blocking(id)?,
@@ -420,20 +436,22 @@ fn main() -> Result<()> {
         Cmd::List { json, with_groups } => print_list(&loaded, json, with_groups)?,
         Cmd::Start {
             ref id,
+            ref profile,
             open,
             timeout,
             ..
         }
         | Cmd::Restart {
             ref id,
+            ref profile,
             open,
             timeout,
             ..
         } => {
             match if matches!(cmd, Cmd::Restart { .. }) {
-                loaded.restart_with_timeout(id, timeout.map(Duration::from_secs))
+                loaded.restart_with_profile(id, profile.as_deref(), timeout.map(Duration::from_secs))
             } else {
-                loaded.start_with_timeout(id, timeout.map(Duration::from_secs))
+                loaded.start_with_profile(id, profile.as_deref(), timeout.map(Duration::from_secs))
             } {
                 Ok(st) => {
                     print_status(&st, false)?;
@@ -520,12 +538,20 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Open { id, dir } => {
+        Cmd::Open { id, dir, all } => {
             if dir {
                 tongyun_dev_core::open_path(&loaded.root_dir(&id)?)?;
+            } else if all {
+                for link in loaded.page_urls(&id)? {
+                    tongyun_dev_core::open_url(&link.url)?;
+                }
             } else {
                 tongyun_dev_core::open_url(&loaded.page_url(&id)?)?;
             }
+        }
+        Cmd::Terminal { id, profile } => {
+            loaded.open_in_terminal(&id, profile.as_deref())?;
+            println!("已在外部终端打开 `{id}`");
         }
         Cmd::Add {
             id,

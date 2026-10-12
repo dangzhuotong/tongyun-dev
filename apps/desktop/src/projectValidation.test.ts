@@ -3,8 +3,12 @@ import {
   buildEditRequest,
   formatAutoAnswersLines,
   formatEnvLines,
+  formatLinksLines,
+  formatProfilesLines,
   parseAutoAnswersLines,
   parseEnvLines,
+  parseLinksLines,
+  parseProfilesLines,
   validateProjectForm,
   type EditBaseline,
   type ProjectFormData,
@@ -530,6 +534,123 @@ describe("validateProjectForm env & auto_answers validation", () => {
     });
     expect(errors.env_text).toBeUndefined();
     expect(errors.auto_answers_text).toBeUndefined();
+  });
+
+  it("validates links_text format and reports error on empty url", () => {
+    const errors = validateProjectForm({
+      ...baseValid,
+      links_text: "前台 =>",
+    });
+    expect(errors.links_text).toBeDefined();
+    expect(errors.links_text).toContain("URL 不能为空");
+
+    const validLinks = validateProjectForm({
+      ...baseValid,
+      links_text: "前台 => http://localhost:3000\n后台 => http://localhost:8080/admin\nhttp://localhost:9099",
+    });
+    expect(validLinks.links_text).toBeUndefined();
+  });
+
+  it("validates profiles_text format and reports error on invalid profile key", () => {
+    const errors = validateProjectForm({
+      ...baseValid,
+      profiles_text: "invalid key!: pnpm dev",
+    });
+    expect(errors.profiles_text).toBeDefined();
+    expect(errors.profiles_text).toContain("环境配置标识只能包含字母、数字");
+
+    const validProfiles = validateProjectForm({
+      ...baseValid,
+      profiles_text: "dev: pnpm dev\nprod: 生产预览 | pnpm preview | 4173",
+    });
+    expect(validProfiles.profiles_text).toBeUndefined();
+  });
+});
+
+describe("parseLinksLines & formatLinksLines", () => {
+  it("parses and formats web links correctly", () => {
+    const raw = "主页 => http://localhost:3000\nhttp://localhost:8080\n文档 => http://localhost:3000/docs";
+    const { links, error } = parseLinksLines(raw);
+    expect(error).toBeUndefined();
+    expect(links).toHaveLength(3);
+    expect(links[0]).toEqual({ title: "主页", url: "http://localhost:3000" });
+    expect(links[1]).toEqual({ title: "http://localhost:8080", url: "http://localhost:8080" });
+    expect(links[2]).toEqual({ title: "文档", url: "http://localhost:3000/docs" });
+
+    const formatted = formatLinksLines(links);
+    expect(formatted).toBe("主页 => http://localhost:3000\nhttp://localhost:8080\n文档 => http://localhost:3000/docs");
+  });
+});
+
+describe("parseProfilesLines & formatProfilesLines", () => {
+  it("parses single command, label+cmd, label+cmd+port, cmd+port profiles", () => {
+    const raw = [
+      "dev: pnpm dev",
+      "staging: 预发环境 | pnpm dev:stage",
+      "prod: 生产预览 | pnpm preview | 4173",
+      "test: pnpm test | 3001",
+    ].join("\n");
+    const { profiles, error } = parseProfilesLines(raw);
+    expect(error).toBeUndefined();
+    expect(profiles.dev).toEqual({ start: "pnpm dev" });
+    expect(profiles.staging).toEqual({ label: "预发环境", start: "pnpm dev:stage" });
+    expect(profiles.prod).toEqual({ label: "生产预览", start: "pnpm preview", port: 4173 });
+    expect(profiles.test).toEqual({ start: "pnpm test", port: 3001 });
+
+    const formatted = formatProfilesLines(profiles);
+    expect(formatted).toContain("dev: pnpm dev");
+    expect(formatted).toContain("staging: 预发环境 | pnpm dev:stage");
+    expect(formatted).toContain("prod: 生产预览 | pnpm preview | 4173");
+    expect(formatted).toContain("test: pnpm test | 3001");
+  });
+});
+
+describe("buildEditRequest with links, profiles and default_profile", () => {
+  const base: EditBaseline = {
+    name: "Demo",
+    root: "/demo",
+    start: "pnpm dev",
+    start_editable: true,
+    stop: "",
+    stop_editable: true,
+    port: 3000,
+    login_url: "",
+    health_url: "",
+    log_file: "",
+    enabled: true,
+    reason: "",
+    links: [{ title: "旧链接", url: "http://old" }],
+    default_profile: "dev",
+    profiles: { dev: { start: "pnpm dev" } },
+  };
+
+  const form: ProjectFormData = {
+    id: "demo",
+    name: "Demo",
+    root: "/demo",
+    start: "pnpm dev",
+    stop: "",
+    port: 3000,
+    login_url: "",
+    health_url: "",
+    log_file: "",
+    node: "",
+    java: "",
+    enabled: true,
+    reason: "",
+    start_timeout_secs: "",
+    links_text: "新链接 => http://new",
+    default_profile: "prod",
+    profiles_text: "prod: 生产 | pnpm preview | 4173",
+  };
+
+  it("detects changes in links, default_profile, profiles", () => {
+    const req = buildEditRequest(base, form);
+    expect(req.default_profile).toBe("prod");
+    expect(req.links).toEqual([{ title: "新链接", url: "http://new" }]);
+    expect(req.profiles).toEqual({
+      prod: { label: "生产", start: "pnpm preview", port: 4173 },
+    });
   });
 });
 

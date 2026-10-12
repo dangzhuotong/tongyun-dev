@@ -234,6 +234,9 @@ pub fn overview(loaded: &Loaded) -> Result<Vec<Value>> {
             m.insert("java_home".into(), json!(row.java_home));
             m.insert("node_home".into(), json!(row.node_home));
             m.insert("shell".into(), json!(row.shell));
+            m.insert("links".into(), json!(row.links));
+            m.insert("default_profile".into(), json!(row.default_profile));
+            m.insert("profiles".into(), json!(row.profiles));
         }
         out.push(v);
     }
@@ -483,16 +486,29 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                     }
                 };
             }
-            let action = ["start", "stop", "restart", "install", "open", "open-dir"]
+            let action = ["start", "stop", "restart", "install", "open", "open-dir", "terminal"]
                 .into_iter()
                 .find_map(|a| project_route(path, a).map(|id| (a, id)));
             let Some((action, id)) = action else {
                 return err_json(404, "not found");
             };
+            #[derive(serde::Deserialize, Default)]
+            struct ActionBody {
+                #[serde(default)]
+                profile: Option<String>,
+            }
+            let body_action: ActionBody = serde_json::from_slice(&req.body).unwrap_or_default();
             let res: Result<Value> = match action {
-                "start" => loaded.start_detached(id).map(|st| json!({"status": st})),
+                "start" => loaded
+                    .start_detached_with_profile(id, body_action.profile.as_deref())
+                    .map(|st| json!({"status": st})),
                 "stop" => loaded.stop(id).map(|st| json!({"status": st})),
-                "restart" => loaded.restart_detached(id).map(|st| json!({"status": st})),
+                "restart" => loaded
+                    .restart_detached_with_profile(id, body_action.profile.as_deref())
+                    .map(|st| json!({"status": st})),
+                "terminal" => loaded
+                    .open_in_terminal(id, body_action.profile.as_deref())
+                    .map(|_| json!({"terminal": true})),
                 "install" => loaded.install_deps(id).map(|st| json!({"status": st})),
                 "open" => loaded
                     .page_url(id)

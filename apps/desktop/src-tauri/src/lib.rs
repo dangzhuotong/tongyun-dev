@@ -38,10 +38,10 @@ async fn project_status(id: String) -> Result<StatusJson, String> {
 }
 
 #[tauri::command]
-async fn start_project(id: String) -> Result<StatusJson, String> {
+async fn start_project(id: String, profile: Option<String>) -> Result<StatusJson, String> {
     blocking(move || {
         tongyun_dev_core::load(None)
-            .and_then(|loaded| loaded.start_detached(&id))
+            .and_then(|loaded| loaded.start_detached_with_profile(&id, profile.as_deref()))
             .map_err(report)
     })
     .await
@@ -69,12 +69,29 @@ async fn install_deps(id: String) -> Result<StatusJson, String> {
 }
 
 #[tauri::command]
-async fn restart_project(id: String) -> Result<StatusJson, String> {
+async fn restart_project(id: String, profile: Option<String>) -> Result<StatusJson, String> {
     blocking(move || {
         let loaded = tongyun_dev_core::load(None).map_err(report)?;
-        loaded.restart_detached(&id).map_err(report)
+        loaded.restart_detached_with_profile(&id, profile.as_deref()).map_err(report)
     })
     .await
+}
+
+#[tauri::command]
+async fn open_terminal(id: String, profile: Option<String>) -> Result<(), String> {
+    blocking(move || {
+        let loaded = tongyun_dev_core::load(None).map_err(report)?;
+        loaded.open_in_terminal(&id, profile.as_deref()).map_err(report)
+    })
+    .await
+}
+
+#[tauri::command]
+fn open_pages(urls: Vec<String>) -> Result<(), String> {
+    for url in urls {
+        tongyun_dev_core::open_url(&url).map_err(report)?;
+    }
+    Ok(())
 }
 
 /// Open the log file with the system default program (opener shared with the CLI / web console).
@@ -298,7 +315,9 @@ pub fn run() {
             import_scanned,
             create_group,
             set_project_group,
-            send_input
+            send_input,
+            open_terminal,
+            open_pages
         ])
         .run(tauri::generate_context!())
         .expect("error while running tongyun-dev");

@@ -34,6 +34,13 @@
 #   env         额外环境变量（可选，例如 env = { CI = "1", APP_ENV = "dev" }）；注入启动和依赖安装环境，用户显式配置的值优先
 #   pty         是否使用伪终端运行（可选，缺省 false）。交互式启动脚本（如提示选环境、确认项）需设为 true
 #   auto_answers 自动应答规则数组（可选，例如 auto_answers = [ { expect = "Select environment", send = "dev" }, { expect = "(y/N)", send = "y" } ]）。命中 expect 时自动向标准输入发送 send 并回车，默认每条规则只触发一次（once = true）
+#   links       快捷网页链接列表（可选，例如 links = [ { title = "前台", url = "http://127.0.0.1:3000" }, { title = "接口文档", url = "http://127.0.0.1:8081/swagger-ui.html" } ]）
+#   default_profile 默认启动环境名称（可选，如 "dev"）
+#   [projects.<id>.profiles.<name>] 多启动环境预设（可选）：
+#                 label = "开发环境"
+#                 start = "pnpm dev"
+#                 port = 3000
+#                 env = { NODE_ENV = "development" }
 #
 # 分组定义（可选）：
 # [group.<key>]

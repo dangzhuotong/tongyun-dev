@@ -8,7 +8,16 @@ import {
   type QuickButton,
   resolveKeyboardInput,
 } from "./inputKeys";
-import { ArrowDownIcon, ChevronDownIcon, ChevronUpIcon, FileIcon, PauseIcon, SearchIcon, XIcon } from "./icons";
+import {
+  ArrowDownIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
+  FileIcon,
+  PauseIcon,
+  SearchIcon,
+  TerminalIcon,
+  XIcon,
+} from "./icons";
 
 export type LogPanelProps = {
   log: LogTail | null;
@@ -18,6 +27,7 @@ export type LogPanelProps = {
   selected: string;
   running?: boolean;
   onSendInput?: (params: InputPayload) => Promise<void>;
+  onOpenTerminal?: () => void;
 };
 
 export function LogPanel({
@@ -28,6 +38,7 @@ export function LogPanel({
   selected,
   running = false,
   onSendInput,
+  onOpenTerminal,
 }: LogPanelProps) {
   const [query, setQuery] = useState("");
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
@@ -288,6 +299,17 @@ export function LogPanel({
             <FileIcon />
             打开文件
           </button>
+          {onOpenTerminal && (
+            <button
+              type="button"
+              className="log-btn"
+              onClick={onOpenTerminal}
+              title="在外部系统终端中运行（完美支持箭头选择等 CLI 交互）"
+            >
+              <TerminalIcon />
+              独立终端
+            </button>
+          )}
         </div>
       </div>
 
@@ -374,6 +396,16 @@ export function LogPanel({
               {btn.label}
             </button>
           ))}
+          {onOpenTerminal && (
+            <button
+              type="button"
+              className="log-input-btn log-term-shortcut"
+              onClick={onOpenTerminal}
+              title="命令行出现选项无法选择？点击在独立终端中交互运行"
+            >
+              <TerminalIcon /> 独立终端 ↗
+            </button>
+          )}
         </div>
       </div>
     </section>

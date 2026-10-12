@@ -79,6 +79,10 @@ svg {
   transition: background 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s;
 }
 
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
 .btn svg {
   width: 15px;
   height: 15px;
@@ -231,6 +235,23 @@ svg {
 .pill-port_open {
   background: var(--ty-matcha-tint);
   color: var(--ty-matcha);
+}
+
+.pill-ready .pill-dot,
+.pill-port_open .pill-dot {
+  animation: ty-pulse-glow 2.2s infinite ease-out;
+}
+
+@keyframes ty-pulse-glow {
+  0% {
+    box-shadow: 0 0 0 0 rgba(77, 124, 93, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(77, 124, 93, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(77, 124, 93, 0);
+  }
 }
 
 .pill-starting {
@@ -966,6 +987,120 @@ mark {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+
+/* 当前活跃环境徽标 */
+.profile-active-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--ty-radius-pill);
+  background: var(--ty-matcha-tint);
+  border: 1px solid var(--ty-matcha-soft);
+  color: var(--ty-matcha-hover);
+  font-size: var(--ty-font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  box-shadow: 0 1px 3px rgba(77, 124, 93, 0.12);
+}
+
+/* 环境下拉选择器 */
+.profile-selector-container {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 8px;
+  background: var(--ty-surface);
+  border: 1px solid var(--ty-border);
+  border-radius: var(--ty-radius-sm);
+  box-shadow: 0 1px 1px rgba(120, 110, 95, 0.05);
+  transition: border-color 0.15s;
+}
+
+.profile-selector-container:focus-within {
+  border-color: var(--ty-matcha);
+  box-shadow: var(--ty-focus-ring);
+}
+
+.profile-selector-label {
+  font-size: var(--ty-font-size-sm);
+  color: var(--ty-text-muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.profile-selector-select {
+  border: none;
+  background: transparent;
+  color: var(--ty-text);
+  font-size: var(--ty-font-size-sm);
+  font-weight: 500;
+  cursor: pointer;
+  outline: none;
+  padding-right: 4px;
+}
+
+/* 多链接分裂按钮与下拉 */
+.pages-split-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.pages-primary-btn {
+  border-top-right-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+  border-right: 1px solid rgba(255, 255, 255, 0.25) !important;
+}
+
+.pages-dropdown-toggle {
+  border-top-left-radius: 0 !important;
+  border-bottom-left-radius: 0 !important;
+  padding: 0 6px !important;
+  min-width: 24px;
+}
+
+.pages-dropdown-toggle svg {
+  width: 14px;
+  height: 14px;
+}
+
+.pages-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 200px;
+  z-index: 100;
+  box-shadow: var(--ty-shadow-pop);
+}
+
+.pages-open-all-btn {
+  font-weight: 600;
+  color: var(--ty-matcha) !important;
+}
+
+/* 终端按钮及快捷按键 */
+.btn-terminal-header {
+  border-color: var(--ty-border);
+}
+
+.btn-terminal-header:hover {
+  background: var(--ty-surface-raised);
+  border-color: var(--ty-border-strong);
+}
+
+.log-term-shortcut {
+  background: rgba(143, 193, 157, 0.15) !important;
+  color: #a8dfb5 !important;
+  border-color: rgba(143, 193, 157, 0.3) !important;
+  font-weight: 600 !important;
+}
+
+.log-term-shortcut:hover {
+  background: rgba(143, 193, 157, 0.28) !important;
 }
 
 .detail-body {

@@ -151,6 +151,11 @@ describe("buildEditRequest (只提交改过的字段)", () => {
       buildEditRequest({ ...base, enabled: false, reason: "未配置", port: 0 }, form({ port: "8302" }))
     ).toEqual({ enabled: true, reason: "", port: 8302 });
   });
+  it("修改分组时提交 group，清空分组时发空串", () => {
+    expect(buildEditRequest(base, form({ group: "demo" }))).toEqual({ group: "demo" });
+    const baseWithGroup = { ...base, group: "demo" };
+    expect(buildEditRequest(baseWithGroup, form({ group: "" }))).toEqual({ group: "" });
+  });
 });
 
 describe("buildEditRequest auto_install（缺 node_modules 自动装依赖）", () => {

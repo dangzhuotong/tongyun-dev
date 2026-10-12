@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  generateGroupKey,
   getProjectGroup,
   groupProjects,
   isGroupCollapsed,
@@ -160,6 +161,8 @@ describe("projectGroups (项目分组与排序逻辑)", () => {
       expect(
         shouldShowGroupHeaders([
           {
+            key: "ungrouped",
+            label: UNGROUPED_NAME,
             name: UNGROUPED_NAME,
             isUngrouped: true,
             visibleProjects: [],
@@ -174,6 +177,8 @@ describe("projectGroups (项目分组与排序逻辑)", () => {
       expect(
         shouldShowGroupHeaders([
           {
+            key: "fe",
+            label: "前端",
             name: "前端",
             isUngrouped: false,
             visibleProjects: [],
@@ -186,6 +191,8 @@ describe("projectGroups (项目分组与排序逻辑)", () => {
       expect(
         shouldShowGroupHeaders([
           {
+            key: "fe",
+            label: "前端",
             name: "前端",
             isUngrouped: false,
             visibleProjects: [],
@@ -193,6 +200,8 @@ describe("projectGroups (项目分组与排序逻辑)", () => {
             runningCount: 0,
           },
           {
+            key: "ungrouped",
+            label: UNGROUPED_NAME,
             name: UNGROUPED_NAME,
             isUngrouped: true,
             visibleProjects: [],
@@ -216,6 +225,80 @@ describe("projectGroups (项目分组与排序逻辑)", () => {
       expect(isGroupCollapsed("前端", collapsedMap, false)).toBe(true);
       expect(isGroupCollapsed("后端", collapsedMap, false)).toBe(false);
       expect(isGroupCollapsed("其他", collapsedMap, false)).toBe(false);
+    });
+  });
+
+  describe("generateGroupKey", () => {
+    it("lowercases ascii alphanumeric keys", () => {
+      expect(generateGroupKey("Demo", [])).toBe("demo");
+      expect(generateGroupKey("API_v2", [])).toBe("api_v2");
+      expect(generateGroupKey("web-app", [])).toBe("web-app");
+    });
+
+    it("replaces illegal ascii characters with hyphens", () => {
+      expect(generateGroupKey("Demo Service", [])).toBe("demo-service");
+      expect(generateGroupKey("Foo@Bar#123", [])).toBe("foo-bar-123");
+      expect(generateGroupKey("  --hello..world-- ", [])).toBe("hello-world");
+    });
+
+    it("generates g1, g2... for non-ascii labels", () => {
+      expect(generateGroupKey("前端项目", [])).toBe("g1");
+      expect(generateGroupKey("后端项目", ["g1"])).toBe("g2");
+      expect(generateGroupKey("微服务", ["g1", "g2"])).toBe("g3");
+    });
+
+    it("falls back to gN when ascii key already exists", () => {
+      expect(generateGroupKey("demo", ["demo"])).toBe("g1");
+      expect(generateGroupKey("demo", ["demo", "g1"])).toBe("g2");
+    });
+  });
+
+  describe("groupProjects with groups array", () => {
+    const projects: FilterProject[] = [
+      { id: "api", name: "Demo API", root: "/api", port: 8080, configured: true, enabled: true, group: "demo" },
+      { id: "web", name: "Demo Web", root: "/web", port: 5173, configured: true, enabled: true, group: "demo" },
+      { id: "other", name: "Other", root: "/other", port: 9000, configured: true, enabled: true, group: "unregistered" },
+      { id: "misc", name: "Misc", root: "/misc", port: 3000, configured: true, enabled: true, group: null },
+    ];
+
+    it("preserves group order and labels, supports empty groups and unregistered groups", () => {
+      const groups = [
+        { key: "demo", label: "Demo 业务线", order: 1 },
+        { key: "empty", label: "空分组", order: 2 },
+      ];
+      const sections = groupProjects({
+        allProjects: projects,
+        visibleProjects: projects,
+        statuses: {
+          api: { state: "ready" },
+          web: { state: "stopped" },
+          other: { state: "stopped" },
+          misc: { state: "stopped" },
+        },
+        groups,
+      });
+
+      expect(sections).toHaveLength(4);
+      // 1. demo
+      expect(sections[0].key).toBe("demo");
+      expect(sections[0].label).toBe("Demo 业务线");
+      expect(sections[0].totalCount).toBe(2);
+      expect(sections[0].runningCount).toBe(1);
+
+      // 2. empty group preserved
+      expect(sections[1].key).toBe("empty");
+      expect(sections[1].label).toBe("空分组");
+      expect(sections[1].totalCount).toBe(0);
+
+      // 3. unregistered group referenced by project
+      expect(sections[2].key).toBe("unregistered");
+      expect(sections[2].label).toBe("unregistered");
+      expect(sections[2].totalCount).toBe(1);
+
+      // 4. ungrouped at the end
+      expect(sections[3].isUngrouped).toBe(true);
+      expect(sections[3].label).toBe(UNGROUPED_NAME);
+      expect(sections[3].totalCount).toBe(1);
     });
   });
 });

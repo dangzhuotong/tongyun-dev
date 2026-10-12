@@ -26,10 +26,16 @@ export type Project = {
 
 export type ProjectRow = Project;
 
+export type GroupInfo = {
+  key: string;
+  label: string;
+  order: number | null;
+};
+
 export type ProjectList = {
   config_path: string;
   projects: Project[];
-  group_order?: string[];
+  groups?: GroupInfo[];
 };
 
 export type LoginProbe = {

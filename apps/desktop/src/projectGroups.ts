@@ -1,6 +1,7 @@
-import type { LifeState, Project, Status } from "./types";
+import type { GroupInfo, LifeState, Project, Status } from "./types";
 
 export const UNGROUPED_NAME = "未分组";
+export const UNGROUPED_KEY = "";
 
 export type FilterProject = Pick<Project, "id" | "name" | "root" | "port" | "configured" | "enabled" | "group">;
 export type FilterStatus = Pick<Status, "state"> | { state: LifeState } | undefined | null;
@@ -22,7 +23,16 @@ export function isProjectRunning(
 }
 
 /**
- * 获取项目所属组名。
+ * 获取项目所属组 key。
+ * 未设置 group 或 group 为空字符串时归入 UNGROUPED_KEY ("")。
+ */
+export function getProjectGroupKey(project: { group?: string | null }): string {
+  const g = project.group?.trim();
+  return g ? g : UNGROUPED_KEY;
+}
+
+/**
+ * 兼容旧接口：获取项目所属组名。
  * 未设置 group 或 group 为空字符串时归入「未分组」。
  */
 export function getProjectGroup(project: { group?: string | null }): string {
@@ -31,7 +41,34 @@ export function getProjectGroup(project: { group?: string | null }): string {
 }
 
 /**
- * 对分组名列表进行排序：
+ * 自动根据用户输入的显示名生成 group key：
+ * ASCII 转小写、非法字符换连字符（1-40 字符，^[a-z0-9_-]+$）；
+ * 非 ASCII、空名或 key 已存在时用 g1、g2… 递增避开已有。
+ */
+export function generateGroupKey(label: string, existingKeys: string[] = []): string {
+  const trimmed = label.trim();
+  const isAscii = /^[\x00-\x7F]+$/.test(trimmed);
+  if (isAscii && trimmed.length > 0) {
+    let candidate = trimmed
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    if (candidate.length > 40) {
+      candidate = candidate.slice(0, 40).replace(/-+$/, "");
+    }
+    if (candidate.length > 0 && !existingKeys.includes(candidate)) {
+      return candidate;
+    }
+  }
+  let idx = 1;
+  while (existingKeys.includes(`g${idx}`)) {
+    idx++;
+  }
+  return `g${idx}`;
+}
+
+/**
+ * 对分组名列表进行排序（兼容旧接口）：
  * 1. 若配置了 group_order，则在 group_order 中的分组按照其在 group_order 中的顺序排在最前；
  * 2. 未在 group_order 中（或未配置 group_order）的分组按中文/名称本地化字典序排序；
  * 3. 「未分组」永远排在最后（无论 group_order 是否显式包含）。
@@ -63,8 +100,14 @@ export function sortGroupNames(names: string[], groupOrder?: string[]): string[]
 }
 
 export interface GroupSection<P> {
-  /** 组名 */
+  /** 组 key */
+  key: string;
+  /** 组显示名 */
+  label: string;
+  /** 兼容旧代码，同 label */
   name: string;
+  /** 排序序号（可选） */
+  order?: number | null;
   /** 是否为未分组 */
   isUngrouped: boolean;
   /** 当前可见的项目列表（经过过滤） */
@@ -82,9 +125,11 @@ export interface GroupProjectsParams<P> {
   visibleProjects: P[];
   /** 状态映射表 */
   statuses: Record<string, FilterStatus>;
-  /** 配置文件顶层指定的组排序 */
+  /** 顶层定义的 groups（来自 core list 输出） */
+  groups?: GroupInfo[];
+  /** 配置文件顶层指定的组排序（兼容旧参数） */
   groupOrder?: string[];
-  /** 用户本地临时新建的空分组 */
+  /** 用户本地临时新建的空分组（兼容旧参数） */
   customGroups?: string[];
   /** 是否处于搜索/筛选激活状态 */
   isFiltering?: boolean;
@@ -92,18 +137,112 @@ export interface GroupProjectsParams<P> {
 
 /**
  * 将项目按分组整理为 GroupSection 结构。
+ * 优先按照 list 输出的 groups 顺序和 label 决定分组展示，
+ * 成员来自项目 group 字段；
+ * 未定义在 groups 中的项目引用的 group 也会作为同名组展示；
+ * 空分组正常展示；「未分组」永远排在最后。
  */
 export function groupProjects<P extends FilterProject>({
   allProjects,
   visibleProjects,
   statuses,
+  groups,
   groupOrder,
   customGroups = [],
   isFiltering = false,
 }: GroupProjectsParams<P>): GroupSection<P>[] {
+  // 新结构：传入 groups 数组（来自 core list 输出）
+  if (groups !== undefined) {
+    const groupKeyMap = new Map<
+      string,
+      { label: string; order: number | null; all: P[]; visible: P[] }
+    >();
+
+    for (const g of groups) {
+      groupKeyMap.set(g.key, {
+        label: g.label || g.key,
+        order: g.order ?? null,
+        all: [],
+        visible: [],
+      });
+    }
+
+    for (const cg of customGroups) {
+      const trimmed = cg.trim();
+      if (trimmed && trimmed !== UNGROUPED_NAME && !groupKeyMap.has(trimmed)) {
+        groupKeyMap.set(trimmed, { label: trimmed, order: null, all: [], visible: [] });
+      }
+    }
+
+    const ungroupedAll: P[] = [];
+    const ungroupedVisible: P[] = [];
+
+    for (const p of allProjects) {
+      const k = p.group?.trim();
+      if (!k) {
+        ungroupedAll.push(p);
+      } else {
+        if (!groupKeyMap.has(k)) {
+          groupKeyMap.set(k, { label: k, order: null, all: [], visible: [] });
+        }
+        groupKeyMap.get(k)!.all.push(p);
+      }
+    }
+
+    for (const p of visibleProjects) {
+      const k = p.group?.trim();
+      if (!k) {
+        ungroupedVisible.push(p);
+      } else {
+        if (!groupKeyMap.has(k)) {
+          groupKeyMap.set(k, { label: k, order: null, all: [], visible: [] });
+        }
+        groupKeyMap.get(k)!.visible.push(p);
+      }
+    }
+
+    const sections: GroupSection<P>[] = [];
+
+    for (const [key, data] of groupKeyMap.entries()) {
+      if (isFiltering && data.visible.length === 0) {
+        continue;
+      }
+      const runningCount = data.all.filter((p) => isProjectRunning(p, statuses[p.id])).length;
+      sections.push({
+        key,
+        label: data.label,
+        name: data.label,
+        order: data.order,
+        isUngrouped: false,
+        visibleProjects: data.visible,
+        totalCount: data.all.length,
+        runningCount,
+      });
+    }
+
+    // 「未分组」永远在最后
+    if (ungroupedAll.length > 0 || sections.length === 0) {
+      if (!isFiltering || ungroupedVisible.length > 0) {
+        const runningCount = ungroupedAll.filter((p) => isProjectRunning(p, statuses[p.id])).length;
+        sections.push({
+          key: UNGROUPED_KEY,
+          label: UNGROUPED_NAME,
+          name: UNGROUPED_NAME,
+          order: null,
+          isUngrouped: true,
+          visibleProjects: ungroupedVisible,
+          totalCount: ungroupedAll.length,
+          runningCount,
+        });
+      }
+    }
+
+    return sections;
+  }
+
+  // 兼容回退逻辑：按 group 名称归类
   const groupMap = new Map<string, { all: P[]; visible: P[] }>();
 
-  // 1. 初始化用户新建的分组
   for (const cg of customGroups) {
     const trimmed = cg.trim();
     if (trimmed && trimmed !== UNGROUPED_NAME && !groupMap.has(trimmed)) {
@@ -111,7 +250,6 @@ export function groupProjects<P extends FilterProject>({
     }
   }
 
-  // 2. 归类全部项目
   for (const p of allProjects) {
     const g = getProjectGroup(p);
     if (!groupMap.has(g)) {
@@ -120,7 +258,6 @@ export function groupProjects<P extends FilterProject>({
     groupMap.get(g)!.all.push(p);
   }
 
-  // 3. 归类当前可见项目
   for (const p of visibleProjects) {
     const g = getProjectGroup(p);
     if (!groupMap.has(g)) {
@@ -129,23 +266,20 @@ export function groupProjects<P extends FilterProject>({
     groupMap.get(g)!.visible.push(p);
   }
 
-  // 4. 对组名排序
   const sortedNames = sortGroupNames(Array.from(groupMap.keys()), groupOrder);
-
-  // 5. 组装 sections
   const sections: GroupSection<P>[] = [];
   for (const name of sortedNames) {
     const data = groupMap.get(name)!;
     const isUngrouped = name === UNGROUPED_NAME;
 
-    // 搜索过滤时：没匹配的组隐藏
     if (isFiltering && data.visible.length === 0) {
       continue;
     }
 
     const runningCount = data.all.filter((p) => isProjectRunning(p, statuses[p.id])).length;
-
     sections.push({
+      key: isUngrouped ? UNGROUPED_KEY : name,
+      label: name,
       name,
       isUngrouped,
       visibleProjects: data.visible,
@@ -174,12 +308,12 @@ export function shouldShowGroupHeaders<P>(sections: GroupSection<P>[]): boolean 
  * 未搜索过滤时：根据 localStorage 记录判断（缺省为 false / 展开）。
  */
 export function isGroupCollapsed(
-  groupName: string,
+  groupKey: string,
   collapsedMap: Record<string, boolean>,
   isFiltering = false
 ): boolean {
   if (isFiltering) {
     return false;
   }
-  return Boolean(collapsedMap[groupName]);
+  return Boolean(collapsedMap[groupKey]);
 }

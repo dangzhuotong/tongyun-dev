@@ -348,6 +348,100 @@ fn is_process_alive(pid: u32) -> bool {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn controlling_tty_nr(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = stat.rsplit_once(')')?.1;
+    let mut fields = rest.split_whitespace();
+    fields.next()?;
+    fields.next()?;
+    fields.next()?;
+    fields.next()?;
+    fields.next()?.parse().ok()
+}
+
+#[cfg(unix)]
+fn process_pgid(pid: u32) -> Option<u32> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+#[cfg(unix)]
+fn process_argv0(pid: u32) -> String {
+    let proc_path = format!("/proc/{pid}/cmdline");
+    if let Ok(raw) = fs::read(proc_path) {
+        let text = String::from_utf8_lossy(&raw);
+        return text.split('\0').next().unwrap_or("").to_string();
+    }
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "args="])
+        .output();
+    let Ok(out) = output else {
+        return String::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+#[cfg(unix)]
+fn argv0_base(argv0: &str) -> &str {
+    std::path::Path::new(argv0)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(argv0)
+}
+
+#[cfg(unix)]
+fn descendant_pids(root: u32) -> Vec<u32> {
+    let mut result = Vec::new();
+    let mut queue = vec![root];
+    while let Some(parent) = queue.pop() {
+        let Ok(out) = std::process::Command::new("pgrep")
+            .args(["-P", &parent.to_string()])
+            .output()
+        else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if let Ok(cpid) = line.trim().parse::<u32>() {
+                if cpid > 1 && !result.contains(&cpid) {
+                    result.push(cpid);
+                    queue.push(cpid);
+                }
+            }
+        }
+    }
+    result
+}
+
+#[cfg(unix)]
+fn assert_tree_has_no_script(root: u32) {
+    let mut argv0s = vec![process_argv0(root)];
+    for pid in descendant_pids(root) {
+        argv0s.push(process_argv0(pid));
+    }
+    for argv0 in &argv0s {
+        assert_ne!(
+            argv0_base(argv0),
+            "script",
+            "pty path must not exec system script, argv0s={argv0s:?}"
+        );
+    }
+    assert!(
+        argv0s.iter().any(|argv0| argv0_base(argv0) == "sh"),
+        "real start command should be running, argv0s={argv0s:?}"
+    );
+}
+
 #[cfg(unix)]
 fn pgroup_pids(pgid: u32) -> Vec<u32> {
     let output = std::process::Command::new("pgrep")
@@ -903,16 +997,6 @@ log_dir = "{d}/logs"
 #[cfg(unix)]
 #[test]
 fn auto_answers_automatically_answers_prompt() {
-    let script_ok = std::process::Command::new("script")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
-        .unwrap_or(false);
-    if !script_ok {
-        eprintln!("script command not found, skipping auto_answers prompt.sh test");
-        return;
-    }
-
     let dir = temp_dir("auto_answers_test");
     let port = free_port();
     let cfg = dir.join("projects.toml");
@@ -986,27 +1070,161 @@ auto_answers = [
 #[cfg(unix)]
 #[test]
 fn pty_true_outputs_tty_and_cleans_up_on_stop() {
-    let script_ok = std::process::Command::new("script")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
-        .unwrap_or(false);
-    if !script_ok {
-        eprintln!("script command not found, skipping pty tty test");
-        return;
-    }
-
     let dir = temp_dir("pty_tty_test");
     let port = free_port();
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
 
-    let script = "[ -t 0 ] && echo TTY_DETECTED; exec sleep 30";
+    let script =
+        "[ -t 0 ] && echo TTY_DETECTED; echo CI_VAL=$CI; read line; echo got_input=$line; exec sleep 30";
     fs::write(
         &cfg,
         format!(
             r#"[projects.pty_srv]
 name = "PTY Service"
+root = "{d}"
+start = ["sh", "-c", "{script}"]
+background = true
+pty = true
+port = {port}
+log_dir = "{d}/logs"
+env = {{ CI = "pty_ci" }}
+"#
+        ),
+    )
+    .unwrap();
+
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    let _guard = CleanupGuard::new(&loaded, "pty_srv", dir.clone());
+
+    let st = loaded.start_detached("pty_srv").unwrap();
+    assert_eq!(st.state, tongyun_dev_core::LifeState::Starting);
+    let pid = st.pid.expect("pid must exist");
+    assert!(is_process_alive(pid), "pty relay must stay alive");
+    assert_eq!(
+        process_pgid(pid),
+        Some(pid),
+        "pid file must record the relay process group leader"
+    );
+
+    let log_path = dir.join("logs/pty_srv.out");
+    let fifo_path = dir.join("logs/pty_srv.stdin");
+    let answers_path = dir.join("logs/pty_srv.answers.json");
+    assert!(fifo_path.exists(), "FIFO should exist for pty project");
+
+    let start_t = std::time::Instant::now();
+    let mut log_content = String::new();
+    while start_t.elapsed() < Duration::from_secs(5) {
+        if let Ok(c) = fs::read_to_string(&log_path) {
+            log_content = c;
+            if log_content.contains("TTY_DETECTED") && log_content.contains("CI_VAL=pty_ci") {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(log_content.contains("TTY_DETECTED"), "log: {log_content}");
+    assert!(log_content.contains("CI_VAL=pty_ci"), "log: {log_content}");
+    assert!(!log_content.contains("tcgetattr"), "log: {log_content}");
+    assert!(
+        !log_content.contains("Operation not supported"),
+        "log: {log_content}"
+    );
+    assert!(!log_content.contains("setsid failed"), "log: {log_content}");
+    assert!(
+        !log_content.contains("set controlling tty failed"),
+        "log: {log_content}"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let child = descendant_pids(pid)
+            .into_iter()
+            .next()
+            .expect("start command should already be running");
+        let tty_nr = controlling_tty_nr(child).unwrap_or(0);
+        assert!(
+            tty_nr > 0,
+            "child {child} must have a controlling tty, stat tty_nr={tty_nr}"
+        );
+    }
+    assert!(
+        is_process_alive(pid),
+        "pty relay exited early: {log_content}"
+    );
+    assert_tree_has_no_script(pid);
+
+    loaded.send_input("pty_srv", "hello_pty\n").unwrap();
+    let start_t = std::time::Instant::now();
+    while start_t.elapsed() < Duration::from_secs(5) {
+        if let Ok(c) = fs::read_to_string(&log_path) {
+            log_content = c;
+            if log_content.contains("got_input=hello_pty") {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        log_content.contains("got_input=hello_pty"),
+        "log: {log_content}"
+    );
+    assert!(
+        !log_content.contains("› [已发送"),
+        "pty mode must not append a plaintext placeholder from our layer: {log_content}"
+    );
+    assert!(is_process_alive(pid), "pty relay died after input");
+
+    let descendants = descendant_pids(pid);
+    assert!(
+        !descendants.is_empty(),
+        "start command should be a child of the relay"
+    );
+    let group_before = pgroup_pids(pid);
+    assert!(
+        group_before.contains(&pid),
+        "relay group should contain itself, got {group_before:?}"
+    );
+
+    let stopped = loaded.stop("pty_srv").unwrap();
+    assert_eq!(stopped.state, tongyun_dev_core::LifeState::Stopped);
+    assert!(!is_process_alive(pid), "relay must be terminated");
+    for child in descendants {
+        assert!(
+            !is_process_alive(child),
+            "descendant {child} must be terminated"
+        );
+    }
+    let remaining = pgroup_pids(pid);
+    assert!(
+        remaining.is_empty(),
+        "process group must be cleared, got {remaining:?}"
+    );
+    assert!(!fifo_path.exists(), "FIFO must be removed after stop");
+    assert!(
+        !answers_path.exists(),
+        "answers state must be removed after stop"
+    );
+    assert!(
+        !dir.join("logs/pty_srv.pid").exists(),
+        "pid file must be removed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pty_password_prompt_does_not_echo_secret_into_log() {
+    let dir = temp_dir("pty_secret");
+    let port = free_port();
+    let cfg = dir.join("projects.toml");
+    let d = dir.to_string_lossy().replace('\\', "/");
+
+    let script = "printf 'Password:'; read -r secret; echo received_len=${#secret}; exec sleep 30";
+    fs::write(
+        &cfg,
+        format!(
+            r#"[projects.pty_secret]
+name = "PTY Secret"
 root = "{d}"
 start = ["sh", "-c", "{script}"]
 background = true
@@ -1019,39 +1237,48 @@ log_dir = "{d}/logs"
     .unwrap();
 
     let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
-    let _guard = CleanupGuard::new(&loaded, "pty_srv", dir.clone());
+    let _guard = CleanupGuard::new(&loaded, "pty_secret", dir.clone());
+    loaded.start_detached("pty_secret").unwrap();
 
-    let st = loaded.start_detached("pty_srv").unwrap();
-    assert_eq!(st.state, tongyun_dev_core::LifeState::Starting);
-    let pid = st.pid.expect("pid must exist");
-
-    let log_path = dir.join("logs/pty_srv.out");
-    let fifo_path = dir.join("logs/pty_srv.stdin");
-    assert!(fifo_path.exists(), "FIFO should exist for pty project");
-
+    let log_path = dir.join("logs/pty_secret.out");
     let start_t = std::time::Instant::now();
     let mut log_content = String::new();
     while start_t.elapsed() < Duration::from_secs(5) {
         if let Ok(c) = fs::read_to_string(&log_path) {
             log_content = c;
-            if log_content.contains("TTY_DETECTED") {
+            if log_content.contains("Password:") {
                 break;
             }
         }
         thread::sleep(Duration::from_millis(100));
     }
-
-    assert!(log_content.contains("TTY_DETECTED"), "log: {log_content}");
-
-    // Stop and verify process and FIFO cleanup
-    let stopped = loaded.stop("pty_srv").unwrap();
-    assert_eq!(stopped.state, tongyun_dev_core::LifeState::Stopped);
-    assert!(!is_process_alive(pid), "script process must be terminated");
-    assert!(!fifo_path.exists(), "FIFO must be removed after stop");
     assert!(
-        !dir.join("logs/pty_srv.pid").exists(),
-        "pid file must be removed"
+        log_content.contains("Password:"),
+        "prompt should be logged: {log_content}"
     );
+
+    loaded.send_input("pty_secret", "secret123\n").unwrap();
+
+    let start_t = std::time::Instant::now();
+    while start_t.elapsed() < Duration::from_secs(5) {
+        if let Ok(c) = fs::read_to_string(&log_path) {
+            log_content = c;
+            if log_content.contains("received_len=9") {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        log_content.contains("received_len=9"),
+        "input should reach the process: {log_content}"
+    );
+    assert!(
+        !log_content.contains("secret123"),
+        "pty log must not contain the password: {log_content}"
+    );
+
+    loaded.stop("pty_secret").unwrap();
 }
 
 #[cfg(unix)]

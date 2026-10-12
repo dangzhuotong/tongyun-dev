@@ -117,15 +117,18 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 ## 交互式启动脚本（PTY、标准输入管道与自动应答）
 
 - **标准输入管道（FIFO）**：
-  - Unix 环境下，后台项目启动时在 `<log_dir>/<id>.stdin` 创建命名管道（FIFO），以 `O_RDWR` 绑定为子进程的标准输入。
+  - Unix 环境下，后台项目启动时在 `<log_dir>/<id>.stdin` 创建命名管道（FIFO）。
+  - `pty = false` 时以 `O_RDWR` 绑定为子进程的标准输入，子进程输出直接追加到日志。
+  - `pty = true` 时该 FIFO 仍由常驻 relay 持有；`input` 写入 FIFO，relay 再转发到伪终端。
   - 用户或 Agent 可通过 `tongyun-dev input <id> <text>`、网页控制台 `POST /api/projects/:id/input` 或桌面界面向运行中的进程输入内容。
   - **输入上限与原子写入**：单次输入上限为 4096 字节（保证在 POSIX `PIPE_BUF` 内原子写入）。超过 4096 字节时返回「单次输入不能超过 4096 字节」（HTTP 400）；管道缓冲区满时返回「子进程没有读取输入（管道已满）」（HTTP 409）。
   - **回显只写占位符**：非 PTY 模式下发送输入时，日志默认仅记录占位符（如 `› [已发送 N 个字符]`，按键为 `› [按键 up]` 等），避免密码等敏感输入落盘。
   - 项目停止后，自动清理 `<id>.stdin` 与应答状态记录。
   - Windows 环境暂不支持向进程发送输入（提示「Windows 暂不支持向进程发送输入」）。
 - **伪终端运行（`pty = true`）**：
-  - 许多 CLI 工具在非 TTY 环境下不输出交互式提示或选择菜单。设置 `pty = true` 时，系统使用 `script` 命令包装启动（macOS: `script -q /dev/null <argv>`；Linux: `script -qfec "<escaped_cmd>" /dev/null`），使子进程在伪终端（PTY）中运行。
-  - PTY 模式下终端自身会回显输入字符，core 不再重复追加输入回显。
+  - 许多 CLI 工具在非 TTY 环境下不输出交互式提示或选择菜单。Unix（macOS 与 Linux 同一路径）在 `pty = true` 时 fork 一个常驻 relay（进程组组长，pid 文件记录的是 relay）：用 libc `openpty` 创建伪终端（失败则 `posix_openpt` + `grantpt` + `unlockpt`），再 fork/exec 真正的启动命令。子进程 `setsid` 后把 slave 设为控制终端（`TIOCSCTTY`），标准输入/输出/错误都在 slave 上，因此 `isatty` 为真。relay 把 FIFO 输入写到 master，把 master 输出追加到日志。不调用系统 `script`。
+  - PTY slave 默认关闭 `ECHO`（以及 `ECHOE` / `ECHOK` / `ECHONL`），键盘输入不会经行规程回显进日志。`send_input` 和 relay 也不把用户输入明文写入项目日志；需要本地回显的程序可以自己打开 ECHO。
+  - Windows 忽略 `pty`（与未设置时一样启动；向进程发送输入仍不支持）。
 - **额外环境变量（`env`）**：
   - 配置 `env = { CI = "1", APP_ENV = "dev" }`，可在启动子进程与依赖安装时注入自定义环境变量。用户显式配置的环境变量优先于工具链注入的环境变量。
 - **自动应答规则（`auto_answers`）**：
@@ -189,7 +192,7 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 | `stop_grace_secs` | 可选（如 `5`）。停止等待 TERM 宽限秒数，超时后发送 KILL，默认 8 秒 |
 | `group` | 可选。所属分组 key（引用顶层 `[group.<key>]`；未定义也作为同名组展示）。在 `--json` 中输出为 `group` 字段（未设置时为 `null`） |
 | `env` | 可选。额外环境变量键值对（例如 `env = { CI = "1", APP_ENV = "dev" }`），注入启动和依赖安装环境，用户显式配置的值优先 |
-| `pty` | 可选（缺省 `false`）。是否在伪终端（PTY）中运行后台进程，解决交互式提示在非 TTY 下不显示的问题 |
+| `pty` | 可选（缺省 `false`）。Unix 上是否用 openpty relay 在伪终端中运行后台进程（macOS 与 Linux 同一路径，不用系统 `script`）。Windows 忽略该字段 |
 | `auto_answers` | 可选。自动应答规则数组（例如 `[{ expect = "Select environment", send = "dev" }]`），启动时匹配日志输出并自动向标准输入发送内容 |
 | `log_dir` / `log_file` / `pid_file` | 可省略。默认日志与 PID 路径为 `~/.tongyun-dev/logs/<id>.out` 和 `.pid` |
 

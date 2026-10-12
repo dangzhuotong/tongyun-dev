@@ -17,8 +17,8 @@
 - 后续产品功能：项目分组、批量启停、依赖启动顺序。
 - 交互输入后续（#8 合入后非阻塞备注，2026-10-12）：
   - 子进程自身输出若以「› 」开头，会被 auto-answer 扫描跳过（当前约定回显占位符也用该前缀）；若项目日志里确实会出现这种行，需改跳过规则或换回显前缀。
-  - pty=true 时走 `script` 包一层，管道满时不会走到 FIFO 的 WouldBlock 提示；大输入/子进程不读 stdin 的表现需单独观察。
-  - macOS 的 `script -q /dev/null <argv...>` 分支尚未在真机跑过：阿装装机验收时用一个 `pty = true` 的虚构项目实跑一次（确认 isatty、input 可达、stop 后进程与 FIFO 清理）。
+  - pty=true 时 Unix 走 openpty relay（macOS 与 Linux 同一路径）：输入仍写 FIFO，由 relay 转发到 PTY。管道满时仍可能返回「子进程没有读取输入（管道已满）」；大输入/子进程不读 stdin 的表现需单独观察。
+  - openpty relay；Mac 验收：安装后用一个虚构项目 `pty = true` 实跑 start/stop，确认没有 tcgetattr / Operation not supported、isatty 为真、input 可达、stop 后进程组与 FIFO 清理。
 
 ## AI 与人工共用运行面板
 

@@ -229,6 +229,29 @@ async fn pick_folder() -> Result<Option<String>, String> {
     Ok(picked.map(|h| h.path().to_string_lossy().to_string()))
 }
 
+#[tauri::command]
+async fn create_group(
+    key: String,
+    label: Option<String>,
+) -> Result<tongyun_dev_core::GroupInfo, String> {
+    blocking(move || {
+        let mut loaded = tongyun_dev_core::load(None).map_err(report)?;
+        loaded.create_group(&key, label.as_deref()).map_err(report)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn set_project_group(id: String, group: Option<String>) -> Result<ProjectRow, String> {
+    blocking(move || {
+        let mut loaded = tongyun_dev_core::load(None).map_err(report)?;
+        loaded
+            .set_project_group(&id, group.as_deref())
+            .map_err(report)
+    })
+    .await
+}
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -252,7 +275,9 @@ pub fn run() {
             remove_project,
             pick_folder,
             scan_dir,
-            import_scanned
+            import_scanned,
+            create_group,
+            set_project_group
         ])
         .run(tauri::generate_context!())
         .expect("error while running tongyun-dev");

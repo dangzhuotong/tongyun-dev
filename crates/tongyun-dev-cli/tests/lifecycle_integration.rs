@@ -181,6 +181,72 @@ fn web_console_lists_adds_and_removes_through_core() {
     let detail = get("/api/projects/web_app");
     assert!(detail.contains("Renamed") && detail.contains("5180"));
     assert!(detail.contains("\"node\":null"));
+
+    // POST /api/groups creates a new group
+    let add_group = r#"{"key":"backend","label":"后端服务"}"#;
+    let evil_group_resp = post_json(ui, "/api/groups", add_group, Some("http://evil.example"));
+    assert!(
+        evil_group_resp.starts_with("HTTP/1.1 403"),
+        "{evil_group_resp}"
+    );
+    let resp = post_json(ui, "/api/groups", add_group, None);
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    assert!(resp.contains("\"key\":\"backend\""));
+
+    let groups_resp = get("/api/groups");
+    assert!(groups_resp.contains("\"key\":\"backend\"") && groups_resp.contains("后端服务"));
+
+    // PATCH group updates the group and is reflected in the project list.
+    let edit_group = r#"{"group":"frontend"}"#;
+    let resp = patch(edit_group, &format!("http://127.0.0.1:{ui}"));
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let list_after_group = get("/api/projects");
+    assert!(
+        list_after_group.contains("\"group\":\"frontend\""),
+        "group visible in project list"
+    );
+    let detail_after_group = get("/api/projects/web_app");
+    assert!(
+        detail_after_group.contains("\"group\":\"frontend\""),
+        "group visible in detail"
+    );
+
+    // PATCH group using Chinese label: auto creates group with legal key and label="前端"
+    let edit_chinese = r#"{"group":"前端"}"#;
+    let resp = patch(edit_chinese, &format!("http://127.0.0.1:{ui}"));
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let detail_after_chinese = get("/api/projects/web_app");
+    let json_body = detail_after_chinese.split("\r\n\r\n").nth(1).unwrap();
+    let parsed_detail: serde_json::Value = serde_json::from_str(json_body).unwrap();
+    let assigned_group = parsed_detail["project"]["group"].as_str().unwrap();
+    assert!(
+        tongyun_dev_core::validate_group_key(assigned_group).is_ok(),
+        "assigned group `{assigned_group}` must be a valid key"
+    );
+    assert_eq!(assigned_group, "g1");
+    let groups_resp_chinese = get("/api/groups");
+    let groups_body = groups_resp_chinese.split("\r\n\r\n").nth(1).unwrap();
+    let parsed_groups: serde_json::Value = serde_json::from_str(groups_body).unwrap();
+    let has_chinese_label =
+        parsed_groups["groups"].as_array().unwrap().iter().any(|g| {
+            g["key"].as_str() == Some(assigned_group) && g["label"].as_str() == Some("前端")
+        });
+    assert!(
+        has_chinese_label,
+        "new group must have label='前端' in /api/groups: {groups_resp_chinese}"
+    );
+
+    // Clear group by setting empty string
+    let clear_group = r#"{"group":""}"#;
+    let resp = patch(clear_group, &format!("http://127.0.0.1:{ui}"));
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let list_after_clear = get("/api/projects");
+    assert!(
+        list_after_clear.contains("\"group\":null"),
+        "cleared group is null in list"
+    );
+
+    let text = fs::read_to_string(&cfg).unwrap();
     let bad = patch(r#"{"port":0}"#, &format!("http://127.0.0.1:{ui}"));
     assert!(bad.starts_with("HTTP/1.1 400"), "{bad}");
     assert_eq!(fs::read_to_string(&cfg).unwrap(), text);

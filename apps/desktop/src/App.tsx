@@ -10,6 +10,8 @@ import { canStopProject, stopButtonTitle } from "./buttonState";
 import logoUrl from "./assets/logo.svg";
 import {
   AlertIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
   CpuIcon,
   DoorIcon,
   ExternalIcon,
@@ -28,8 +30,32 @@ import {
   TrashIcon,
   XIcon,
 } from "./icons";
+import {
+  generateGroupKey,
+  groupProjects,
+  isGroupCollapsed,
+  shouldShowGroupHeaders,
+} from "./projectGroups";
 
 const LOG_LINES = 500;
+const COLLAPSED_STORAGE_KEY = "tongyun-dev:collapsed-groups";
+
+function loadCollapsedGroups(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(COLLAPSED_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCollapsedGroups(map: Record<string, boolean>) {
+  try {
+    localStorage.setItem(COLLAPSED_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // ignore
+  }
+}
 
 export function App() {
   const [configInfo, setConfigInfo] = useState<ConfigInfo | null>(null);
@@ -55,6 +81,21 @@ export function App() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [menu, setMenu] = useState<"" | "settings" | "more">("");
   const searchRef = useRef<HTMLInputElement>(null);
+
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>(() =>
+    loadCollapsedGroups()
+  );
+  const [dragOverGroup, setDragOverGroup] = useState<string | null>(null);
+  const [createGroupOpen, setCreateGroupOpen] = useState(false);
+  const [newGroupLabel, setNewGroupLabel] = useState("");
+
+  const toggleGroupCollapse = useCallback((key: string) => {
+    setCollapsedGroups((prev) => {
+      const next = { ...prev, [key]: !prev[key] };
+      saveCollapsedGroups(next);
+      return next;
+    });
+  }, []);
 
   // 「/」或 Cmd/Ctrl+K 聚焦项目搜索；在其他输入框里不拦截「/」
   useEffect(() => {
@@ -449,10 +490,119 @@ export function App() {
       (x): x is string => Boolean(x)
     );
 
+  const isFiltering = Boolean(query.trim() || statusFilter !== "all");
+
+  const sections = useMemo(
+    () =>
+      groupProjects({
+        allProjects: projectList,
+        visibleProjects: visible,
+        statuses: liveStatuses,
+        groups: projects?.groups,
+        isFiltering,
+      }),
+    [projectList, visible, liveStatuses, projects?.groups, isFiltering]
+  );
+
+  const showHeaders = useMemo(() => shouldShowGroupHeaders(sections), [sections]);
+
+  const existingGroupKeys = useMemo(() => {
+    const keys = new Set<string>();
+    if (projects?.groups) {
+      for (const g of projects.groups) {
+        if (g.key) keys.add(g.key);
+      }
+    }
+    for (const p of projectList) {
+      const k = p.group?.trim();
+      if (k) keys.add(k);
+    }
+    return Array.from(keys);
+  }, [projects?.groups, projectList]);
+
+  const handleCreateGroup = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      const label = newGroupLabel.trim();
+      if (!label) return;
+      try {
+        const key = generateGroupKey(label, existingGroupKeys);
+        await invoke("create_group", { key, label });
+        setNewGroupLabel("");
+        setCreateGroupOpen(false);
+        await loadProjects();
+      } catch (err: unknown) {
+        setError(String(err));
+      }
+    },
+    [newGroupLabel, existingGroupKeys, loadProjects]
+  );
+
   function clearFilters() {
     setQuery("");
     setStatusFilter("all");
   }
+
+  const renderProjectItem = (project: (typeof projectList)[0]) => {
+    const toolchain = toolchainOf(project);
+    const projStatus = liveStatuses[project.id];
+    const isActive = project.id === selected;
+    return (
+      <li
+        key={project.id}
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.setData("text/plain", project.id);
+          e.dataTransfer.effectAllowed = "move";
+        }}
+      >
+        <button
+          type="button"
+          className={[
+            "project-item",
+            isActive ? "active" : "",
+            project.enabled ? "" : "disabled",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+          aria-current={isActive ? "true" : undefined}
+          disabled={busy === "stop"}
+          onClick={() => {
+            setError("");
+            if (project.id === selected) return;
+            setStatus(null);
+            setLog(null);
+            setSelected(project.id);
+          }}
+        >
+          <div className="project-row-top">
+            <span className="project-name">
+              <Highlight text={project.name} query={query} />
+            </span>
+            <StatusPill project={project} status={projStatus} compact />
+          </div>
+          <div className="project-meta">
+            <code>
+              <Highlight text={project.id} query={query} />
+            </code>
+            {project.port > 0 && (
+              <span className="port">
+                :<Highlight text={String(project.port)} query={query} />
+              </span>
+            )}
+            {toolchain.map((t) => (
+              <span key={t} className="tool-tag">
+                {t}
+              </span>
+            ))}
+          </div>
+          {!project.enabled && project.reason && (
+            <div className="project-reason">{project.reason}</div>
+          )}
+        </button>
+      </li>
+    );
+  };
 
   return (
     <div className="app">
@@ -526,61 +676,144 @@ export function App() {
           </div>
         </div>
 
-        <ul className="projects">
-          {visible.map((project) => {
-            const toolchain = toolchainOf(project);
-            const projStatus = liveStatuses[project.id];
-            const isActive = project.id === selected;
+        {projects && !missingConfig && (
+          <div className="sidebar-group-toolbar">
+            <span className="sidebar-group-toolbar-title">项目列表</span>
+            <button
+              type="button"
+              className="btn btn-ghost btn-xs btn-new-group"
+              onClick={() => setCreateGroupOpen((prev) => !prev)}
+              title="新建分组"
+            >
+              <PlusIcon /> 新建分组
+            </button>
+          </div>
+        )}
+
+        {createGroupOpen && (
+          <form className="create-group-form" onSubmit={handleCreateGroup}>
+            <input
+              type="text"
+              autoFocus
+              className="create-group-input"
+              placeholder="输入分组名称（如 前端开发）"
+              value={newGroupLabel}
+              onChange={(e) => setNewGroupLabel(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setNewGroupLabel("");
+                  setCreateGroupOpen(false);
+                }
+              }}
+            />
+            <div className="create-group-actions">
+              <button
+                type="submit"
+                className="btn btn-primary btn-xs"
+                disabled={!newGroupLabel.trim()}
+              >
+                确定
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost btn-xs"
+                onClick={() => {
+                  setNewGroupLabel("");
+                  setCreateGroupOpen(false);
+                }}
+              >
+                取消
+              </button>
+            </div>
+          </form>
+        )}
+
+        {(() => {
+          const hasSectionsToShow = !isFiltering
+            ? sections.length > 0 &&
+              (projectList.length > 0 || sections.some((s) => !s.isUngrouped))
+            : visible.length > 0;
+
+          if (!hasSectionsToShow) return null;
+
+          if (!showHeaders) {
             return (
-              <li key={project.id}>
-                <button
-                  type="button"
-                  className={[
-                    "project-item",
-                    isActive ? "active" : "",
-                    project.enabled ? "" : "disabled",
-                  ]
-                    .filter(Boolean)
-                    .join(" ")}
-                  aria-current={isActive ? "true" : undefined}
-                  disabled={busy === "stop"}
-                  onClick={() => {
-                    setError("");
-                    if (project.id === selected) return;
-                    setStatus(null);
-                    setLog(null);
-                    setSelected(project.id);
-                  }}
-                >
-                  <div className="project-row-top">
-                    <span className="project-name">
-                      <Highlight text={project.name} query={query} />
-                    </span>
-                    <StatusPill project={project} status={projStatus} compact />
-                  </div>
-                  <div className="project-meta">
-                    <code>
-                      <Highlight text={project.id} query={query} />
-                    </code>
-                    {project.port > 0 && (
-                      <span className="port">
-                        :<Highlight text={String(project.port)} query={query} />
-                      </span>
-                    )}
-                    {toolchain.map((t) => (
-                      <span key={t} className="tool-tag">
-                        {t}
-                      </span>
-                    ))}
-                  </div>
-                  {!project.enabled && project.reason && (
-                    <div className="project-reason">{project.reason}</div>
-                  )}
-                </button>
-              </li>
+              <ul className="projects">
+                {visible.map((project) => renderProjectItem(project))}
+              </ul>
             );
-          })}
-        </ul>
+          }
+
+          return (
+            <div className="project-groups">
+              {sections.map((section) => {
+                const collapsed = isGroupCollapsed(section.key, collapsedGroups, isFiltering);
+                return (
+                  <div
+                    key={section.key}
+                    className={`group-section${dragOverGroup === section.key ? " drag-over" : ""}`}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "move";
+                      if (dragOverGroup !== section.key) {
+                        setDragOverGroup(section.key);
+                      }
+                    }}
+                    onDragLeave={(e) => {
+                      if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                        setDragOverGroup(null);
+                      }
+                    }}
+                    onDrop={async (e) => {
+                      e.preventDefault();
+                      setDragOverGroup(null);
+                      const draggedId = e.dataTransfer.getData("text/plain");
+                      if (!draggedId) return;
+                      try {
+                        const targetGroup = section.isUngrouped ? null : section.key;
+                        await invoke("set_project_group", { id: draggedId, group: targetGroup });
+                        await loadProjects();
+                        if (selected === draggedId) {
+                          await refresh(draggedId);
+                        }
+                      } catch (err: unknown) {
+                        setError(String(err));
+                      }
+                    }}
+                  >
+                    <div className="group-header">
+                      <button
+                        type="button"
+                        className="group-header-btn"
+                        onClick={() => toggleGroupCollapse(section.key)}
+                        aria-expanded={!collapsed}
+                      >
+                        <span className="group-chevron" aria-hidden="true">
+                          {collapsed ? <ChevronRightIcon /> : <ChevronDownIcon />}
+                        </span>
+                        <span className="group-name" title={section.label}>
+                          {section.label}
+                        </span>
+                        <span className="group-stats">
+                          运行中 {section.runningCount} / 共 {section.totalCount}
+                        </span>
+                      </button>
+                    </div>
+                    {!collapsed &&
+                      (section.visibleProjects.length === 0 ? (
+                        <div className="group-empty-drop-zone">拖动项目至此归类</div>
+                      ) : (
+                        <ul className="projects">
+                          {section.visibleProjects.map((project) => renderProjectItem(project))}
+                        </ul>
+                      ))}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
 
         {!projects && !error && !missingConfig && (
           <div className="sidebar-empty">
@@ -998,6 +1231,8 @@ export function App() {
         <ProjectForm
           mode={formModal.mode}
           initialDetail={formModal.detail}
+          groups={projects?.groups}
+          existingGroups={existingGroupKeys}
           onClose={() => setFormModal((prev) => ({ ...prev, open: false }))}
           onSuccess={async (savedId) => {
             await loadProjects();

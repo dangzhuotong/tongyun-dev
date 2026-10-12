@@ -31,7 +31,7 @@ cargo run -p tongyun-dev-cli -- remove demo_web
 
 常用 CLI 命令格式：
 - `tongyun-dev scan <dir> [--depth N] [--apply] [--json]`：扫描目录，识别项目并可选写入配置
-- `tongyun-dev list [--json]`：列出所有已登记项目
+- `tongyun-dev list [--json] [--with-groups]`：列出所有已登记项目；`--json` 输出项目数组 `[...]`，搭配 `--with-groups` 输出 `{"projects":[...],"groups":[{key,label,order}]}`
 - `tongyun-dev status [id] [--json]`：查看项目状态（不带 id 为全部项目）
 - `tongyun-dev start <id> [--open]`：启动项目并等待端口连通/探针就绪；`--open` 就绪后用浏览器打开
 - `tongyun-dev stop <id>`：停止项目
@@ -39,6 +39,8 @@ cargo run -p tongyun-dev-cli -- remove demo_web
 - `tongyun-dev open <id> [--dir]`：用浏览器打开项目页面，或 `--dir` 打开项目根目录
 - `tongyun-dev install <id>`：手动触发依赖安装（按锁文件选用 pnpm / yarn / npm）
 - `tongyun-dev add <id> ...` / `tongyun-dev remove <id>`：添加或移除项目登记
+- `tongyun-dev group <id> <key>` / `tongyun-dev group <id> --clear`：设置或清除项目所属分组
+- `tongyun-dev group-add <key> [--label 名]`：新增分组
 - `tongyun-dev ui [--port 9099] [--no-open]`：启动网页控制台
 
 ```bash
@@ -158,7 +160,19 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 | `start_windows` / `stop_windows` | 可选。Windows 环境下优先使用的启动 / 停止命令数组 |
 | `start_timeout_secs` | 可选（如 `30`）。启动就绪等待超时秒数，优先级高于环境变量 `TONGYUN_DEV_START_TIMEOUT` 与默认 180 秒 |
 | `stop_grace_secs` | 可选（如 `5`）。停止等待 TERM 宽限秒数，超时后发送 KILL，默认 8 秒 |
+| `group` | 可选。所属分组 key（引用顶层 `[group.<key>]`；未定义也作为同名组展示）。在 `--json` 中输出为 `group` 字段（未设置时为 `null`） |
 | `log_dir` / `log_file` / `pid_file` | 可省略。默认日志与 PID 路径为 `~/.tongyun-dev/logs/<id>.out` 和 `.pid` |
+
+### 分组配置 `[group.<key>]`
+
+顶层 `[group.<key>]` 用于定义项目分组（key 为小写字母、数字、下划线、连字符，1-40 字符）：
+
+| 字段 | 说明 |
+| --- | --- |
+| `label` | 可选。显示名，缺省使用 key |
+| `order` | 可选（如 `1`）。排序序号，数值小的排在前面；未配置 order 的按 label 排序在有 order 的分组之后 |
+| `members` | 预留，后续版本用于一组启停 |
+| `depends_on` | 预留，后续版本用于一组启停 |
 
 ## 验收清单
 
@@ -205,7 +219,7 @@ tongyun-dev logs demo_api --lines 80 --json
 | `logs` | 日志读取结果 `{path, missing, text}`；其他动作时为 null |
 | `error` | 错误原因字符串；成功时为 null |
 
-退出码：成功 0，操作失败 1，参数错误 2。参数解析错误由 CLI 输出到 stderr，不输出 JSON。`list --json` 与 `status --json` 的成功输出保持原有数组/状态对象结构，不包装上述对象。
+退出码：成功 0，操作失败 1，参数错误 2。参数解析错误由 CLI 输出到 stderr，不输出 JSON。`list --json` 与 `status --json` 的成功输出保持原有数组/状态对象结构，不包装上述对象；新增 `list --json --with-groups` 输出包含分组的完整结构 `{"projects":[...],"groups":[{key,label,order}]}`。
 
 - `wait` 只观察已存在的服务；停止、启动失败或端口冲突会立即返回错误，等待超时不会取消其他调用启动的服务或安装。
 - `start` / `restart` 的 `--timeout` 是启动命令返回后的就绪等待预算，覆盖自动安装阶段；不改配置里的 `start_timeout_secs`，也不限制前置停止或自定义启动脚本本身的执行时长。不传时采用项目的启动超时。一次状态探测最多可能额外花费约 5 秒。

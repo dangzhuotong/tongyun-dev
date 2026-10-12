@@ -37,6 +37,16 @@ pub struct Loaded {
 struct FileConfig {
     #[serde(default)]
     projects: HashMap<String, Project>,
+    #[serde(default)]
+    group: HashMap<String, GroupConfig>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+pub struct GroupConfig {
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub order: Option<i64>,
 }
 
 fn default_true() -> bool {
@@ -47,6 +57,8 @@ fn default_true() -> bool {
 struct Project {
     #[serde(default)]
     name: String,
+    #[serde(default)]
+    group: String,
     root: String,
     #[serde(default = "default_true")]
     enabled: bool,
@@ -115,6 +127,7 @@ struct Vars {
 struct Resolved {
     id: String,
     name: String,
+    group: String,
     enabled: bool,
     reason: String,
     root: PathBuf,
@@ -187,6 +200,7 @@ pub fn default_port_mode() -> String {
 pub struct ProjectRow {
     pub id: String,
     pub name: String,
+    pub group: Option<String>,
     pub root: String,
     pub enabled: bool,
     pub port: u16,
@@ -216,10 +230,18 @@ pub struct ProjectRow {
     pub port_env: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct GroupInfo {
+    pub key: String,
+    pub label: String,
+    pub order: Option<i64>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ProjectList {
     pub config_path: String,
     pub projects: Vec<ProjectRow>,
+    pub groups: Vec<GroupInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -378,6 +400,11 @@ impl Loaded {
             projects.push(ProjectRow {
                 id: resolved.id,
                 name: resolved.name,
+                group: if resolved.group.is_empty() {
+                    None
+                } else {
+                    Some(resolved.group.clone())
+                },
                 root: path_to_string(&resolved.root),
                 enabled: resolved.enabled,
                 port: resolved.port,
@@ -396,12 +423,127 @@ impl Loaded {
                 port_env: resolved.port_env,
             });
         }
+        let groups = self.groups();
         Ok(ProjectList {
             config_path: path_to_string(&self.path),
             projects,
+            groups,
         })
     }
 
+    pub fn groups(&self) -> Vec<GroupInfo> {
+        let mut group_map: HashMap<String, GroupInfo> = HashMap::new();
+        for (key, cfg) in &self.config.group {
+            let label = cfg
+                .label
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(key)
+                .to_string();
+            group_map.insert(
+                key.clone(),
+                GroupInfo {
+                    key: key.clone(),
+                    label,
+                    order: cfg.order,
+                },
+            );
+        }
+        for p in self.config.projects.values() {
+            let k = p.group.trim();
+            if !k.is_empty() && !group_map.contains_key(k) {
+                group_map.insert(
+                    k.to_string(),
+                    GroupInfo {
+                        key: k.to_string(),
+                        label: k.to_string(),
+                        order: None,
+                    },
+                );
+            }
+        }
+        let mut list: Vec<GroupInfo> = group_map.into_values().collect();
+        list.sort_by(|a, b| match (a.order, b.order) {
+            (Some(oa), Some(ob)) => {
+                if oa != ob {
+                    oa.cmp(&ob)
+                } else {
+                    a.label.cmp(&b.label).then_with(|| a.key.cmp(&b.key))
+                }
+            }
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.label.cmp(&b.label).then_with(|| a.key.cmp(&b.key)),
+        });
+        list
+    }
+}
+
+/// Validate group key: lowercase letters, digits, underscore, hyphen; 1-40 characters.
+pub fn validate_group_key(key: &str) -> Result<()> {
+    if key.is_empty() {
+        bail!("分组 key 不能为空");
+    }
+    if key.len() > 40 {
+        bail!("分组 key 长度不能超过 40 个字符");
+    }
+    for c in key.chars() {
+        if !matches!(c, 'a'..='z' | '0'..='9' | '_' | '-') {
+            bail!("分组 key 只能包含小写字母、数字、下划线和连字符: `{key}`");
+        }
+    }
+    Ok(())
+}
+
+/// Generate a valid group key from a label:
+/// - ASCII labels: lowercase, replace illegal chars (`[^a-z0-9_-]`) with `-`, trim leading/trailing `-`, truncate to <=40 chars.
+///   If non-empty and not already in `existing_keys`, return it.
+/// - Non-ASCII labels, empty labels, or if candidate is already in `existing_keys`:
+///   Generate `g1`, `g2`, ... avoiding existing keys.
+pub fn generate_group_key<S: AsRef<str>, I: IntoIterator<Item = S>>(
+    label: &str,
+    existing_keys: I,
+) -> String {
+    let keys: std::collections::HashSet<String> = existing_keys
+        .into_iter()
+        .map(|s| s.as_ref().to_string())
+        .collect();
+    let trimmed = label.trim();
+    if trimmed.is_ascii() && !trimmed.is_empty() {
+        let lower = trimmed.to_ascii_lowercase();
+        let mut candidate = String::with_capacity(lower.len());
+        let mut prev_hyphen = false;
+        for c in lower.chars() {
+            if matches!(c, 'a'..='z' | '0'..='9' | '_' | '-') {
+                candidate.push(c);
+                prev_hyphen = c == '-';
+            } else if !prev_hyphen {
+                candidate.push('-');
+                prev_hyphen = true;
+            }
+        }
+        let trimmed_cand = candidate.trim_matches('-');
+        let mut candidate_str = trimmed_cand.to_string();
+        if candidate_str.len() > 40 {
+            candidate_str.truncate(40);
+            candidate_str = candidate_str.trim_end_matches('-').to_string();
+        }
+        if !candidate_str.is_empty() && !keys.contains(&candidate_str) {
+            return candidate_str;
+        }
+    }
+    let mut idx = 1;
+    loop {
+        let key = format!("g{idx}");
+        if !keys.contains(&key) {
+            return key;
+        }
+        idx += 1;
+    }
+}
+
+impl Loaded {
     pub fn status(&self, id: &str) -> Result<StatusJson> {
         let project = self.resolve(id)?;
         let peers = self.peer_pids(&project.id);
@@ -1171,6 +1313,7 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
         } else {
             p.name.clone()
         },
+        group: p.group.trim().to_string(),
         enabled: p.enabled,
         reason: p.reason.trim().to_string(),
         root,
@@ -2850,6 +2993,9 @@ pub struct NewProject {
     pub port_arg: Option<String>,
     #[serde(default)]
     pub port_env: Option<String>,
+    /// 所属分组（可选）。
+    #[serde(default)]
+    pub group: Option<String>,
 }
 
 fn non_empty(v: &Option<String>) -> Option<String> {
@@ -2933,8 +3079,10 @@ impl NewProject {
         if !enabled && reason.is_empty() {
             bail!("disabled project `{id}` needs a reason");
         }
+        let group = non_empty(&self.group).unwrap_or_default();
         let project = Project {
             name,
+            group,
             root,
             enabled,
             reason,
@@ -2972,6 +3120,9 @@ fn project_table(p: &Project) -> toml_edit::Table {
     use toml_edit::{value, Array, Table};
     let mut t = Table::new();
     t["name"] = value(p.name.as_str());
+    if !p.group.is_empty() {
+        t["group"] = value(p.group.as_str());
+    }
     t["root"] = value(p.root.as_str());
     if !p.enabled {
         t["enabled"] = value(false);
@@ -3094,6 +3245,8 @@ pub struct ProjectEdit {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
     pub root: Option<String>,
     #[serde(default)]
     pub start: Option<String>,
@@ -3134,6 +3287,7 @@ pub struct ProjectEdit {
 pub struct ProjectDetail {
     pub id: String,
     pub name: String,
+    pub group: Option<String>,
     pub root: String,
     pub start: String,
     pub start_editable: bool,
@@ -3161,6 +3315,7 @@ pub struct ProjectDetail {
     pub hints: Vec<String>,
 }
 
+#[allow(clippy::if_same_then_else)]
 fn unpack_command(argv: &[String]) -> (String, bool) {
     if argv.is_empty() {
         (String::new(), true)
@@ -3223,6 +3378,25 @@ impl Loaded {
         // Same validation as loading: absolute root, templates resolve, etc.
         resolve_project(&id, &project, current_home().as_deref())?;
         let mut doc = read_doc(&self.path)?;
+        if !project.group.is_empty() {
+            validate_group_key(&project.group)?;
+            let groups = doc
+                .entry("group")
+                .or_insert_with(|| {
+                    let mut t = toml_edit::Table::new();
+                    t.set_implicit(true);
+                    toml_edit::Item::Table(t)
+                })
+                .as_table_mut()
+                .context("`group` in config is not a table")?;
+            if !groups.contains_key(&project.group) {
+                let t = toml_edit::Table::new();
+                groups.insert(&project.group, toml_edit::Item::Table(t));
+                self.config
+                    .group
+                    .insert(project.group.clone(), GroupConfig::default());
+            }
+        }
         let projects = doc
             .entry("projects")
             .or_insert_with(|| {
@@ -3243,6 +3417,11 @@ impl Loaded {
         Ok(ProjectRow {
             id: r.id,
             name: r.name,
+            group: if r.group.is_empty() {
+                None
+            } else {
+                Some(r.group.clone())
+            },
             root: path_to_string(&r.root),
             enabled: r.enabled,
             port: r.port,
@@ -3376,6 +3555,11 @@ impl Loaded {
             } else {
                 p.name.clone()
             },
+            group: if p.group.trim().is_empty() {
+                None
+            } else {
+                Some(p.group.trim().to_string())
+            },
             root: p.root.clone(),
             start,
             start_editable,
@@ -3435,6 +3619,18 @@ impl Loaded {
                 proj_table.remove("name");
             } else {
                 set_table_val(proj_table, "name", toml_edit::Value::from(trimmed));
+            }
+        }
+
+        let mut group_to_ensure: Option<String> = None;
+        if let Some(ref group) = edit.group {
+            let trimmed = group.trim();
+            if trimmed.is_empty() {
+                proj_table.remove("group");
+            } else {
+                validate_group_key(trimmed)?;
+                set_table_val(proj_table, "group", toml_edit::Value::from(trimmed));
+                group_to_ensure = Some(trimmed.to_string());
             }
         }
 
@@ -3568,7 +3764,6 @@ impl Loaded {
                 );
             }
         }
-
         if let Some(ref port_mode) = edit.port_mode {
             let trimmed = port_mode.trim().to_ascii_lowercase();
             if trimmed.is_empty() {
@@ -3599,6 +3794,25 @@ impl Loaded {
             }
         }
 
+        if let Some(ref grp) = group_to_ensure {
+            let groups = doc
+                .entry("group")
+                .or_insert_with(|| {
+                    let mut t = toml_edit::Table::new();
+                    t.set_implicit(true);
+                    toml_edit::Item::Table(t)
+                })
+                .as_table_mut()
+                .context("`group` in config is not a table")?;
+            if !groups.contains_key(grp) {
+                let t = toml_edit::Table::new();
+                groups.insert(grp, toml_edit::Item::Table(t));
+                self.config
+                    .group
+                    .insert(grp.to_string(), GroupConfig::default());
+            }
+        }
+
         let temp_config = parse_config(&doc.to_string())?;
         let updated_project = temp_config
             .projects
@@ -3607,15 +3821,18 @@ impl Loaded {
         resolve_project(id, updated_project, current_home().as_deref())?;
 
         write_doc(&self.path, &doc)?;
-        self.config
-            .projects
-            .insert(id.to_string(), updated_project.clone());
+        self.config = temp_config;
 
         let r = self.resolve(id)?;
         let configured = r.port > 0 && (!r.active_start().is_empty() || r.tomcat.is_some());
         Ok(ProjectRow {
             id: r.id,
             name: r.name,
+            group: if r.group.is_empty() {
+                None
+            } else {
+                Some(r.group.clone())
+            },
             root: path_to_string(&r.root),
             enabled: r.enabled,
             port: r.port,
@@ -3633,6 +3850,134 @@ impl Loaded {
             port_arg: r.port_arg,
             port_env: r.port_env,
         })
+    }
+
+    /// Create a new group, writing `[group.<key>]` (with optional label) to config preserving comments.
+    pub fn create_group(&mut self, key: &str, label: Option<&str>) -> Result<GroupInfo> {
+        let key = key.trim();
+        validate_group_key(key)?;
+        if self.config.group.contains_key(key) {
+            bail!("分组 `{key}` 已存在");
+        }
+        let label = label.map(str::trim).filter(|s| !s.is_empty());
+        let mut doc = read_doc(&self.path)?;
+        let groups = doc
+            .entry("group")
+            .or_insert_with(|| {
+                let mut t = toml_edit::Table::new();
+                t.set_implicit(true);
+                toml_edit::Item::Table(t)
+            })
+            .as_table_mut()
+            .context("`group` in config is not a table")?;
+        if groups.contains_key(key) {
+            bail!("分组 `{key}` 已存在");
+        }
+        let mut t = toml_edit::Table::new();
+        if let Some(l) = label {
+            t["label"] = toml_edit::value(l);
+        }
+        groups.insert(key, toml_edit::Item::Table(t));
+        write_doc(&self.path, &doc)?;
+        self.config.group.insert(
+            key.to_string(),
+            GroupConfig {
+                label: label.map(|s| s.to_string()),
+                order: None,
+            },
+        );
+        Ok(GroupInfo {
+            key: key.to_string(),
+            label: label.unwrap_or(key).to_string(),
+            order: None,
+        })
+    }
+
+    /// Rename group label, writing to config preserving comments.
+    pub fn rename_group_label(&mut self, key: &str, label: &str) -> Result<GroupInfo> {
+        let key = key.trim();
+        validate_group_key(key)?;
+        let label = label.trim();
+        if label.is_empty() {
+            bail!("分组 label 不能为空");
+        }
+        let mut doc = read_doc(&self.path)?;
+        let groups = doc
+            .entry("group")
+            .or_insert_with(|| {
+                let mut t = toml_edit::Table::new();
+                t.set_implicit(true);
+                toml_edit::Item::Table(t)
+            })
+            .as_table_mut()
+            .context("`group` in config is not a table")?;
+        let target = groups
+            .entry(key)
+            .or_insert_with(|| {
+                let t = toml_edit::Table::new();
+                toml_edit::Item::Table(t)
+            })
+            .as_table_mut()
+            .context("group entry is not a table")?;
+        set_table_val(target, "label", toml_edit::Value::from(label));
+        write_doc(&self.path, &doc)?;
+        let entry = self.config.group.entry(key.to_string()).or_default();
+        entry.label = Some(label.to_string());
+        Ok(GroupInfo {
+            key: key.to_string(),
+            label: label.to_string(),
+            order: entry.order,
+        })
+    }
+
+    /// Resolve a group input (key or label) for a project:
+    /// - If input is empty/whitespace: returns `Ok(None)` (clear group)
+    /// - If matches an existing group's label or key (exact, or case-insensitive):
+    ///   returns `Ok(Some(existing_group_key))`
+    /// - Otherwise (new group):
+    ///   generates a valid key via `generate_group_key`,
+    ///   creates the group via `create_group(key, Some(input))`,
+    ///   and returns `Ok(Some(key))`.
+    pub fn resolve_or_create_group(&mut self, input: &str) -> Result<Option<String>> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+
+        let groups = self.groups();
+        // 1. Exact match on label or key
+        if let Some(g) = groups
+            .iter()
+            .find(|g| g.label == trimmed || g.key == trimmed)
+        {
+            return Ok(Some(g.key.clone()));
+        }
+
+        // 2. Case-insensitive match on label or key
+        if let Some(g) = groups
+            .iter()
+            .find(|g| g.label.eq_ignore_ascii_case(trimmed) || g.key.eq_ignore_ascii_case(trimmed))
+        {
+            return Ok(Some(g.key.clone()));
+        }
+
+        // 3. New group: generate key and create group
+        let existing_keys: Vec<String> = groups.iter().map(|g| g.key.clone()).collect();
+        let key = generate_group_key(trimmed, &existing_keys);
+        self.create_group(&key, Some(trimmed))?;
+        Ok(Some(key))
+    }
+
+    /// Update or clear project group, writing back to config with toml_edit preserving comments.
+    pub fn set_project_group(&mut self, id: &str, group: Option<&str>) -> Result<ProjectRow> {
+        let val = group.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("");
+        self.update_project(
+            id,
+            ProjectEdit {
+                group: Some(val.to_string()),
+                ..Default::default()
+            },
+        )
     }
 
     /// Page to open in the browser: `login_url`, else `health_url`, else `http://127.0.0.1:<port>/`.
@@ -3738,10 +4083,10 @@ login_url = "http://127.0.0.1:8080/legacy_app/admin/login.html"
 
     #[test]
     fn expands_tilde_and_home_forms() {
-        let home = Path::new("/Users/dev");
+        let home = Path::new("/home/demo");
         assert_eq!(
             expand_tilde_with("~/code/acme/legacy-app", Some(home)).unwrap(),
-            "/Users/dev/code/acme/legacy-app"
+            "/home/demo/code/acme/legacy-app"
         );
         assert_eq!(
             expand_tilde_with(
@@ -3749,11 +4094,11 @@ login_url = "http://127.0.0.1:8080/legacy_app/admin/login.html"
                 Some(home)
             )
             .unwrap(),
-            "/Users/dev/.tongyun-dev/logs/legacy_app_catalina.out"
+            "/home/demo/.tongyun-dev/logs/legacy_app_catalina.out"
         );
         assert_eq!(
             expand_tilde_with("${HOME}/opt/tomcat-9", Some(home)).unwrap(),
-            "/Users/dev/opt/tomcat-9"
+            "/home/demo/opt/tomcat-9"
         );
         let err = expand_tilde_with("~/code/acme/legacy-app", None).unwrap_err();
         assert!(err.to_string().contains("HOME is not set"));
@@ -3761,35 +4106,35 @@ login_url = "http://127.0.0.1:8080/legacy_app/admin/login.html"
 
     #[test]
     fn legacy_paths_resolve_without_tilde() {
-        let p = legacy_app(Path::new("/Users/dev"));
-        assert_eq!(p.root, PathBuf::from("/Users/dev/code/acme/legacy-app"));
+        let p = legacy_app(Path::new("/home/demo"));
+        assert_eq!(p.root, PathBuf::from("/home/demo/code/acme/legacy-app"));
         assert_eq!(
             p.tomcat.as_deref(),
-            Some(Path::new("/Users/dev/opt/tomcat-9"))
+            Some(Path::new("/home/demo/opt/tomcat-9"))
         );
         assert!(p.enabled);
         assert!(!p.background);
         assert!(p.reason.is_empty());
         assert_eq!(
             p.log_file,
-            PathBuf::from("/Users/dev/.tongyun-dev/logs/legacy_app_catalina.out")
+            PathBuf::from("/home/demo/.tongyun-dev/logs/legacy_app_catalina.out")
         );
         assert_eq!(
             p.pid_file,
-            PathBuf::from("/Users/dev/.tongyun-dev/logs/legacy_app_tomcat.pid")
+            PathBuf::from("/home/demo/.tongyun-dev/logs/legacy_app_tomcat.pid")
         );
         assert_eq!(
             p.start,
             vec![
                 "bash".to_string(),
-                "/Users/dev/code/acme/legacy-app/scripts/start-legacy.sh".to_string(),
+                "/home/demo/code/acme/legacy-app/scripts/start-legacy.sh".to_string(),
             ]
         );
         assert_eq!(
             p.stop,
             vec![
                 "bash".to_string(),
-                "/Users/dev/opt/tomcat-9/bin/catalina.sh".to_string(),
+                "/home/demo/opt/tomcat-9/bin/catalina.sh".to_string(),
                 "stop".to_string(),
                 "15".to_string(),
                 "-force".to_string(),
@@ -3849,9 +4194,9 @@ login_url = "http://127.0.0.1:8080/legacy_app/admin/login.html"
                 http_code: None,
                 ok: false,
             },
-            log_path: "/Users/dev/.tongyun-dev/logs/legacy_app_catalina.out".into(),
-            pid_path: "/Users/dev/.tongyun-dev/logs/legacy_app_tomcat.pid".into(),
-            root: "/Users/dev/code/acme/legacy-app".into(),
+            log_path: "/home/demo/.tongyun-dev/logs/legacy_app_catalina.out".into(),
+            pid_path: "/home/demo/.tongyun-dev/logs/legacy_app_tomcat.pid".into(),
+            root: "/home/demo/code/acme/legacy-app".into(),
             port_conflict: false,
             port_holder: String::new(),
             deps_missing: false,
@@ -3888,7 +4233,7 @@ login_url = "http://127.0.0.1:8080/legacy_app/admin/login.html"
         assert_eq!(v["login_probe"]["ok"], false);
         assert_eq!(
             v["log_path"],
-            "/Users/dev/.tongyun-dev/logs/legacy_app_catalina.out"
+            "/home/demo/.tongyun-dev/logs/legacy_app_catalina.out"
         );
     }
 
@@ -4165,7 +4510,7 @@ port = 9
         let p = resolve_project(
             "demo",
             cfg.projects.get("demo").unwrap(),
-            Some(Path::new("/Users/dev")),
+            Some(Path::new("/home/demo")),
         )
         .unwrap();
         assert!(p.enabled);
@@ -4174,17 +4519,17 @@ port = 9
         assert!(p.login_url.is_empty());
         assert_eq!(
             p.log_file,
-            PathBuf::from("/Users/dev/.tongyun-dev/logs/demo.out")
+            PathBuf::from("/home/demo/.tongyun-dev/logs/demo.out")
         );
         assert_eq!(
             p.pid_file,
-            PathBuf::from("/Users/dev/.tongyun-dev/logs/demo.pid")
+            PathBuf::from("/home/demo/.tongyun-dev/logs/demo.pid")
         );
     }
 
     #[test]
     fn example_config_resolves() {
-        let home = Path::new("/Users/dev");
+        let home = Path::new("/home/demo");
         let cfg = parse_config(EXAMPLE_TOML).unwrap();
         let mut ids: Vec<_> = cfg.projects.keys().cloned().collect();
         ids.sort();
@@ -4214,10 +4559,10 @@ port = 9
         assert_eq!(api.java.as_deref(), Some("17"));
         assert_eq!(api.port, 8081);
         assert!(api.start.join(" ").contains("spring-boot:run"));
-        assert_eq!(api.root, PathBuf::from("/Users/dev/code/demo/demo-api"));
+        assert_eq!(api.root, PathBuf::from("/home/demo/code/demo/demo-api"));
         assert_eq!(
             api.log_file,
-            PathBuf::from("/Users/dev/.tongyun-dev/logs/demo_api.out")
+            PathBuf::from("/home/demo/.tongyun-dev/logs/demo_api.out")
         );
         let web = resolve_project(
             "demo_web",
@@ -4248,7 +4593,7 @@ port = 9
         assert!(!legacy.reason.is_empty());
         assert_eq!(
             legacy.tomcat.as_deref(),
-            Some(Path::new("/Users/dev/opt/tomcat-9"))
+            Some(Path::new("/home/demo/opt/tomcat-9"))
         );
         let err = cmd_start(&legacy).unwrap_err().to_string();
         assert!(err.contains("disabled"), "{err}");
@@ -4299,7 +4644,7 @@ start = ["true"]
 port = 3002
 "#;
         let cfg: FileConfig = parse_config(toml_str).unwrap();
-        let home = Path::new("/Users/dev");
+        let home = Path::new("/home/demo");
 
         let fs = resolve_project(
             "fullstack",
@@ -4327,6 +4672,7 @@ port = 3002
         let row_fs = ProjectRow {
             id: fs.id.clone(),
             name: fs.name.clone(),
+            group: Some("Demo".into()),
             root: path_to_string(&fs.root),
             enabled: fs.enabled,
             port: fs.port,
@@ -4348,10 +4694,12 @@ port = 3002
             serde_json::from_str(&serde_json::to_string(&row_fs).unwrap()).unwrap();
         assert_eq!(json_fs["node"], "20");
         assert_eq!(json_fs["java"], "17");
+        assert_eq!(json_fs["group"], "Demo");
 
         let row_none = ProjectRow {
             id: none.id.clone(),
             name: none.name.clone(),
+            group: None,
             root: path_to_string(&none.root),
             enabled: none.enabled,
             port: none.port,
@@ -4373,6 +4721,7 @@ port = 3002
             serde_json::from_str(&serde_json::to_string(&row_none).unwrap()).unwrap();
         assert!(json_none.get("node").is_none());
         assert!(json_none.get("java").is_none());
+        assert_eq!(json_none["group"], serde_json::Value::Null);
     }
 
     #[test]
@@ -5102,6 +5451,159 @@ echo starting proj_b
         assert!(detail_b.start.contains("echo starting proj_b"));
         assert_eq!(detail_b.port, 9000);
     }
+
+    #[test]
+    fn test_10_group_read_write_clear_and_preserves_comments() {
+        let toml_content = r#"# top comment
+[group.demo]
+label = "Demo 业务线"
+order = 1
+# reserved fields ignored during deserialization
+members = ["proj_a"]
+depends_on = ["backend"]
+
+[group.backend]
+label = "后端服务"
+order = 2
+
+[group.empty_grp]
+label = "空分组"
+order = 3
+
+# comment before proj_a
+[projects.proj_a]
+name = "proj_a"
+group = "demo"
+root = "@ROOT@/proj_a"
+start = ["bash", "-c", "echo start"]
+port = 8080
+
+# comment before proj_b
+[projects.proj_b]
+name = "proj_b"
+group = "unregistered"
+root = "@ROOT@/proj_b"
+start = ["bash", "-c", "echo start"]
+port = 9000
+"#;
+        let path = temp_config("t10_grp", toml_content);
+        let mut loaded = load(Some(&path)).unwrap();
+
+        let groups = loaded.groups();
+        assert_eq!(groups.len(), 4);
+        assert_eq!(groups[0].key, "demo");
+        assert_eq!(groups[0].label, "Demo 业务线");
+        assert_eq!(groups[0].order, Some(1));
+
+        assert_eq!(groups[1].key, "backend");
+        assert_eq!(groups[1].label, "后端服务");
+        assert_eq!(groups[1].order, Some(2));
+
+        assert_eq!(groups[2].key, "empty_grp");
+        assert_eq!(groups[2].label, "空分组");
+        assert_eq!(groups[2].order, Some(3));
+
+        // unregistered referenced by proj_b
+        assert_eq!(groups[3].key, "unregistered");
+        assert_eq!(groups[3].label, "unregistered");
+        assert_eq!(groups[3].order, None);
+
+        let list = loaded.list().unwrap();
+        assert_eq!(list.groups.len(), 4);
+
+        let p_a = list.projects.iter().find(|p| p.id == "proj_a").unwrap();
+        assert_eq!(p_a.group.as_deref(), Some("demo"));
+        let p_b = list.projects.iter().find(|p| p.id == "proj_b").unwrap();
+        assert_eq!(p_b.group.as_deref(), Some("unregistered"));
+
+        // Test create_group
+        let created = loaded.create_group("frontend", Some("前端项目")).unwrap();
+        assert_eq!(created.key, "frontend");
+        assert_eq!(created.label, "前端项目");
+
+        // Test rename_group_label
+        let renamed = loaded.rename_group_label("frontend", "前端展示").unwrap();
+        assert_eq!(renamed.label, "前端展示");
+
+        // Edit proj_b group using set_project_group to newly created "frontend"
+        let row_b = loaded
+            .set_project_group("proj_b", Some("frontend"))
+            .unwrap();
+        assert_eq!(row_b.group.as_deref(), Some("frontend"));
+
+        // Setting project group to an auto-created new group "auto_grp"
+        let row_a_auto = loaded
+            .set_project_group("proj_a", Some("auto_grp"))
+            .unwrap();
+        assert_eq!(row_a_auto.group.as_deref(), Some("auto_grp"));
+
+        // Clear proj_b group
+        let row_b_cleared = loaded.set_project_group("proj_b", None).unwrap();
+        assert_eq!(row_b_cleared.group, None);
+
+        // Check file content preserves comments and writes [group.auto_grp]
+        let text_after = std::fs::read_to_string(&path).unwrap();
+        assert!(text_after.contains("# top comment"));
+        assert!(text_after.contains("# comment before proj_a"));
+        assert!(text_after.contains("# comment before proj_b"));
+        assert!(text_after.contains("[group.auto_grp]"));
+        assert!(text_after.contains("group = \"auto_grp\""));
+
+        // Key validation tests
+        assert!(validate_group_key("valid-key_123").is_ok());
+        assert!(validate_group_key("").is_err());
+        assert!(validate_group_key("Invalid_Upper").is_err());
+        assert!(validate_group_key("has space").is_err());
+        assert!(validate_group_key(&"a".repeat(41)).is_err());
+
+        // generate_group_key tests
+        assert_eq!(generate_group_key("Demo", &[] as &[&str]), "demo");
+        assert_eq!(generate_group_key("API_v2", &[] as &[&str]), "api_v2");
+        assert_eq!(generate_group_key("web-app", &[] as &[&str]), "web-app");
+        assert_eq!(
+            generate_group_key("Demo Service", &[] as &[&str]),
+            "demo-service"
+        );
+        assert_eq!(
+            generate_group_key("Foo@Bar#123", &[] as &[&str]),
+            "foo-bar-123"
+        );
+        assert_eq!(
+            generate_group_key("  --hello..world-- ", &[] as &[&str]),
+            "hello-world"
+        );
+        assert_eq!(generate_group_key("前端项目", &[] as &[&str]), "g1");
+        assert_eq!(generate_group_key("后端项目", &["g1"]), "g2");
+        assert_eq!(generate_group_key("微服务", &["g1", "g2"]), "g3");
+        assert_eq!(generate_group_key("demo", &["demo"]), "g1");
+        assert_eq!(generate_group_key("demo", &["demo", "g1"]), "g2");
+        assert_eq!(generate_group_key("", &[] as &[&str]), "g1");
+
+        // resolve_or_create_group tests
+        assert_eq!(loaded.resolve_or_create_group("").unwrap(), None);
+        assert_eq!(loaded.resolve_or_create_group("   ").unwrap(), None);
+        let res_fe = loaded.resolve_or_create_group("前端").unwrap();
+        assert_eq!(res_fe.as_deref(), Some("g1"));
+        let groups = loaded.groups();
+        let g1_info = groups.iter().find(|g| g.key == "g1").unwrap();
+        assert_eq!(g1_info.label, "前端");
+        assert_eq!(
+            loaded.resolve_or_create_group("前端").unwrap().as_deref(),
+            Some("g1")
+        );
+        assert_eq!(
+            loaded.resolve_or_create_group("g1").unwrap().as_deref(),
+            Some("g1")
+        );
+
+        // Reload and check
+        let reloaded = load(Some(&path)).unwrap();
+        let list2 = reloaded.list().unwrap();
+        let p_a2 = list2.projects.iter().find(|p| p.id == "proj_a").unwrap();
+        assert_eq!(p_a2.group.as_deref(), Some("auto_grp"));
+        let p_b2 = list2.projects.iter().find(|p| p.id == "proj_b").unwrap();
+        assert_eq!(p_b2.group, None);
+    }
 }
 
 #[cfg(test)]
@@ -5204,7 +5706,7 @@ mod deps_tests {
 
     #[test]
     fn shipped_configs_have_no_pnpm_double_dash() {
-        let home = Path::new("/Users/dev");
+        let home = Path::new("/home/demo");
         for text in [EXAMPLE_TOML, TEMPLATE_TOML] {
             let cfg = parse_config(text).unwrap();
             for (id, p) in &cfg.projects {
@@ -5246,7 +5748,7 @@ auto_install = false
 start = ["pnpm", "dev", "--", "--port", "5174"]
 "#;
         let cfg = parse_config(text).unwrap();
-        let home = Some(Path::new("/Users/dev"));
+        let home = Some(Path::new("/home/demo"));
         let web = resolve_project("web", cfg.projects.get("web").unwrap(), home).unwrap();
         // 手写 start 命令原样执行，不再改写
         assert_eq!(

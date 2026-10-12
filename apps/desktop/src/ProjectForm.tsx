@@ -1,13 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
-import type { NewProjectReq, ProjectDetail, ProjectEditReq, ProjectRow } from "./types";
+import { useEffect, useMemo, useState } from "react";
+import type { GroupInfo, NewProjectReq, ProjectDetail, ProjectEditReq, ProjectRow } from "./types";
 import { buildEditRequest, validateProjectForm, type ProjectFormData } from "./projectValidation";
+import { getInitialGroupLabel, resolveFormGroup } from "./projectGroups";
 
 export { validateProjectForm, type ProjectFormData };
 
 interface ProjectFormProps {
   mode: "create" | "edit";
   initialDetail?: ProjectDetail | null;
+  groups?: GroupInfo[];
+  existingGroups?: string[];
   onClose: () => void;
   onSuccess: (projectId: string) => Promise<void> | void;
 }
@@ -15,6 +18,8 @@ interface ProjectFormProps {
 export function ProjectForm({
   mode,
   initialDetail,
+  groups = [],
+  existingGroups = [],
   onClose,
   onSuccess,
 }: ProjectFormProps) {
@@ -25,6 +30,7 @@ export function ProjectForm({
   const [form, setForm] = useState<ProjectFormData>(() => ({
     id: initialDetail?.id ?? "",
     name: initialDetail?.name ?? "",
+    group: getInitialGroupLabel(initialDetail?.group, groups),
     root: initialDetail?.root ?? "",
     start: initialDetail?.start ?? "",
     stop: initialDetail?.stop ?? "",
@@ -89,6 +95,24 @@ export function ProjectForm({
     });
   }
 
+  const availableGroups = useMemo(() => {
+    const list: { key: string; label: string }[] = [];
+    const seen = new Set<string>();
+    for (const g of groups) {
+      if (g.key && !seen.has(g.key)) {
+        seen.add(g.key);
+        list.push({ key: g.key, label: g.label || g.key });
+      }
+    }
+    for (const k of existingGroups) {
+      if (k && !seen.has(k)) {
+        seen.add(k);
+        list.push({ key: k, label: k });
+      }
+    }
+    return list;
+  }, [groups, existingGroups]);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setCoreError("");
@@ -101,8 +125,20 @@ export function ProjectForm({
 
     setSaving(true);
     try {
+      const resolved = resolveFormGroup(form.group, groups, existingGroups);
+      if (resolved.newGroup) {
+        await invoke("create_group", {
+          key: resolved.newGroup.key,
+          label: resolved.newGroup.label,
+        });
+      }
+
       if (isEditing) {
-        const editReq = buildEditRequest(initialDetail!, form) as ProjectEditReq;
+        const formWithGroup: ProjectFormData = {
+          ...form,
+          group: resolved.key ?? "",
+        };
+        const editReq = buildEditRequest(initialDetail!, formWithGroup) as ProjectEditReq;
         if (Object.keys(editReq).length === 0) {
           onClose();
           return;
@@ -115,6 +151,7 @@ export function ProjectForm({
         const createReq: NewProjectReq = {
           id: form.id.trim(),
           name: form.name.trim() || undefined,
+          group: resolved.key || undefined,
           root: form.root.trim(),
           start: form.start.trim(),
           stop: form.stop.trim() || undefined,
@@ -211,6 +248,26 @@ export function ProjectForm({
                 onChange={(e) => handleChange("name", e.target.value)}
               />
             </div>
+          </div>
+
+          {/* 所属分组 */}
+          <div className="form-group">
+            <label htmlFor="field-group">所属分组</label>
+            <input
+              id="field-group"
+              type="text"
+              list="group-datalist"
+              value={form.group ?? ""}
+              placeholder="从已有分组选择，或输入新分组名称（可选）"
+              onChange={(e) => handleChange("group", e.target.value)}
+            />
+            {availableGroups.length > 0 && (
+              <datalist id="group-datalist">
+                {availableGroups.map((g) => (
+                  <option key={g.key} value={g.label} />
+                ))}
+              </datalist>
+            )}
           </div>
 
           {/* 根目录 */}

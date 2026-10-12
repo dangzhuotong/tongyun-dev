@@ -29,6 +29,9 @@ enum Cmd {
     List {
         #[arg(long)]
         json: bool,
+        /// Include groups in JSON output: {"projects":[...],"groups":[{key,label,order}]}
+        #[arg(long)]
+        with_groups: bool,
     },
     /// Start a project and wait until the login page / port responds
     Start {
@@ -152,6 +155,28 @@ enum Cmd {
         /// Port env var name for port_mode=env (default PORT)
         #[arg(long)]
         port_env: Option<String>,
+        /// Project group name (optional)
+        #[arg(long)]
+        group: Option<String>,
+    },
+    /// Set or clear the group for a registered project
+    Group {
+        /// Project id
+        id: String,
+        /// Group key (omit when using --clear)
+        key: Option<String>,
+        /// Clear the group
+        #[arg(long, conflicts_with = "key")]
+        clear: bool,
+    },
+    /// Add a new group
+    #[command(name = "group-add")]
+    GroupAdd {
+        /// Group key
+        key: String,
+        /// Group display label (optional)
+        #[arg(long)]
+        label: Option<String>,
     },
     /// Remove a registered project (project files are not touched)
     Remove { id: String },
@@ -301,7 +326,7 @@ fn main() -> Result<()> {
         }
     };
     match cmd {
-        Cmd::List { json } => print_list(&loaded, json)?,
+        Cmd::List { json, with_groups } => print_list(&loaded, json, with_groups)?,
         Cmd::Start {
             ref id,
             open,
@@ -431,6 +456,7 @@ fn main() -> Result<()> {
             port_mode,
             port_arg,
             port_env,
+            group,
         } => {
             let row = loaded.add_project(NewProject {
                 id,
@@ -452,12 +478,63 @@ fn main() -> Result<()> {
                 port_mode,
                 port_arg,
                 port_env,
+                group,
                 ..Default::default()
             })?;
             println!(
                 "已注册项目 `{}`（{}），写入 {}",
                 row.id,
                 row.root,
+                loaded.path().display()
+            );
+        }
+        Cmd::Group { id, key, clear } => {
+            let row = if clear {
+                loaded.set_project_group(&id, None)?
+            } else if let Some(ref g) = key {
+                let trimmed = g.trim();
+                if trimmed.is_empty() {
+                    loaded.set_project_group(&id, None)?
+                } else {
+                    let existing_groups = loaded.groups();
+                    let matched_key = existing_groups
+                        .iter()
+                        .find(|info| info.label == trimmed || info.key == trimmed)
+                        .or_else(|| {
+                            existing_groups.iter().find(|info| {
+                                info.label.eq_ignore_ascii_case(trimmed)
+                                    || info.key.eq_ignore_ascii_case(trimmed)
+                            })
+                        })
+                        .map(|info| info.key.clone());
+
+                    if let Some(ref k) = matched_key {
+                        loaded.set_project_group(&id, Some(k))?
+                    } else if tongyun_dev_core::validate_group_key(trimmed).is_ok() {
+                        loaded.set_project_group(&id, Some(trimmed))?
+                    } else {
+                        anyhow::bail!(
+                            "未找到分组 `{trimmed}`，请先使用 `tongyun-dev group-add <key> --label {trimmed}` 创建分组"
+                        );
+                    }
+                }
+            } else {
+                anyhow::bail!("请指定分组 key，或使用 --clear 清空分组");
+            };
+            match row.group {
+                Some(ref g) => println!(
+                    "已将项目 `{id}` 分组设置为 `{g}`，写入 {}",
+                    loaded.path().display()
+                ),
+                None => println!("已清空项目 `{id}` 的分组，写入 {}", loaded.path().display()),
+            }
+        }
+        Cmd::GroupAdd { key, label } => {
+            let group = loaded.create_group(&key, label.as_deref())?;
+            println!(
+                "已创建分组 `{}`（显示名：{}），写入 {}",
+                group.key,
+                group.label,
                 loaded.path().display()
             );
         }
@@ -580,13 +657,31 @@ fn print_scan(report: &ScanReport) {
     }
 }
 
-fn print_list(loaded: &Loaded, json: bool) -> Result<()> {
+fn print_list(loaded: &Loaded, json: bool, with_groups: bool) -> Result<()> {
     let list = loaded.list().context("list projects")?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&list.projects)?);
+        if with_groups {
+            #[derive(serde::Serialize)]
+            struct ListWithGroups<'a> {
+                projects: &'a [tongyun_dev_core::ProjectRow],
+                groups: &'a [tongyun_dev_core::GroupInfo],
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&ListWithGroups {
+                    projects: &list.projects,
+                    groups: &list.groups,
+                })?
+            );
+        } else {
+            println!("{}", serde_json::to_string_pretty(&list.projects)?);
+        }
     } else {
         for project in &list.projects {
             let mut line = format!("{}\t{}\t{}", project.id, project.name, project.root);
+            if let Some(v) = &project.group {
+                line.push_str(&format!("\tgroup {v}"));
+            }
             if let Some(v) = &project.node {
                 line.push_str(&format!("\tnode {v}"));
             }
@@ -610,7 +705,22 @@ mod tests {
     #[test]
     fn parses_cli_arguments() {
         let cli = Cli::try_parse_from(["tongyun-dev", "list", "--json"]).unwrap();
-        assert!(matches!(cli.cmd, Some(Cmd::List { json: true })));
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::List {
+                json: true,
+                with_groups: false
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["tongyun-dev", "list", "--json", "--with-groups"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::List {
+                json: true,
+                with_groups: true
+            })
+        ));
 
         let cli = Cli::try_parse_from(["tongyun-dev", "start", "my_api", "--open"]).unwrap();
         assert!(matches!(cli.cmd, Some(Cmd::Start { ref id, open: true, .. }) if id == "my_api"));
@@ -754,5 +864,69 @@ mod tests {
 
         let assembled_java = tongyun_dev_core::assemble_start_cmd(&cmd, None, Some("17"));
         assert_eq!(assembled_java, vec!["pnpm", "dev"]);
+    }
+
+    #[test]
+    fn parses_group_arguments() {
+        let cli = Cli::try_parse_from(["tongyun-dev", "group", "web", "demo"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Group {
+                ref id,
+                key: Some(ref g),
+                clear: false
+            }) if id == "web" && g == "demo"
+        ));
+
+        let cli = Cli::try_parse_from(["tongyun-dev", "group", "web", "--clear"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Group {
+                ref id,
+                key: None,
+                clear: true
+            }) if id == "web"
+        ));
+
+        let cli =
+            Cli::try_parse_from(["tongyun-dev", "group-add", "demo", "--label", "Demo 业务线"])
+                .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::GroupAdd {
+                ref key,
+                label: Some(ref l),
+            }) if key == "demo" && l == "Demo 业务线"
+        ));
+
+        let cli = Cli::try_parse_from(["tongyun-dev", "group-add", "demo"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::GroupAdd {
+                ref key,
+                label: None,
+            }) if key == "demo"
+        ));
+
+        let cli = Cli::try_parse_from([
+            "tongyun-dev",
+            "add",
+            "web",
+            "--root",
+            "~/code/web",
+            "--start",
+            "pnpm dev",
+            "--group",
+            "frontend",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Add {
+                ref id,
+                group: Some(ref g),
+                ..
+            }) if id == "web" && g == "frontend"
+        ));
     }
 }

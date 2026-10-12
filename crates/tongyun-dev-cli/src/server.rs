@@ -228,6 +228,7 @@ pub fn overview(loaded: &Loaded) -> Result<Vec<Value>> {
             m.insert("enabled".into(), json!(row.enabled));
             m.insert("configured".into(), json!(row.configured));
             m.insert("reason".into(), json!(row.reason));
+            m.insert("group".into(), json!(row.group));
             m.insert("node".into(), json!(row.node));
             m.insert("java".into(), json!(row.java));
             m.insert("java_home".into(), json!(row.java_home));
@@ -254,6 +255,9 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
             Ok(list) => json_body(200, Value::Array(list)),
             Err(e) => err_json(500, format!("{e:#}")),
         },
+        "GET" if path == "/api/groups" => {
+            json_body(200, json!({"ok": true, "groups": loaded.groups()}))
+        }
         "GET" => {
             if let Some(id) = project_route(path, "logs") {
                 return match loaded.log_tail(id, LOG_LINES) {
@@ -277,7 +281,7 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
             let Some(id) = project_route(path, "") else {
                 return err_json(404, "not found");
             };
-            let edit: ProjectEdit = match serde_json::from_slice(&req.body) {
+            let mut edit: ProjectEdit = match serde_json::from_slice(&req.body) {
                 Ok(edit) => edit,
                 Err(e) => return err_json(400, format!("bad payload: {e}")),
             };
@@ -286,6 +290,12 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                 Ok(l) => l,
                 Err(e) => return err_json(500, format!("{e:#}")),
             };
+            if let Some(ref g) = edit.group {
+                match loaded.resolve_or_create_group(g) {
+                    Ok(resolved) => edit.group = Some(resolved.unwrap_or_default()),
+                    Err(e) => return err_json(400, format!("{e:#}")),
+                }
+            }
             match loaded.update_project(id, edit) {
                 Ok(row) => json_body(200, json!({"ok": true, "project": row})),
                 Err(e) => err_json(400, format!("{e:#}")),
@@ -333,7 +343,7 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
             }
         }
         "POST" if path == "/api/projects" => {
-            let new: NewProject = match serde_json::from_slice(&req.body) {
+            let mut new: NewProject = match serde_json::from_slice(&req.body) {
                 Ok(n) => n,
                 Err(e) => return err_json(400, format!("bad payload: {e}")),
             };
@@ -343,8 +353,35 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                 Ok(l) => l,
                 Err(e) => return err_json(500, format!("{e:#}")),
             };
+            if let Some(ref g) = new.group {
+                match loaded.resolve_or_create_group(g) {
+                    Ok(resolved) => new.group = resolved,
+                    Err(e) => return err_json(400, format!("{e:#}")),
+                }
+            }
             match loaded.add_project(new) {
                 Ok(row) => json_body(200, json!({"ok": true, "project": row})),
+                Err(e) => err_json(400, format!("{e:#}")),
+            }
+        }
+        "POST" if path == "/api/groups" => {
+            #[derive(serde::Deserialize)]
+            struct CreateGroupBody {
+                key: String,
+                #[serde(default)]
+                label: Option<String>,
+            }
+            let new: CreateGroupBody = match serde_json::from_slice(&req.body) {
+                Ok(n) => n,
+                Err(e) => return err_json(400, format!("bad payload: {e}")),
+            };
+            let _guard = state.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut loaded = match load(state) {
+                Ok(l) => l,
+                Err(e) => return err_json(500, format!("{e:#}")),
+            };
+            match loaded.create_group(&new.key, new.label.as_deref()) {
+                Ok(group) => json_body(200, json!({"ok": true, "group": group})),
                 Err(e) => err_json(400, format!("{e:#}")),
             }
         }
@@ -577,6 +614,10 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
     .filter.on .n { color: var(--ty-matcha); }
     .summary { margin-left: auto; color: var(--ty-text-muted); font-size: var(--ty-font-size-sm); }
 
+    .group-heading { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 8px; padding: 14px 0 4px; font-weight: 600; font-size: 15px; color: var(--ty-text); border-bottom: 1px solid var(--ty-border); margin-top: 10px; }
+    .group-heading:first-child { margin-top: 0; }
+    .group-heading .count { font-size: var(--ty-font-size-xs); color: var(--ty-text-muted); font-weight: normal; }
+
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
     .card {
       background: var(--ty-surface); border: 1px solid var(--ty-border); border-radius: var(--ty-radius-md);
@@ -734,6 +775,11 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       <div class="form-group">
         <label>显示名称（可选，默认同 ID）</label>
         <input id="addName" placeholder="例如：前端开发服务" />
+      </div>
+      <div class="form-group">
+        <label>所属分组（可选）</label>
+        <input id="addGroup" list="groupList" placeholder="选择已有分组或输入新分组名" />
+        <datalist id="groupList"></datalist>
       </div>
       <div class="form-group">
         <label>项目根路径</label>
@@ -906,6 +952,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
     }
     let currentLogId = null;
     let lastProjects = [];
+    let lastGroups = [];
     const busyIds = {};
     let query = '';
     let statusFilter = 'all';
@@ -935,10 +982,22 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
 
     async function fetchProjects() {
       try {
-        const res = await fetch('/api/projects');
+        const [res, gRes] = await Promise.all([
+          fetch('/api/projects'),
+          fetch('/api/groups').catch(() => null)
+        ]);
         const data = await res.json();
         if (!Array.isArray(data)) throw new Error(data.error || '加载失败');
         lastProjects = data;
+        if (gRes && gRes.ok) {
+          try {
+            const gData = await gRes.json();
+            if (gData && Array.isArray(gData.groups)) {
+              lastGroups = gData.groups;
+              renderGroupDatalist();
+            }
+          } catch (_) {}
+        }
         renderProjects(data);
       } catch (e) {
         console.error(e);
@@ -1000,6 +1059,115 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       document.getElementById('searchKbd').style.display = query ? 'none' : '';
     }
 
+    function renderProjectCard(p) {
+      const isRunning = p.running;
+      const enabled = p.enabled !== false;
+      const configured = isConfigured(p);
+      const portOpen = p.port_open;
+      const probeOk = p.login_probe.ok;
+      const code = p.login_probe.http_code;
+      const busy = busyIds[p.id];
+      const chips = [p.node ? `Node ${escapeHtml(p.node)}` : '', p.java ? `Java ${escapeHtml(p.java)}` : '']
+        .filter(Boolean).map(c => `<span class="chip">${c}</span>`).join('');
+      const conflict = p.port_conflict
+        ? `<div class="warn">端口 ${p.port} 被占用${p.port_holder ? '：' + escapeHtml(p.port_holder) : '（非本项目进程）'}</div>`
+        : '';
+
+      const state = p.state || (isRunning ? 'ready' : 'stopped');
+      let badgeClass = 'badge-stopped';
+      let stateText = '已停止';
+      if (!configured) {
+        stateText = '未配置';
+        badgeClass = 'badge-unconfigured';
+      } else if (!enabled) {
+        stateText = '已停用';
+        badgeClass = 'badge-stopped';
+      } else if (state === 'installing') {
+        badgeClass = 'badge-starting';
+        const n = p.elapsed_secs != null ? p.elapsed_secs : 0;
+        stateText = `安装依赖中 ${n} 秒`;
+      } else if (state === 'starting') {
+        badgeClass = 'badge-starting';
+        const n = p.elapsed_secs != null ? p.elapsed_secs : 0;
+        stateText = `启动中 ${n} 秒`;
+      } else if (state === 'port_open') {
+        badgeClass = 'badge-port_open';
+        stateText = '端口已通（等登录页）';
+      } else if (state === 'ready') {
+        badgeClass = 'badge-ready';
+        stateText = '就绪';
+      } else if (state === 'failed') {
+        badgeClass = 'badge-failed';
+        stateText = p.failure && p.failure.indexOf('依赖') !== -1 ? '依赖问题' : (p.failure ? '启动失败' : '失败：未知原因');
+      } else {
+        badgeClass = 'badge-stopped';
+        stateText = '已停止';
+      }
+
+      const canStart = enabled && configured && (state === 'stopped' || state === 'failed');
+      const canStop = enabled && (state === 'installing' || state === 'starting' || state === 'port_open' || state === 'ready' || state === 'failed');
+      const canOpenPage = enabled && (state === 'port_open' || state === 'ready');
+
+      let actionBtns = '';
+      if (!enabled) {
+        actionBtns = `<button class="btn-start" disabled title="${escapeHtml(p.reason)}">启动</button>`;
+      } else if (!configured) {
+        actionBtns = `<button class="btn-start" disabled title="缺端口或启动命令">启动</button>`;
+      } else if (busy) {
+        actionBtns = `<button class="btn-secondary" disabled>${busy}</button>`;
+      } else {
+        if (canStart) {
+          actionBtns += `<button class="btn-start" onclick="startProject('${p.id}')"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l12-7.5z"/></svg>启动</button>`;
+        }
+        if (p.deps_missing && state !== 'installing') {
+          actionBtns += `<button class="btn-secondary" onclick="installDeps('${p.id}')" title="${escapeHtml(p.install_command || '')}">安装依赖</button>`;
+        }
+        if (canStop) {
+          actionBtns += `<button class="btn-stop" onclick="stopProject('${p.id}')"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>停止</button>`;
+        }
+      }
+
+      const portText = !configured || !p.port ? '未配置' : `${p.port} · ${portOpen ? '已通' : '未通'}`;
+      const portCls = !configured || !p.port ? 'val-warn' : portOpen ? 'val-ok' : 'val-down';
+      const probeText = !configured ? '—' : code ? (probeOk ? `正常 ${code}` : `异常 ${code}`) : (isRunning ? '未就绪' : '未响应');
+
+      return `
+        <div class="card ${enabled ? '' : 'disabled'}">
+          <div class="card-head">
+            <div class="card-title">
+              <h3>${highlight(p.name)}</h3>
+              <code>${highlight(p.id)}</code>
+            </div>
+            <div class="badge ${badgeClass}" title="${stateText}">
+              <span class="dot"></span>
+              <span>${stateText}</span>
+            </div>
+          </div>
+          ${!enabled ? `<div class="reason">停用原因：${escapeHtml(p.reason)}</div>` : ''}
+          ${!configured ? `<div class="note">还没配置好：缺端口或启动命令。打开这个项目的「设置」填好就能启动。</div>` : ''}
+          ${conflict}
+          ${configured && enabled && state === 'failed' && p.failure ? `<div class="fail">${escapeHtml(p.failure)}</div>` : ''}
+          ${state === 'failed' && p.pid ? `<div class="note">进程 PID ${p.pid} 仍在，停止可清理，重启可重新尝试。</div>` : ''}
+          <div class="meta-list">
+            <div class="meta-item"><span class="meta-label">端口</span><span class="meta-val ${portCls}">${portText}</span></div>
+            <div class="meta-item"><span class="meta-label">进程</span><span class="meta-val ${p.pid ? '' : 'val-down'}">${p.pid ? 'PID ' + p.pid : '未运行'}</span></div>
+            <div class="meta-item"><span class="meta-label">登录页</span><span class="meta-val ${probeOk ? 'val-ok' : 'val-down'}">${probeText}</span></div>
+          </div>
+          <div class="root" title="${escapeHtml(p.root)}">${ICON_FOLDER}<span>${highlight(p.root)}</span></div>
+          ${chips ? `<div class="chips">${chips}</div>` : ''}
+          <div class="card-actions">
+            ${actionBtns}
+            <button class="btn-outline" ${enabled && configured && !busy ? `onclick="restartProject('${p.id}')"` : 'disabled'}>重启</button>
+            <button class="btn-outline" onclick="editProject('${p.id}')">设置</button>
+            <button class="btn-outline" ${canOpenPage ? `onclick="openProjectInBrowser('${p.id}')"` : 'disabled'} title="在系统浏览器打开登录/访问页面">网页</button>
+            <button class="btn-outline" onclick="openProjectDir('${p.id}')" title="在系统文件管理器中打开源码目录">目录</button>
+            <button class="btn-outline" data-id="${escapeHtml(p.id)}" data-name="${escapeHtml(p.name)}" onclick="openLogModal(this.dataset.id, this.dataset.name)">日志</button>
+            <button class="btn-danger-text" onclick="deleteProject('${p.id}')" title="从配置里删除这个项目" aria-label="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg></button>
+          </div>
+        </div>
+      `;
+    }
+
     function renderProjects(projects) {
       const grid = document.getElementById('projectGrid');
       renderFilters(projects);
@@ -1012,113 +1180,38 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         grid.innerHTML = '<div class="empty"><strong>没有匹配的项目</strong><span>换个关键词，或者清除筛选看全部项目。</span><button class="btn-secondary" onclick="clearFilters()">清除筛选</button></div>';
         return;
       }
-      grid.innerHTML = visible.map(p => {
-        const isRunning = p.running;
-        const enabled = p.enabled !== false;
-        const configured = isConfigured(p);
-        const portOpen = p.port_open;
-        const probeOk = p.login_probe.ok;
-        const code = p.login_probe.http_code;
-        const busy = busyIds[p.id];
-        const chips = [p.node ? `Node ${escapeHtml(p.node)}` : '', p.java ? `Java ${escapeHtml(p.java)}` : '']
-          .filter(Boolean).map(c => `<span class="chip">${c}</span>`).join('');
-        const conflict = p.port_conflict
-          ? `<div class="warn">端口 ${p.port} 被占用${p.port_holder ? '：' + escapeHtml(p.port_holder) : '（非本项目进程）'}</div>`
-          : '';
-
-        const state = p.state || (isRunning ? 'ready' : 'stopped');
-        let badgeClass = 'badge-stopped';
-        let stateText = '已停止';
-        if (!configured) {
-          stateText = '未配置';
-          badgeClass = 'badge-unconfigured';
-        } else if (!enabled) {
-          stateText = '已停用';
-          badgeClass = 'badge-stopped';
-        } else if (state === 'installing') {
-          badgeClass = 'badge-starting';
-          const n = p.elapsed_secs != null ? p.elapsed_secs : 0;
-          stateText = `安装依赖中 ${n} 秒`;
-        } else if (state === 'starting') {
-          badgeClass = 'badge-starting';
-          const n = p.elapsed_secs != null ? p.elapsed_secs : 0;
-          stateText = `启动中 ${n} 秒`;
-        } else if (state === 'port_open') {
-          badgeClass = 'badge-port_open';
-          stateText = '端口已通（等登录页）';
-        } else if (state === 'ready') {
-          badgeClass = 'badge-ready';
-          stateText = '就绪';
-        } else if (state === 'failed') {
-          badgeClass = 'badge-failed';
-          stateText = p.failure && p.failure.indexOf('依赖') !== -1 ? '依赖问题' : (p.failure ? '启动失败' : '失败：未知原因');
-        } else {
-          badgeClass = 'badge-stopped';
-          stateText = '已停止';
+      const hasAnyGroup = projects.some(p => p.group && p.group.trim());
+      if (!hasAnyGroup) {
+        grid.innerHTML = visible.map(renderProjectCard).join('');
+        return;
+      }
+      const groupMap = {};
+      lastGroups.forEach(g => {
+        if (g && g.key) groupMap[g.key] = g;
+      });
+      const groups = {};
+      visible.forEach(p => {
+        const key = (p.group && p.group.trim()) || '';
+        const info = key ? groupMap[key] : null;
+        const gKey = key || '__ungrouped__';
+        const label = info ? (info.label || key) : (key || '未分组');
+        const order = info && info.order != null ? info.order : null;
+        if (!groups[gKey]) {
+          groups[gKey] = { key: gKey, label, order, projects: [] };
         }
-
-        const canStart = enabled && configured && (state === 'stopped' || state === 'failed');
-        const canStop = enabled && (state === 'installing' || state === 'starting' || state === 'port_open' || state === 'ready' || state === 'failed');
-        const canOpenPage = enabled && (state === 'port_open' || state === 'ready');
-
-        let actionBtns = '';
-        if (!enabled) {
-          actionBtns = `<button class="btn-start" disabled title="${escapeHtml(p.reason)}">启动</button>`;
-        } else if (!configured) {
-          actionBtns = `<button class="btn-start" disabled title="缺端口或启动命令">启动</button>`;
-        } else if (busy) {
-          actionBtns = `<button class="btn-secondary" disabled>${busy}</button>`;
-        } else {
-          if (canStart) {
-            actionBtns += `<button class="btn-start" onclick="startProject('${p.id}')"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l12-7.5z"/></svg>启动</button>`;
-          }
-          if (p.deps_missing && state !== 'installing') {
-            actionBtns += `<button class="btn-secondary" onclick="installDeps('${p.id}')" title="${escapeHtml(p.install_command || '')}">安装依赖</button>`;
-          }
-          if (canStop) {
-            actionBtns += `<button class="btn-stop" onclick="stopProject('${p.id}')"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>停止</button>`;
-          }
-        }
-
-        const portText = !configured || !p.port ? '未配置' : `${p.port} · ${portOpen ? '已通' : '未通'}`;
-        const portCls = !configured || !p.port ? 'val-warn' : portOpen ? 'val-ok' : 'val-down';
-        const probeText = !configured ? '—' : code ? (probeOk ? `正常 ${code}` : `异常 ${code}`) : (isRunning ? '未就绪' : '未响应');
-
-        return `
-          <div class="card ${enabled ? '' : 'disabled'}">
-            <div class="card-head">
-              <div class="card-title">
-                <h3>${highlight(p.name)}</h3>
-                <code>${highlight(p.id)}</code>
-              </div>
-              <div class="badge ${badgeClass}" title="${stateText}">
-                <span class="dot"></span>
-                <span>${stateText}</span>
-              </div>
-            </div>
-            ${!enabled ? `<div class="reason">停用原因：${escapeHtml(p.reason)}</div>` : ''}
-            ${!configured ? `<div class="note">还没配置好：缺端口或启动命令。打开这个项目的「设置」填好就能启动。</div>` : ''}
-            ${conflict}
-            ${configured && enabled && state === 'failed' && p.failure ? `<div class="fail">${escapeHtml(p.failure)}</div>` : ''}
-            ${state === 'failed' && p.pid ? `<div class="note">进程 PID ${p.pid} 仍在，停止可清理，重启可重新尝试。</div>` : ''}
-            <div class="meta-list">
-              <div class="meta-item"><span class="meta-label">端口</span><span class="meta-val ${portCls}">${portText}</span></div>
-              <div class="meta-item"><span class="meta-label">进程</span><span class="meta-val ${p.pid ? '' : 'val-down'}">${p.pid ? 'PID ' + p.pid : '未运行'}</span></div>
-              <div class="meta-item"><span class="meta-label">登录页</span><span class="meta-val ${probeOk ? 'val-ok' : 'val-down'}">${probeText}</span></div>
-            </div>
-            <div class="root" title="${escapeHtml(p.root)}">${ICON_FOLDER}<span>${highlight(p.root)}</span></div>
-            ${chips ? `<div class="chips">${chips}</div>` : ''}
-            <div class="card-actions">
-              ${actionBtns}
-              <button class="btn-outline" ${enabled && configured && !busy ? `onclick="restartProject('${p.id}')"` : 'disabled'}>重启</button>
-              <button class="btn-outline" onclick="editProject('${p.id}')">设置</button>
-              <button class="btn-outline" ${canOpenPage ? `onclick="openProjectInBrowser('${p.id}')"` : 'disabled'} title="在系统浏览器打开登录/访问页面">网页</button>
-              <button class="btn-outline" onclick="openProjectDir('${p.id}')" title="在系统文件管理器中打开源码目录">目录</button>
-              <button class="btn-outline" data-id="${escapeHtml(p.id)}" data-name="${escapeHtml(p.name)}" onclick="openLogModal(this.dataset.id, this.dataset.name)">日志</button>
-              <button class="btn-danger-text" onclick="deleteProject('${p.id}')" title="从配置里删除这个项目" aria-label="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg></button>
-            </div>
-          </div>
-        `;
+        groups[gKey].projects.push(p);
+      });
+      const groupList = Object.values(groups).sort((a, b) => {
+        if (a.key === '__ungrouped__') return 1;
+        if (b.key === '__ungrouped__') return -1;
+        if (a.order != null && b.order != null) return a.order - b.order;
+        if (a.order != null) return -1;
+        if (b.order != null) return 1;
+        return a.label.localeCompare(b.label, 'zh-CN');
+      });
+      grid.innerHTML = groupList.map(g => {
+        const heading = `<div class="group-heading"><span>${escapeHtml(g.label)}</span><span class="count">${g.projects.length} 个项目</span></div>`;
+        return heading + g.projects.map(renderProjectCard).join('');
       }).join('');
     }
 
@@ -1161,15 +1254,62 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
     }
 
     let editingProject = null;
+    function renderGroupDatalist() {
+      const dl = document.getElementById('groupList');
+      if (!dl) return;
+      dl.innerHTML = (lastGroups || []).map(g => `<option value="${escapeHtml(g.label || g.key)}">${escapeHtml(g.key !== (g.label || g.key) ? g.key : '')}</option>`).join('');
+    }
+    function getInitialGroupLabel(key) {
+      const trimmed = (key || '').trim();
+      if (!trimmed) return '';
+      const found = (lastGroups || []).find(g => g.key === trimmed);
+      return (found && found.label) ? found.label : trimmed;
+    }
+    function generateGroupKey(label, existingKeys = []) {
+      const trimmed = (label || '').trim();
+      const isAscii = /^[\x00-\x7F]+$/.test(trimmed);
+      if (isAscii && trimmed.length > 0) {
+        let candidate = trimmed
+          .toLowerCase()
+          .replace(/[^a-z0-9_-]+/g, '-')
+          .replace(/^-+|-+$/g, '');
+        if (candidate.length > 40) {
+          candidate = candidate.slice(0, 40).replace(/-+$/, '');
+        }
+        if (candidate.length > 0 && !existingKeys.includes(candidate)) {
+          return candidate;
+        }
+      }
+      let idx = 1;
+      while (existingKeys.includes(`g${idx}`)) {
+        idx++;
+      }
+      return `g${idx}`;
+    }
+    function resolveFormGroup(rawInput, groups = []) {
+      const trimmed = (rawInput || '').trim();
+      if (!trimmed) return { key: '' };
+      const allExistingKeys = Array.from(new Set(groups.map(g => g.key).filter(Boolean)));
+      const exact = groups.find(g => g.label === trimmed || g.key === trimmed);
+      if (exact) return { key: exact.key };
+      const lower = trimmed.toLowerCase();
+      const ci = groups.find(g => (g.label || '').toLowerCase() === lower || (g.key || '').toLowerCase() === lower);
+      if (ci) return { key: ci.key };
+      const direct = allExistingKeys.find(k => k.toLowerCase() === lower);
+      if (direct) return { key: direct };
+      const genKey = generateGroupKey(trimmed, allExistingKeys);
+      return { key: genKey, newGroup: { key: genKey, label: trimmed } };
+    }
     function openAddModal() {
       editingProject = null;
       document.getElementById('editOptions').hidden = true;
       document.getElementById('projectFormTitle').textContent = '新增项目';
-      for (const key of ['Id', 'Name', 'Root', 'Start', 'Stop', 'Url', 'Node', 'Java']) {
+      for (const key of ['Id', 'Name', 'Group', 'Root', 'Start', 'Stop', 'Url', 'Node', 'Java']) {
         const input = document.getElementById('add' + key);
         input.value = ''; input.disabled = false;
       }
       document.getElementById('addPort').value = '8080';
+      renderGroupDatalist();
       document.getElementById('addModal').style.display = 'flex';
     }
     async function editProject(id) {
@@ -1183,8 +1323,11 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         for (const [key, field] of Object.entries({Health: 'health_url', Log: 'log_file', Timeout: 'start_timeout_secs', Grace: 'stop_grace_secs', Reason: 'reason'})) document.getElementById('edit' + key).value = editingProject[field] ?? '';
         document.getElementById('editEnabled').checked = editingProject.enabled;
         document.getElementById('editAutoInstall').checked = editingProject.auto_install;
-        const fields = {Id: 'id', Name: 'name', Root: 'root', Start: 'start', Stop: 'stop', Port: 'port', Url: 'login_url', Node: 'node', Java: 'java'};
+        const fields = {Id: 'id', Name: 'name', Group: 'group', Root: 'root', Start: 'start', Stop: 'stop', Port: 'port', Url: 'login_url', Node: 'node', Java: 'java'};
         for (const [key, field] of Object.entries(fields)) document.getElementById('add' + key).value = editingProject[field] ?? '';
+        if (editingProject.group) {
+          document.getElementById('addGroup').value = getInitialGroupLabel(editingProject.group);
+        }
         document.getElementById('addId').disabled = true;
         document.getElementById('addStart').disabled = !editingProject.start_editable;
         document.getElementById('addStop').disabled = !editingProject.stop_editable;
@@ -1201,6 +1344,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
     async function submitAddProject() {
       const id = document.getElementById('addId').value.trim();
       const name = document.getElementById('addName').value.trim();
+      const rawGroup = document.getElementById('addGroup').value.trim();
       const root = document.getElementById('addRoot').value.trim();
       const start = document.getElementById('addStart').value.trim();
       const stop = document.getElementById('addStop').value.trim();
@@ -1216,21 +1360,40 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
 
       const minimumPort = editingProject && !document.getElementById('editEnabled').checked ? 0 : 1;
       if (!Number.isInteger(port) || port < minimumPort || port > 65535) { alert('启用项目的端口须为 1–65535 的整数'); return; }
-      const payload = {
-        id, name, root, start,
-        stop: stop || null,
-        port,
-        login_url: url || null,
-        node: node || null,
-        java: java || null
-      };
 
       const save = document.getElementById('projectSave');
       if (save.disabled) return;
       save.disabled = true;
       try {
+        const resolved = resolveFormGroup(rawGroup, lastGroups || []);
+        if (resolved.newGroup) {
+          try {
+            await postJson('/api/groups', {
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ key: resolved.newGroup.key, label: resolved.newGroup.label })
+            });
+            if (!lastGroups.some(g => g.key === resolved.newGroup.key)) {
+              lastGroups.push({ key: resolved.newGroup.key, label: resolved.newGroup.label });
+              renderGroupDatalist();
+            }
+          } catch (ge) {
+            console.warn('创建分组失败或已存在：', ge);
+          }
+        }
+        const group = resolved.key || '';
+
+        const payload = {
+          id, name, group: group || null, root, start,
+          stop: stop || null,
+          port,
+          login_url: url || null,
+          node: node || null,
+          java: java || null
+        };
+
         if (editingProject) {
           delete payload.id;
+          payload.group = group;
           payload.enabled = document.getElementById('editEnabled').checked;
           payload.auto_install = document.getElementById('editAutoInstall').checked;
           payload.reason = document.getElementById('editReason').value.trim();

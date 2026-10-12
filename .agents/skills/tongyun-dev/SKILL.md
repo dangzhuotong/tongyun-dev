@@ -26,7 +26,7 @@ tongyun-dev ui [--port 9099]   # 网页控制台，默认 http://127.0.0.1:9099
 
 | 命令 | 作用 | Agent 注意 |
 | --- | --- | --- |
-| `list [--json]` | 已登记项目 | 先 list 再 start |
+| `list [--json] [--with-groups]` | 已登记项目 | 先 list 再 start；搭配 `--with-groups` 返回带 groups 对象 |
 | `status [id] [--json]` | 单项目或全部生命周期 | **解析 `--json`** |
 | `start <id> [--timeout N] [--json] [--open]` | 启到端口通/探针成功；`--open` 就绪后开页 | 可能先 `installing` |
 | `restart <id> [--timeout N] [--json] [--open]` | 停止成功后重新启动并等待就绪 | 停止失败不会继续启动 |
@@ -37,6 +37,8 @@ tongyun-dev ui [--port 9099]   # 网页控制台，默认 http://127.0.0.1:9099
 | `install <id> [--json]` | 装前端依赖 | |
 | `scan <dir> [--depth N] [--apply] [--json]` | 扫描识别项目；`--apply` 写入配置 | 先无 apply 预览 |
 | `add` / `remove` | 登记 / 删登记 | 不动项目文件 |
+| `group <id> [key] [--clear]` | 设置或清空项目分组 | `--clear` 清空 |
+| `group-add <key> [--label 名]` | 新建分组 | 写入 `[group.<key>]` |
 | `ui` | 起控制台 | 默认 9099 |
 
 ## 3. `status --json` 稳定字段
@@ -57,7 +59,7 @@ tongyun-dev ui [--port 9099]   # 网页控制台，默认 http://127.0.0.1:9099
 
 Agent 驱动建议：`start <id> --timeout 60 --json` → 检查退出码和 `ok` → 需要时 `logs <id> --json`；超时后读 `status <id> --json`，可再 `wait <id> --timeout 30 --json` 或显式 `stop <id> --json`。不要把等待超时当成进程已停止。
 
-启停 / 重启 / 安装 / 等待 / 日志的 JSON stdout 是单个 `{ok, action, id, status, logs, error}`。失败也尽量带当前状态；配置或项目不存在时 `status: null`。日志尚未生成时 `ok: true, logs.missing: true`。成功退出 0、操作失败 1、参数错误 2。参数错误只写 stderr。`--follow` / `--open` 不能和 `--json` 同用。`list` / `status` 的成功 JSON 结构不变。
+启停 / 重启 / 安装 / 等待 / 日志的 JSON stdout 是单个 `{ok, action, id, status, logs, error}`。失败也尽量带当前状态；配置或项目不存在时 `status: null`。日志尚未生成时 `ok: true, logs.missing: true`。成功退出 0、操作失败 1、参数错误 2。参数错误只写 stderr。`--follow` / `--open` 不能和 `--json` 同用。`list` / `status` 的成功 JSON 结构不变（`list --json` 为项目数组，`list --json --with-groups` 为 `{"projects":[...],"groups":[...]}`）。
 
 `start` / `restart` 的等待预算从启动命令返回后计算，不限制自定义脚本本身；慢探针可能额外约 5 秒。自动安装阶段等待失败会取消安装；只读 `wait` 不取消任何进程。
 

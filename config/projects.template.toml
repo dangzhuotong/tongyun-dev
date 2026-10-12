@@ -30,5 +30,13 @@
 #                 "config" 端口配置在项目自身文件（如 vite.config 等），行为同 none
 #   port_arg    port_mode="arg" 时的参数名（可选，缺省 "--port"，可自定义为 "-p" 等）
 #   port_env    port_mode="env" 时的环境变量名（可选，缺省 "PORT"，可自定义为 "VITE_PORT" 等）
+#   group       所属分组 key（可选，引用顶层 [group.<key>]；未定义的 key 也会作为同名组展示）
+#
+# 分组定义（可选）：
+# [group.<key>]
+#   label       显示名（可选，缺省使用 key）
+#   order       排序序号（可选，小的排在前面；未配置 order 的按 label 排在后面）
+#   members     预留，后续版本用于一组启停
+#   depends_on  预留，后续版本用于一组启停
 
 [projects]

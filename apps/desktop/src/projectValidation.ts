@@ -1,6 +1,7 @@
 export interface ProjectFormData {
   id: string;
   name: string;
+  group?: string;
   root: string;
   start: string;
   stop: string;
@@ -77,6 +78,7 @@ export function validateProjectForm(
 
 export interface EditBaseline {
   name: string;
+  group?: string | null;
   root: string;
   start: string;
   start_editable: boolean;
@@ -111,6 +113,7 @@ export function buildEditRequest(
     if ((before ?? "").trim() !== after.trim()) out[key] = after.trim();
   };
   text("name", base.name, form.name);
+  text("group", base.group, form.group ?? "");
   text("root", base.root, form.root);
   if (base.start_editable) text("start", base.start, form.start);
   if (base.stop_editable) text("stop", base.stop, form.stop);

@@ -23,6 +23,12 @@
 #   log_file    日志文件路径（可选，默认 ~/.tongyun-dev/logs/<id>.out）
 #   pid_file    PID 文件路径（可选，默认 ~/.tongyun-dev/logs/<id>.pid）
 #   auto_install  可选，缺省 true。根目录有 package.json 但缺 node_modules 时，启动前先自动装依赖（按锁文件选 pnpm / yarn / npm）；false 时只提示「依赖未安装」
-#   前端端口参数：pnpm 直接写 ["pnpm", "dev", "--port", "3000"]（不要加 `--`）；npm 写 ["npm", "run", "dev", "--", "--port", "3000"]
+#   port_mode   端口传递方式（可选，缺省 "none"）：
+#                 "none"   不向命令追加端口，也不注入环境变量；端口仅用于探活（默认，适用于 monorepo 或自有端口配置项目）
+#                 "arg"    启动时自动在命令末尾追加端口参数（pnpm/yarn 追加 `--port N`，npm run 追加 `-- --port N`）
+#                 "env"    启动时向子进程注入 PORT=N 环境变量（例如 Next/Nuxt/Express）
+#                 "config" 端口配置在项目自身文件（如 vite.config 等），行为同 none
+#   port_arg    port_mode="arg" 时的参数名（可选，缺省 "--port"，可自定义为 "-p" 等）
+#   port_env    port_mode="env" 时的环境变量名（可选，缺省 "PORT"，可自定义为 "VITE_PORT" 等）
 
 [projects]

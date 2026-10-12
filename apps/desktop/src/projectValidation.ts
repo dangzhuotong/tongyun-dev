@@ -15,6 +15,9 @@ export interface ProjectFormData {
   start_timeout_secs: number | string;
   /** 缺 node_modules 时启动前自动装依赖（缺省 true）。 */
   auto_install?: boolean;
+  port_mode?: string;
+  port_arg?: string;
+  port_env?: string;
 }
 
 export function validateProjectForm(
@@ -47,6 +50,21 @@ export function validateProjectForm(
     errors.port = "端口必须为 1-65535 之间的有效端口";
   }
 
+  if (data.port_mode !== undefined && data.port_mode !== "") {
+    const mode = data.port_mode.trim();
+    if (!["none", "arg", "env", "config"].includes(mode)) {
+      errors.port_mode = "端口传递方式必须为 none、arg、env 或 config";
+    }
+  }
+
+  if (data.port_mode === "arg" && data.port_arg !== undefined && data.port_arg.trim() === "") {
+    errors.port_arg = "参数名不能为空（如 --port）";
+  }
+
+  if (data.port_mode === "env" && data.port_env !== undefined && data.port_env.trim() === "") {
+    errors.port_env = "环境变量名不能为空（如 PORT）";
+  }
+
   if (data.enabled === false) {
     const reason = data.reason?.trim() ?? "";
     if (!reason) {
@@ -74,6 +92,9 @@ export interface EditBaseline {
   reason: string;
   start_timeout_secs?: number | null;
   auto_install?: boolean;
+  port_mode?: string | null;
+  port_arg?: string | null;
+  port_env?: string | null;
 }
 
 /**
@@ -111,5 +132,32 @@ export function buildEditRequest(
   if (form.auto_install !== undefined && form.auto_install !== (base.auto_install ?? true)) {
     out.auto_install = form.auto_install;
   }
+
+  const formPortMode = (form.port_mode ?? "none").trim();
+  const basePortMode = (base.port_mode ?? "none").trim();
+  if (formPortMode !== basePortMode) {
+    out.port_mode = formPortMode;
+  }
+
+  if (formPortMode === "arg") {
+    const formArg = (form.port_arg ?? "").trim();
+    const baseArg = (base.port_arg ?? "").trim();
+    if (formArg !== baseArg) {
+      out.port_arg = formArg;
+    }
+  } else if (base.port_arg && base.port_arg.trim() !== "") {
+    out.port_arg = "";
+  }
+
+  if (formPortMode === "env") {
+    const formEnv = (form.port_env ?? "").trim();
+    const baseEnv = (base.port_env ?? "").trim();
+    if (formEnv !== baseEnv) {
+      out.port_env = formEnv;
+    }
+  } else if (base.port_env && base.port_env.trim() !== "") {
+    out.port_env = "";
+  }
+
   return out;
 }

@@ -199,3 +199,125 @@ describe("buildEditRequest auto_install（缺 node_modules 自动装依赖）", 
     });
   });
 });
+
+describe("validateProjectForm port_mode 校验", () => {
+  const baseForm: ProjectFormData = {
+    id: "web",
+    name: "web",
+    root: "~/code/web",
+    start: "pnpm dev",
+    stop: "",
+    port: 5173,
+    login_url: "",
+    health_url: "",
+    log_file: "",
+    node: "22",
+    java: "",
+    enabled: true,
+    reason: "",
+    start_timeout_secs: "",
+  };
+
+  it("接受有效的 port_mode (none, arg, env, config)", () => {
+    for (const mode of ["none", "arg", "env", "config"]) {
+      const errors = validateProjectForm({ ...baseForm, port_mode: mode });
+      expect(errors.port_mode).toBeUndefined();
+    }
+  });
+
+  it("拒绝未知的 port_mode", () => {
+    const errors = validateProjectForm({ ...baseForm, port_mode: "custom_unknown" });
+    expect(errors.port_mode).toBeDefined();
+    expect(errors.port_mode).toContain("none、arg、env 或 config");
+  });
+
+  it("当 port_mode 为 arg 时，port_arg 不能为空白", () => {
+    const errors = validateProjectForm({ ...baseForm, port_mode: "arg", port_arg: "   " });
+    expect(errors.port_arg).toBeDefined();
+    expect(errors.port_arg).toContain("参数名不能为空");
+
+    const errorsOk = validateProjectForm({ ...baseForm, port_mode: "arg", port_arg: "-p" });
+    expect(errorsOk.port_arg).toBeUndefined();
+  });
+
+  it("当 port_mode 为 env 时，port_env 不能为空白", () => {
+    const errors = validateProjectForm({ ...baseForm, port_mode: "env", port_env: "   " });
+    expect(errors.port_env).toBeDefined();
+    expect(errors.port_env).toContain("环境变量名不能为空");
+
+    const errorsOk = validateProjectForm({ ...baseForm, port_mode: "env", port_env: "VITE_PORT" });
+    expect(errorsOk.port_env).toBeUndefined();
+  });
+});
+
+describe("buildEditRequest port_mode / port_arg / port_env", () => {
+  const base: EditBaseline = {
+    name: "web",
+    root: "~/code/web",
+    start: "pnpm dev",
+    start_editable: true,
+    stop: "",
+    stop_editable: true,
+    port: 5173,
+    login_url: "",
+    health_url: "",
+    log_file: "",
+    node: "22",
+    java: null,
+    enabled: true,
+    reason: "",
+    port_mode: "none",
+  };
+
+  const form: ProjectFormData = {
+    id: "web",
+    name: "web",
+    root: "~/code/web",
+    start: "pnpm dev",
+    stop: "",
+    port: 5173,
+    login_url: "",
+    health_url: "",
+    log_file: "",
+    node: "22",
+    java: "",
+    enabled: true,
+    reason: "",
+    start_timeout_secs: "",
+    port_mode: "none",
+  };
+
+  it("未改动 port_mode 时不提交", () => {
+    expect(buildEditRequest(base, form)).toEqual({});
+  });
+
+  it("改动为 arg 时提交 port_mode 与自定义 port_arg", () => {
+    expect(
+      buildEditRequest(base, { ...form, port_mode: "arg", port_arg: "-p" })
+    ).toEqual({ port_mode: "arg", port_arg: "-p" });
+  });
+
+  it("改动为 env 时提交 port_mode 与自定义 port_env", () => {
+    expect(
+      buildEditRequest(base, { ...form, port_mode: "env", port_env: "VITE_PORT" })
+    ).toEqual({ port_mode: "env", port_env: "VITE_PORT" });
+  });
+
+  it("从 arg 切换为 none 时清空旧 port_arg", () => {
+    const baseWithArg: EditBaseline = {
+      ...base,
+      port_mode: "arg",
+      port_arg: "--port",
+    };
+    expect(
+      buildEditRequest(baseWithArg, { ...form, port_mode: "none" })
+    ).toEqual({ port_mode: "none", port_arg: "" });
+  });
+
+  it("改为 config 时提交 port_mode", () => {
+    expect(
+      buildEditRequest(base, { ...form, port_mode: "config" })
+    ).toEqual({ port_mode: "config" });
+  });
+});
+

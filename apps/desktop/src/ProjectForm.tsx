@@ -41,6 +41,9 @@ export function ProjectForm({
         ? String(initialDetail.start_timeout_secs)
         : "",
     auto_install: initialDetail?.auto_install ?? true,
+    port_mode: initialDetail?.port_mode ?? "none",
+    port_arg: initialDetail?.port_arg ?? "--port",
+    port_env: initialDetail?.port_env ?? "PORT",
   }));
 
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -127,6 +130,15 @@ export function ProjectForm({
             ? Number(form.start_timeout_secs)
             : undefined,
           auto_install: form.auto_install === false ? false : undefined,
+          port_mode: form.port_mode && form.port_mode !== "none" ? form.port_mode : undefined,
+          port_arg:
+            form.port_mode === "arg"
+              ? form.port_arg?.trim() || "--port"
+              : undefined,
+          port_env:
+            form.port_mode === "env"
+              ? form.port_env?.trim() || "PORT"
+              : undefined,
         };
         await invoke<ProjectRow>("add_project", { req: createReq });
       }
@@ -300,6 +312,54 @@ export function ProjectForm({
                 onChange={(e) => handleChange("start_timeout_secs", e.target.value)}
               />
             </div>
+          </div>
+
+          {/* 端口传递方式 */}
+          <div className="form-grid">
+            <div className="form-group">
+              <label htmlFor="field-port-mode">端口传递方式</label>
+              <select
+                id="field-port-mode"
+                value={form.port_mode || "none"}
+                onChange={(e) => handleChange("port_mode", e.target.value)}
+              >
+                <option value="none">不传（只用于探活）</option>
+                <option value="arg">命令行参数</option>
+                <option value="env">环境变量 PORT</option>
+                <option value="config">写在项目自己的配置里</option>
+              </select>
+              {errors.port_mode && <span className="field-error">{errors.port_mode}</span>}
+            </div>
+
+            {form.port_mode === "arg" && (
+              <div className="form-group">
+                <label htmlFor="field-port-arg">参数名</label>
+                <input
+                  id="field-port-arg"
+                  type="text"
+                  value={form.port_arg ?? ""}
+                  placeholder="如 --port 或 -p"
+                  onChange={(e) => handleChange("port_arg", e.target.value)}
+                  className={errors.port_arg ? "invalid" : ""}
+                />
+                {errors.port_arg && <span className="field-error">{errors.port_arg}</span>}
+              </div>
+            )}
+
+            {form.port_mode === "env" && (
+              <div className="form-group">
+                <label htmlFor="field-port-env">变量名</label>
+                <input
+                  id="field-port-env"
+                  type="text"
+                  value={form.port_env ?? ""}
+                  placeholder="如 PORT 或 VITE_PORT"
+                  onChange={(e) => handleChange("port_env", e.target.value)}
+                  className={errors.port_env ? "invalid" : ""}
+                />
+                {errors.port_env && <span className="field-error">{errors.port_env}</span>}
+              </div>
+            )}
           </div>
 
           <div className="form-grid">

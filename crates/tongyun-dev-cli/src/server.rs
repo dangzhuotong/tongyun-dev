@@ -890,6 +890,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         id: c.id, name: c.name, root: c.root, start: c.start, stop: c.stop || null,
         port: c.port || null, health_url: c.health_url || null, login_url: c.login_url || null,
         node: c.node || null, java: c.java || null, background: c.background,
+        port_mode: c.port_mode || null,
         enabled: c.needs_tomcat ? false : null,
         reason: c.needs_tomcat ? 'Tomcat WAR：先填 Tomcat 安装目录（tomcat 字段）再启用' : null,
       }));

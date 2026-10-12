@@ -17,6 +17,10 @@ export type Project = {
   shell?: string | null;
   /** 缺 node_modules 时启动前自动装依赖（缺省 true）。 */
   auto_install?: boolean;
+  port_mode?: "none" | "arg" | "env" | "config" | string;
+  port_arg?: string | null;
+  port_env?: string | null;
+  hints?: string[];
 };
 
 export type ProjectRow = Project;
@@ -53,6 +57,7 @@ export type Status = {
   deps_missing?: boolean;
   /** 装依赖的命令，例如 "pnpm install"；不是前端项目时为空。 */
   install_command?: string;
+  hints?: string[];
 };
 
 export type LogTail = {
@@ -86,6 +91,10 @@ export type ProjectDetail = {
   start_timeout_secs?: number | null;
   stop_grace_secs?: number | null;
   auto_install?: boolean;
+  port_mode?: "none" | "arg" | "env" | "config" | string;
+  port_arg?: string | null;
+  port_env?: string | null;
+  hints?: string[];
 };
 
 export type NewProjectReq = {
@@ -107,6 +116,9 @@ export type NewProjectReq = {
   auto_install?: boolean;
   background?: boolean | null;
   tomcat?: string | null;
+  port_mode?: string | null;
+  port_arg?: string | null;
+  port_env?: string | null;
 };
 
 export type ProjectEditReq = {
@@ -125,6 +137,9 @@ export type ProjectEditReq = {
   start_timeout_secs?: number | null;
   stop_grace_secs?: number | null;
   auto_install?: boolean;
+  port_mode?: string | null;
+  port_arg?: string | null;
+  port_env?: string | null;
 };
 
 export type Confidence = "high" | "medium" | "low";

@@ -1213,6 +1213,7 @@ export function App() {
                 canOpenLog={canOpenLog}
                 onOpenLog={() => reveal("log")}
                 selected={selected}
+                running={status?.running ?? false}
               />
             </div>
           </>

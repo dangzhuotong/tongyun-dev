@@ -1,7 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useState } from "react";
 import type { GroupInfo, NewProjectReq, ProjectDetail, ProjectEditReq, ProjectRow } from "./types";
-import { buildEditRequest, validateProjectForm, type ProjectFormData } from "./projectValidation";
+import {
+  buildEditRequest,
+  formatAutoAnswersLines,
+  formatEnvLines,
+  parseAutoAnswersLines,
+  parseEnvLines,
+  validateProjectForm,
+  type ProjectFormData,
+} from "./projectValidation";
 import { getInitialGroupLabel, resolveFormGroup } from "./projectGroups";
 
 export { validateProjectForm, type ProjectFormData };
@@ -50,6 +58,9 @@ export function ProjectForm({
     port_mode: initialDetail?.port_mode ?? "none",
     port_arg: initialDetail?.port_arg ?? "--port",
     port_env: initialDetail?.port_env ?? "PORT",
+    pty: initialDetail?.pty ?? false,
+    env_text: formatEnvLines(initialDetail?.env),
+    auto_answers_text: formatAutoAnswersLines(initialDetail?.auto_answers),
   }));
 
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -176,6 +187,15 @@ export function ProjectForm({
             form.port_mode === "env"
               ? form.port_env?.trim() || "PORT"
               : undefined,
+          pty: form.pty ? true : undefined,
+          env: (() => {
+            const { env: parsed } = parseEnvLines(form.env_text ?? "");
+            return Object.keys(parsed).length > 0 ? parsed : undefined;
+          })(),
+          auto_answers: (() => {
+            const { answers: parsed } = parseAutoAnswersLines(form.auto_answers_text ?? "");
+            return parsed.length > 0 ? parsed : undefined;
+          })(),
         };
         await invoke<ProjectRow>("add_project", { req: createReq });
       }
@@ -505,6 +525,48 @@ export function ProjectForm({
               />
               <span>缺 node_modules 时启动前自动装依赖（按锁文件用 pnpm / yarn / npm）</span>
             </label>
+          </div>
+
+          {/* 伪终端运行 */}
+          <div className="form-group checkbox-group">
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={Boolean(form.pty)}
+                onChange={(e) => handleChange("pty", e.target.checked)}
+              />
+              <span>伪终端运行（交互脚本用）</span>
+            </label>
+          </div>
+
+          {/* 额外环境变量 */}
+          <div className="form-group">
+            <label htmlFor="field-env">额外环境变量</label>
+            <textarea
+              id="field-env"
+              rows={3}
+              value={form.env_text ?? ""}
+              placeholder={"每行 KEY=VALUE，例如：\nCI=1\nAPP_ENV=dev"}
+              onChange={(e) => handleChange("env_text", e.target.value)}
+              className={errors.env_text ? "invalid" : ""}
+            />
+            {errors.env_text && <span className="field-error">{errors.env_text}</span>}
+          </div>
+
+          {/* 自动应答 */}
+          <div className="form-group">
+            <label htmlFor="field-auto-answers">自动应答</label>
+            <textarea
+              id="field-auto-answers"
+              rows={3}
+              value={form.auto_answers_text ?? ""}
+              placeholder={"每行 匹配文字 => 发送内容，例如：\nSelect environment => dev\n(y/N) => y"}
+              onChange={(e) => handleChange("auto_answers_text", e.target.value)}
+              className={errors.auto_answers_text ? "invalid" : ""}
+            />
+            {errors.auto_answers_text && (
+              <span className="field-error">{errors.auto_answers_text}</span>
+            )}
           </div>
 
           {!form.enabled && (

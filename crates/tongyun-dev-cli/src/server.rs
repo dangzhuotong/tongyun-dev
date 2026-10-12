@@ -290,15 +290,42 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                 Ok(l) => l,
                 Err(e) => return err_json(500, format!("{e:#}")),
             };
+
+            // 先校验项目更新数据，避免校验失败留下空分组
+            if let Err(e) = loaded.validate_update_project(id, &edit) {
+                return err_json(400, format!("{e:#}"));
+            }
+
+            let mut created_group_key = None;
             if let Some(ref g) = edit.group {
-                match loaded.resolve_or_create_group(g) {
-                    Ok(resolved) => edit.group = Some(resolved.unwrap_or_default()),
-                    Err(e) => return err_json(400, format!("{e:#}")),
+                let trimmed = g.trim();
+                if !trimmed.is_empty() {
+                    let groups_before = loaded.groups();
+                    let already_exists = groups_before.iter().any(|info| {
+                        info.key == trimmed
+                            || info.label == trimmed
+                            || info.key.eq_ignore_ascii_case(trimmed)
+                            || info.label.eq_ignore_ascii_case(trimmed)
+                    });
+                    match loaded.resolve_or_create_group(g) {
+                        Ok(resolved) => {
+                            if !already_exists {
+                                created_group_key = resolved.clone();
+                            }
+                            edit.group = Some(resolved.unwrap_or_default());
+                        }
+                        Err(e) => return err_json(400, format!("{e:#}")),
+                    }
                 }
             }
             match loaded.update_project(id, edit) {
                 Ok(row) => json_body(200, json!({"ok": true, "project": row})),
-                Err(e) => err_json(400, format!("{e:#}")),
+                Err(e) => {
+                    if let Some(ref k) = created_group_key {
+                        let _ = loaded.remove_group(k);
+                    }
+                    err_json(400, format!("{e:#}"))
+                }
             }
         }
         "POST" if path == "/api/scan" => {
@@ -353,15 +380,42 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                 Ok(l) => l,
                 Err(e) => return err_json(500, format!("{e:#}")),
             };
+
+            // 先校验项目数据，避免校验失败留下空分组
+            if let Err(e) = loaded.validate_new_project(&new) {
+                return err_json(400, format!("{e:#}"));
+            }
+
+            let mut created_group_key = None;
             if let Some(ref g) = new.group {
-                match loaded.resolve_or_create_group(g) {
-                    Ok(resolved) => new.group = resolved,
-                    Err(e) => return err_json(400, format!("{e:#}")),
+                let trimmed = g.trim();
+                if !trimmed.is_empty() {
+                    let groups_before = loaded.groups();
+                    let already_exists = groups_before.iter().any(|info| {
+                        info.key == trimmed
+                            || info.label == trimmed
+                            || info.key.eq_ignore_ascii_case(trimmed)
+                            || info.label.eq_ignore_ascii_case(trimmed)
+                    });
+                    match loaded.resolve_or_create_group(g) {
+                        Ok(resolved) => {
+                            if !already_exists {
+                                created_group_key = resolved.clone();
+                            }
+                            new.group = resolved;
+                        }
+                        Err(e) => return err_json(400, format!("{e:#}")),
+                    }
                 }
             }
             match loaded.add_project(new) {
                 Ok(row) => json_body(200, json!({"ok": true, "project": row})),
-                Err(e) => err_json(400, format!("{e:#}")),
+                Err(e) => {
+                    if let Some(ref k) = created_group_key {
+                        let _ = loaded.remove_group(k);
+                    }
+                    err_json(400, format!("{e:#}"))
+                }
             }
         }
         "POST" if path == "/api/groups" => {
@@ -386,6 +440,49 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
             }
         }
         "POST" => {
+            if let Some(id) = project_route(path, "input") {
+                #[derive(serde::Deserialize)]
+                struct InputBody {
+                    #[serde(default)]
+                    text: Option<String>,
+                    #[serde(default = "default_input_enter")]
+                    enter: bool,
+                    #[serde(default)]
+                    key: Option<String>,
+                }
+                fn default_input_enter() -> bool {
+                    true
+                }
+                let body: InputBody = match serde_json::from_slice(&req.body) {
+                    Ok(b) => b,
+                    Err(e) => return err_json(400, format!("bad payload: {e}")),
+                };
+                let data = match tongyun_dev_core::resolve_input_data(
+                    body.text.as_deref(),
+                    body.enter,
+                    body.key.as_deref(),
+                ) {
+                    Ok(d) => d,
+                    Err(e) => return err_json(400, format!("{e:#}")),
+                };
+                return match loaded.send_input(id, &data) {
+                    Ok(()) => json_body(200, json!({"ok": true})),
+                    Err(e) => {
+                        let msg = format!("{e:#}");
+                        if msg.contains("未在运行") || msg.contains("not running") {
+                            err_json(409, msg)
+                        } else if msg.contains("管道已满") {
+                            // 子进程未读取输入，管道缓冲区已满
+                            err_json(409, msg)
+                        } else if msg.contains("不能超过 4096 字节") {
+                            // 单次输入超出 4096 字节上限
+                            err_json(400, msg)
+                        } else {
+                            err_json(400, msg)
+                        }
+                    }
+                };
+            }
             let action = ["start", "stop", "restart", "install", "open", "open-dir"]
                 .into_iter()
                 .find_map(|a| project_route(path, a).map(|id| (a, id)));

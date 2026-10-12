@@ -21,7 +21,17 @@ export type Project = {
   port_mode?: "none" | "arg" | "env" | "config" | string;
   port_arg?: string | null;
   port_env?: string | null;
+  pty?: boolean;
+  env?: Record<string, string>;
+  auto_answers?: AutoAnswer[];
   hints?: string[];
+};
+
+export type AutoAnswer = {
+  expect: string;
+  send: string;
+  once?: boolean;
+  regex?: boolean;
 };
 
 export type ProjectRow = Project;
@@ -103,6 +113,9 @@ export type ProjectDetail = {
   port_mode?: "none" | "arg" | "env" | "config" | string;
   port_arg?: string | null;
   port_env?: string | null;
+  pty?: boolean;
+  env?: Record<string, string>;
+  auto_answers?: AutoAnswer[];
   hints?: string[];
 };
 
@@ -129,6 +142,9 @@ export type NewProjectReq = {
   port_mode?: string | null;
   port_arg?: string | null;
   port_env?: string | null;
+  pty?: boolean;
+  env?: Record<string, string>;
+  auto_answers?: AutoAnswer[];
 };
 
 export type ProjectEditReq = {
@@ -151,6 +167,9 @@ export type ProjectEditReq = {
   port_mode?: string | null;
   port_arg?: string | null;
   port_env?: string | null;
+  pty?: boolean;
+  env?: Record<string, string>;
+  auto_answers?: AutoAnswer[];
 };
 
 export type Confidence = "high" | "medium" | "low";

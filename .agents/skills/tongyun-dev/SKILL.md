@@ -35,6 +35,7 @@ tongyun-dev ui [--port 9099]   # 网页控制台，默认 http://127.0.0.1:9099
 | `wait <id> --timeout N [--json]` | 观察已有服务直到就绪 | 不启动、不停止；超时返回非零 |
 | `open <id> [--dir]` | 开页面或目录 | |
 | `install <id> [--json]` | 装前端依赖 | |
+| `input <id> [text] [--no-enter] [--key key]` | 向运行中交互脚本发送输入或按键 | 支持 `--json` |
 | `scan <dir> [--depth N] [--apply] [--json]` | 扫描识别项目；`--apply` 写入配置 | 先无 apply 预览 |
 | `add` / `remove` | 登记 / 删登记 | 不动项目文件 |
 | `group <id> [key] [--clear]` | 设置或清空项目分组 | `--clear` 清空 |
@@ -63,6 +64,8 @@ Agent 驱动建议：`start <id> --timeout 60 --json` → 检查退出码和 `ok
 
 `start` / `restart` 的等待预算从启动命令返回后计算，不限制自定义脚本本身；慢探针可能额外约 5 秒。自动安装阶段等待失败会取消安装；只读 `wait` 不取消任何进程。
 
+向运行中的交互脚本发送输入：`tongyun-dev input <id> [text] [--no-enter] [--key key] [--json]`，键位支持 `up` / `down` / `left` / `right` / `enter` / `tab` / `esc` / `ctrl-c`。项目必须在运行中且拥有标准输入管道（FIFO）。注意：Windows 暂不支持向进程发送输入；单次输入上限 4096 字节（超限报错）；日志回显默认只记录占位符（不落明文）；管道满返回「子进程没有读取输入（管道已满）」。
+
 ## 4. HTTP 控制台（:9099）
 
 本机 `tongyun-dev ui` 后：
@@ -73,6 +76,7 @@ Agent 驱动建议：`start <id> --timeout 60 --json` → 检查退出码和 `ok
 | GET | `/api/projects/{id}` | 项目设置详情 |
 | PATCH | `/api/projects/{id}` | 部分更新项目设置 |
 | GET | `/api/projects/{id}/logs` | 日志 |
+| POST | `/api/projects/{id}/input` | 发送输入/按键（非运行中/管道满返回 409，超限返回 400，Windows 暂不支持） |
 | POST | `/api/projects/{id}/start\|stop\|restart\|install\|open\|open-dir` | 动作 |
 | POST | `/api/projects` | 新增登记 |
 | DELETE | `/api/projects/{id}` | 删登记 |

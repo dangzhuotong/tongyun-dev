@@ -53,6 +53,17 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AutoAnswer {
+    pub expect: String,
+    #[serde(default)]
+    pub send: String,
+    #[serde(default = "default_true")]
+    pub once: bool,
+    #[serde(default)]
+    pub regex: bool,
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 struct Project {
     #[serde(default)]
@@ -115,6 +126,15 @@ struct Project {
     /// 端口环境变量名（缺省 "PORT"）
     #[serde(default)]
     pub port_env: Option<String>,
+    /// 额外环境变量（可选）
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// 伪终端运行（可选，缺省 false）。
+    #[serde(default)]
+    pub pty: bool,
+    /// 自动应答规则（可选）。
+    #[serde(default)]
+    pub auto_answers: Vec<AutoAnswer>,
 }
 
 struct Vars {
@@ -154,9 +174,17 @@ struct Resolved {
     pub port_mode: String,
     pub port_arg: Option<String>,
     pub port_env: Option<String>,
+    pub env: std::collections::BTreeMap<String, String>,
+    pub pty: bool,
+    pub auto_answers: Vec<AutoAnswer>,
 }
 
 impl Resolved {
+    #[cfg(unix)]
+    pub fn stdin_fifo_path(&self) -> PathBuf {
+        self.log_dir.join(format!("{}.stdin", self.id))
+    }
+
     fn catalina_env(&self) -> Vec<(String, String)> {
         let Some(tomcat) = &self.tomcat else {
             return Vec::new();
@@ -228,6 +256,12 @@ pub struct ProjectRow {
     pub port_arg: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port_env: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub pty: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto_answers: Vec<AutoAnswer>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -421,6 +455,9 @@ impl Loaded {
                 port_mode: resolved.port_mode,
                 port_arg: resolved.port_arg,
                 port_env: resolved.port_env,
+                env: resolved.env.clone(),
+                pty: resolved.pty,
+                auto_answers: resolved.auto_answers.clone(),
             });
         }
         let groups = self.groups();
@@ -543,9 +580,123 @@ pub fn generate_group_key<S: AsRef<str>, I: IntoIterator<Item = S>>(
     }
 }
 
+#[cfg(unix)]
+#[derive(Debug, Default, Serialize, serde::Deserialize)]
+struct AutoAnswersState {
+    pub last_log_offset: u64,
+    #[serde(default)]
+    pub triggered_counts: std::collections::BTreeMap<usize, usize>,
+}
+
+#[cfg(unix)]
+impl Loaded {
+    pub(crate) fn check_auto_answers(&self, p: &Resolved) -> Result<()> {
+        if p.auto_answers.is_empty() {
+            return Ok(());
+        }
+        if tracked_pids(p).is_empty() {
+            return Ok(());
+        }
+        if !p.log_file.exists() {
+            return Ok(());
+        }
+
+        let state_path = p.log_dir.join(format!("{}.answers.json", p.id));
+        let mut state: AutoAnswersState = if state_path.exists() {
+            std::fs::read_to_string(&state_path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default()
+        } else {
+            AutoAnswersState::default()
+        };
+
+        use std::fs::File;
+        use std::io::{Read, Seek, SeekFrom};
+
+        let mut file = match File::open(&p.log_file) {
+            Ok(f) => f,
+            Err(_) => return Ok(()),
+        };
+        let file_len = match file.metadata() {
+            Ok(m) => m.len(),
+            Err(_) => return Ok(()),
+        };
+
+        if file_len <= state.last_log_offset {
+            return Ok(());
+        }
+
+        if file.seek(SeekFrom::Start(state.last_log_offset)).is_err() {
+            return Ok(());
+        }
+
+        let mut buf = Vec::new();
+        if file.read_to_end(&mut buf).is_err() {
+            return Ok(());
+        }
+
+        state.last_log_offset = file_len;
+
+        let new_text = String::from_utf8_lossy(&buf);
+
+        let filtered_lines: Vec<&str> = new_text
+            .lines()
+            .filter(|line| !line.starts_with("› "))
+            .collect();
+        if filtered_lines.is_empty() {
+            if let Ok(json) = serde_json::to_string(&state) {
+                let _ = std::fs::write(&state_path, json);
+            }
+            return Ok(());
+        }
+        let scan_text = filtered_lines.join("\n");
+
+        for (idx, rule) in p.auto_answers.iter().enumerate() {
+            let triggered_count = state.triggered_counts.get(&idx).copied().unwrap_or(0);
+            if rule.once && triggered_count > 0 {
+                continue;
+            }
+
+            let matched = if rule.regex {
+                match regex::Regex::new(&rule.expect) {
+                    Ok(re) => re.is_match(&scan_text),
+                    Err(_) => false,
+                }
+            } else {
+                scan_text.contains(&rule.expect)
+            };
+
+            if matched {
+                let to_send = format!("{}\n", rule.send);
+                let echo = format!("› [自动应答：第 {} 条规则]", idx + 1);
+                if let Err(e) = self.send_input_internal(&p.id, &to_send, Some(echo)) {
+                    eprintln!("auto_answer failed to send input for `{}`: {e}", p.id);
+                } else {
+                    *state.triggered_counts.entry(idx).or_insert(0) += 1;
+                }
+            }
+        }
+
+        if let Ok(json) = serde_json::to_string(&state) {
+            let _ = std::fs::write(&state_path, json);
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(not(unix))]
+impl Loaded {
+    pub(crate) fn check_auto_answers(&self, _p: &Resolved) -> Result<()> {
+        Ok(())
+    }
+}
+
 impl Loaded {
     pub fn status(&self, id: &str) -> Result<StatusJson> {
         let project = self.resolve(id)?;
+        let _ = self.check_auto_answers(&project);
         let peers = self.peer_pids(&project.id);
         Ok(status_of(&project, &peers))
     }
@@ -680,7 +831,9 @@ impl Loaded {
     ) -> Result<StatusJson> {
         let began = Instant::now();
         let mut last_state = None;
+        let project = self.resolve(id)?;
         loop {
+            let _ = self.check_auto_answers(&project);
             if st.port_conflict {
                 bail!("端口 {} 被其他进程占用：{}", st.port, st.port_holder);
             }
@@ -819,6 +972,90 @@ impl Loaded {
         Ok(())
     }
 
+    pub const MAX_INPUT_BYTES: usize = MAX_INPUT_BYTES;
+
+    /// 向运行中的项目标准输入管道写入数据。
+    pub fn send_input(&self, id: &str, data: &str) -> Result<()> {
+        self.send_input_internal(id, data, None)
+    }
+
+    pub(crate) fn send_input_internal(
+        &self,
+        id: &str,
+        data: &str,
+        custom_echo: Option<String>,
+    ) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = id;
+            let _ = data;
+            let _ = custom_echo;
+            bail!("Windows 暂不支持向进程发送输入");
+        }
+        #[cfg(unix)]
+        {
+            if data.len() > MAX_INPUT_BYTES {
+                bail!("单次输入不能超过 4096 字节");
+            }
+            let p = self.resolve(id)?;
+            if tracked_pids(&p).is_empty() {
+                bail!("项目 `{id}` 未在运行");
+            }
+            let fifo_path = p.stdin_fifo_path();
+            if !fifo_path.exists() {
+                bail!("项目 `{id}` 输入管道不存在");
+            }
+            use std::ffi::CString;
+            use std::io::Write;
+            use std::os::unix::ffi::OsStrExt;
+            use std::os::unix::io::FromRawFd;
+
+            let c_path = CString::new(fifo_path.as_os_str().as_bytes())
+                .with_context(|| format!("convert path to cstring: {}", fifo_path.display()))?;
+
+            let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK) };
+            if fd < 0 {
+                let err = std::io::Error::last_os_error();
+                bail!("无法写入输入管道（打开失败）：{err}");
+            }
+            let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+            if let Err(e) = file.write_all(data.as_bytes()) {
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.raw_os_error() == Some(libc::EAGAIN)
+                    || e.raw_os_error() == Some(libc::EWOULDBLOCK)
+                {
+                    bail!("子进程没有读取输入（管道已满）");
+                } else {
+                    bail!("向项目 `{id}` 写入输入失败: {e}");
+                }
+            }
+
+            if !p.pty {
+                let echo_text = if let Some(echo) = custom_echo {
+                    echo
+                } else {
+                    match data {
+                        "\x1b[A" => "› [按键 up]".to_string(),
+                        "\x1b[B" => "› [按键 down]".to_string(),
+                        "\x1b[C" => "› [按键 right]".to_string(),
+                        "\x1b[D" => "› [按键 left]".to_string(),
+                        "\t" => "› [按键 tab]".to_string(),
+                        "\x1b" => "› [按键 esc]".to_string(),
+                        "\x03" => "› [按键 ctrl-c]".to_string(),
+                        "\n" | "\r" => "› [按键 enter]".to_string(),
+                        other => {
+                            let count = other.chars().count();
+                            format!("› [已发送 {count} 个字符]")
+                        }
+                    }
+                };
+                append_log_line(&p.log_file, &echo_text);
+            }
+
+            Ok(())
+        }
+    }
+
     fn resolve(&self, id: &str) -> Result<Resolved> {
         let project = self
             .config
@@ -838,6 +1075,42 @@ pub fn load(explicit: Option<&Path>) -> Result<Loaded> {
 }
 
 pub const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../../../config/projects.template.toml");
+pub const MAX_INPUT_BYTES: usize = 4096;
+
+pub fn map_key(key: &str) -> Option<&'static str> {
+    match key.to_ascii_lowercase().as_str() {
+        "up" => Some("\x1b[A"),
+        "down" => Some("\x1b[B"),
+        "right" => Some("\x1b[C"),
+        "left" => Some("\x1b[D"),
+        "enter" => Some("\n"),
+        "tab" => Some("\t"),
+        "esc" | "escape" => Some("\x1b"),
+        "ctrl-c" | "ctrl_c" | "ctrlc" => Some("\x03"),
+        _ => None,
+    }
+}
+
+pub fn resolve_input_data(text: Option<&str>, enter: bool, key: Option<&str>) -> Result<String> {
+    let mut data = String::new();
+    let has_key = key.is_some();
+    if let Some(t) = text {
+        data.push_str(t);
+        if enter && !has_key {
+            data.push('\n');
+        }
+    } else if enter && !has_key {
+        data.push('\n');
+    }
+    if let Some(k) = key {
+        let mapped = map_key(k).ok_or_else(|| anyhow::anyhow!("未知按键: {k}"))?;
+        data.push_str(mapped);
+    }
+    if data.is_empty() {
+        bail!("empty input: specify text or key");
+    }
+    Ok(data)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ConfigInfo {
@@ -1339,6 +1612,9 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
         port_mode,
         port_arg,
         port_env,
+        env: p.env.clone(),
+        pty: p.pty,
+        auto_answers: p.auto_answers.clone(),
     })
 }
 
@@ -2360,6 +2636,9 @@ fn spawn_install(p: &Resolved, then_start: bool) -> Result<thread::JoinHandle<()
             cmd.env(k, v);
         }
     }
+    for (k, v) in &p.env {
+        cmd.env(k, v);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -2552,6 +2831,56 @@ pub fn assemble_start_cmd(
     start.to_vec()
 }
 
+#[cfg(unix)]
+fn prepare_stdin_fifo(fifo_path: &Path) -> Result<std::fs::File> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::FromRawFd;
+
+    if fifo_path.exists() || std::fs::symlink_metadata(fifo_path).is_ok() {
+        let _ = std::fs::remove_file(fifo_path);
+    }
+    if let Some(parent) = fifo_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let c_path = CString::new(fifo_path.as_os_str().as_bytes())
+        .with_context(|| format!("convert path to cstring: {}", fifo_path.display()))?;
+
+    let res = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+    if res != 0 {
+        let err = std::io::Error::last_os_error();
+        bail!("mkfifo failed for {}: {}", fifo_path.display(), err);
+    }
+
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR) };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        let _ = std::fs::remove_file(fifo_path);
+        bail!(
+            "open FIFO O_RDWR failed for {}: {}",
+            fifo_path.display(),
+            err
+        );
+    }
+
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn shell_escape(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 fn spawn_background(p: &Resolved, start_cmd: &[String], env: &[(String, String)]) -> Result<()> {
     if start_cmd.is_empty() {
         bail!("empty start command");
@@ -2564,28 +2893,74 @@ fn spawn_background(p: &Resolved, start_cmd: &[String], env: &[(String, String)]
     let log_err = log
         .try_clone()
         .with_context(|| format!("clone log handle {}", p.log_file.display()))?;
-    let mut cmd = Command::new(&start_cmd[0]);
-    cmd.args(&start_cmd[1..])
-        .stdin(Stdio::null())
-        .stdout(log)
-        .stderr(log_err)
-        .current_dir(&p.root);
+
+    #[cfg(unix)]
+    let mut cmd = if p.pty {
+        #[cfg(target_os = "macos")]
+        {
+            let mut c = Command::new("script");
+            c.arg("-q").arg("/dev/null").args(start_cmd);
+            c
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let escaped_cmd = start_cmd
+                .iter()
+                .map(|s| shell_escape(s))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut c = Command::new("script");
+            c.args(["-qfec", &escaped_cmd, "/dev/null"]);
+            c
+        }
+    } else {
+        let mut c = Command::new(&start_cmd[0]);
+        c.args(&start_cmd[1..]);
+        c
+    };
+
+    #[cfg(not(unix))]
+    let mut cmd = {
+        let mut c = Command::new(&start_cmd[0]);
+        c.args(&start_cmd[1..]);
+        c
+    };
+
+    cmd.stdout(log).stderr(log_err).current_dir(&p.root);
+
+    #[cfg(unix)]
+    {
+        let fifo_file = prepare_stdin_fifo(&p.stdin_fifo_path())?;
+        cmd.stdin(Stdio::from(fifo_file));
+    }
+    #[cfg(not(unix))]
+    {
+        cmd.stdin(Stdio::null());
+    }
+
     for (k, v) in env {
         if !v.is_empty() {
             cmd.env(k, v);
         }
+    }
+    for (k, v) in &p.env {
+        cmd.env(k, v);
     }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("spawn {}", start_cmd[0]))?;
+    let spawn_name = if p.pty { "script" } else { &start_cmd[0] };
+    let mut child = cmd.spawn().with_context(|| format!("spawn {spawn_name}"))?;
     let pid = child.id();
     if let Err(err) = std::fs::write(&p.pid_file, format!("{pid}\n")) {
         signal_pid(pid, "-KILL");
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(p.stdin_fifo_path());
+            let _ = std::fs::remove_file(p.log_dir.join(format!("{}.answers.json", p.id)));
+        }
         return Err(err).with_context(|| format!("write pid {}", p.pid_file.display()));
     }
     thread::spawn(move || {
@@ -2673,11 +3048,26 @@ fn cmd_start_detached(p: &Resolved) -> Result<()> {
     };
     write_start_marker(&p.pid_file, &marker)?;
 
+    #[cfg(unix)]
+    {
+        let initial_offset = std::fs::metadata(&p.log_file).map(|m| m.len()).unwrap_or(0);
+        let init_state = AutoAnswersState {
+            last_log_offset: initial_offset,
+            triggered_counts: std::collections::BTreeMap::new(),
+        };
+        if let Ok(json) = serde_json::to_string(&init_state) {
+            let _ = std::fs::write(p.log_dir.join(format!("{}.answers.json", p.id)), json);
+        }
+    }
+
     if p.background {
         spawn_background(p, &start_cmd, &tc_env)?;
     } else {
         let mut full_env = tc_env;
         full_env.extend(p.catalina_env());
+        for (k, v) in &p.env {
+            full_env.push((k.clone(), v.clone()));
+        }
         run_cmd(&start_cmd, Some(&p.root), &full_env)?;
     }
     Ok(())
@@ -2825,6 +3215,33 @@ fn listener_hint(port: u16) -> String {
     format!("port {port} held by {}", parts.join(", "))
 }
 
+#[cfg(unix)]
+fn descendant_pids(root: u32) -> Vec<u32> {
+    if root <= 1 {
+        return Vec::new();
+    }
+    let mut result = Vec::new();
+    let mut queue = vec![root];
+    while let Some(parent) = queue.pop() {
+        if let Ok(out) = Command::new("pgrep")
+            .args(["-P", &parent.to_string()])
+            .output()
+        {
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    if let Ok(cpid) = line.trim().parse::<u32>() {
+                        if cpid > 1 && !result.contains(&cpid) {
+                            result.push(cpid);
+                            queue.push(cpid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
 fn cmd_stop(p: &Resolved) -> Result<()> {
     eprintln!("stopping {} …", p.id);
     eprintln!("  pid file {}", p.pid_file.display());
@@ -2839,12 +3256,22 @@ fn cmd_stop(p: &Resolved) -> Result<()> {
     if stale_pid {
         let _ = std::fs::remove_file(&p.pid_file);
         let _ = std::fs::remove_file(start_marker_path(&p.pid_file));
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(p.stdin_fifo_path());
+            let _ = std::fs::remove_file(p.log_dir.join(format!("{}.answers.json", p.id)));
+        }
     }
 
     if is_down(p) {
         eprintln!("{} already stopped", p.id);
         let _ = std::fs::remove_file(&p.pid_file);
         let _ = std::fs::remove_file(start_marker_path(&p.pid_file));
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(p.stdin_fifo_path());
+            let _ = std::fs::remove_file(p.log_dir.join(format!("{}.answers.json", p.id)));
+        }
         return Ok(());
     }
 
@@ -2873,10 +3300,24 @@ fn cmd_stop(p: &Resolved) -> Result<()> {
         .into_iter()
         .collect();
 
+    #[cfg(unix)]
+    let mut all_descendants = Vec::new();
+    #[cfg(unix)]
+    for &r in &roots {
+        all_descendants.extend(descendant_pids(r));
+    }
+
     // 2. 然后对 pid 文件里的进程按进程组发 TERM，宽限期后仍在则对进程组 KILL
     if let Some(pid) = pid_in_file {
         if process_alive(pid) {
             let _ = terminate_pid_with_grace(pid, true, grace_secs);
+        }
+    }
+
+    #[cfg(unix)]
+    for dpid in all_descendants {
+        if process_alive(dpid) {
+            let _ = terminate_pid_with_grace(dpid, true, 2);
         }
     }
 
@@ -2904,6 +3345,11 @@ fn cmd_stop(p: &Resolved) -> Result<()> {
     // 5. 结束后删除 pid 文件和启动标记
     let _ = std::fs::remove_file(&p.pid_file);
     let _ = std::fs::remove_file(start_marker_path(&p.pid_file));
+    #[cfg(unix)]
+    {
+        let _ = std::fs::remove_file(p.stdin_fifo_path());
+        let _ = std::fs::remove_file(p.log_dir.join(format!("{}.answers.json", p.id)));
+    }
 
     Ok(())
 }
@@ -2996,6 +3442,15 @@ pub struct NewProject {
     /// 所属分组（可选）。
     #[serde(default)]
     pub group: Option<String>,
+    /// 额外环境变量（可选）。
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// 伪终端运行（可选，缺省 false）。
+    #[serde(default)]
+    pub pty: bool,
+    /// 自动应答规则（可选）。
+    #[serde(default)]
+    pub auto_answers: Vec<AutoAnswer>,
 }
 
 fn non_empty(v: &Option<String>) -> Option<String> {
@@ -3111,6 +3566,9 @@ impl NewProject {
             port_mode,
             port_arg,
             port_env,
+            env: self.env.clone(),
+            pty: self.pty,
+            auto_answers: self.auto_answers,
         };
         Ok((id, project))
     }
@@ -3196,7 +3654,39 @@ fn project_table(p: &Project) -> toml_edit::Table {
             t[key] = value(v.as_str());
         }
     }
+    if !p.env.is_empty() {
+        let mut inline = toml_edit::InlineTable::new();
+        for (k, v) in &p.env {
+            inline.insert(k, toml_edit::Value::from(v.as_str()));
+        }
+        t["env"] = toml_edit::Item::Value(toml_edit::Value::InlineTable(inline));
+    }
+    if p.pty {
+        t["pty"] = value(true);
+    }
+    if !p.auto_answers.is_empty() {
+        t["auto_answers"] = toml_edit::Item::Value(toml_edit::Value::Array(
+            auto_answers_to_toml_array(&p.auto_answers),
+        ));
+    }
     t
+}
+
+fn auto_answers_to_toml_array(answers: &[AutoAnswer]) -> toml_edit::Array {
+    let mut arr = toml_edit::Array::new();
+    for a in answers {
+        let mut inline = toml_edit::InlineTable::new();
+        inline.insert("expect", toml_edit::Value::from(a.expect.as_str()));
+        inline.insert("send", toml_edit::Value::from(a.send.as_str()));
+        if !a.once {
+            inline.insert("once", toml_edit::Value::from(false));
+        }
+        if a.regex {
+            inline.insert("regex", toml_edit::Value::from(true));
+        }
+        arr.push(toml_edit::Value::InlineTable(inline));
+    }
+    arr
 }
 
 /// Result of [`Loaded::import_scanned`].
@@ -3281,6 +3771,15 @@ pub struct ProjectEdit {
     pub port_arg: Option<String>,
     #[serde(default)]
     pub port_env: Option<String>,
+    /// 额外环境变量（可选）。
+    #[serde(default)]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
+    /// 伪终端运行（可选）。
+    #[serde(default)]
+    pub pty: Option<bool>,
+    /// 自动应答规则（可选）。
+    #[serde(default)]
+    pub auto_answers: Option<Vec<AutoAnswer>>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -3311,6 +3810,12 @@ pub struct ProjectDetail {
     pub port_arg: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port_env: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub pty: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto_answers: Vec<AutoAnswer>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
 }
@@ -3369,6 +3874,16 @@ fn write_doc(path: &Path, doc: &toml_edit::DocumentMut) -> Result<()> {
 }
 
 impl Loaded {
+    /// Validate project data for a new project before modifying any config file or groups.
+    pub fn validate_new_project(&self, req: &NewProject) -> Result<()> {
+        let (id, project) = req.clone().into_project()?;
+        if self.config.projects.contains_key(&id) {
+            bail!("project `{id}` already exists; remove it first or pick another id");
+        }
+        resolve_project(&id, &project, current_home().as_deref())?;
+        Ok(())
+    }
+
     /// Register a project and write it to the config file. Existing ids are refused.
     pub fn add_project(&mut self, req: NewProject) -> Result<ProjectRow> {
         let (id, project) = req.into_project()?;
@@ -3438,6 +3953,9 @@ impl Loaded {
             port_mode: r.port_mode,
             port_arg: r.port_arg,
             port_env: r.port_env,
+            env: r.env.clone(),
+            pty: r.pty,
+            auto_answers: r.auto_answers.clone(),
         })
     }
 
@@ -3579,8 +4097,62 @@ impl Loaded {
             port_mode: r.port_mode,
             port_arg: r.port_arg,
             port_env: r.port_env,
+            env: p.env.clone(),
+            pty: p.pty,
+            auto_answers: p.auto_answers.clone(),
             hints,
         })
+    }
+
+    /// Validate project edit data before modifying any config file or groups.
+    pub fn validate_update_project(&self, id: &str, edit: &ProjectEdit) -> Result<()> {
+        let existing = self
+            .config
+            .projects
+            .get(id)
+            .with_context(|| format!("unknown project id `{id}`; try `tongyun-dev list`"))?;
+
+        for (label, v) in [("node", &edit.node), ("java", &edit.java)] {
+            if let Some(v) = v {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() && !valid_version(trimmed) {
+                    bail!("{label} version `{trimmed}` may only contain letters, digits, `.`, `-`, `_`");
+                }
+            }
+        }
+
+        if let Some(ref port_mode) = edit.port_mode {
+            let trimmed = port_mode.trim().to_ascii_lowercase();
+            if !trimmed.is_empty() && !matches!(trimmed.as_str(), "none" | "arg" | "env" | "config")
+            {
+                bail!("port_mode must be one of none, arg, env, config, got `{trimmed}`");
+            }
+        }
+
+        let mut test_project = existing.clone();
+        if let Some(ref name) = edit.name {
+            test_project.name = name.trim().to_string();
+        }
+        if let Some(ref root) = edit.root {
+            test_project.root = root.trim().to_string();
+        }
+        if let Some(port) = edit.port {
+            test_project.port = port;
+        }
+        if let Some(ref start) = edit.start {
+            test_project.start = shell_argv(start.trim(), existing.shell.as_deref());
+        }
+        if let Some(ref stop) = edit.stop {
+            test_project.stop = shell_argv(stop.trim(), existing.shell.as_deref());
+        }
+        if let Some(enabled) = edit.enabled {
+            test_project.enabled = enabled;
+        }
+        if let Some(ref reason) = edit.reason {
+            test_project.reason = reason.trim().to_string();
+        }
+        resolve_project(id, &test_project, current_home().as_deref())?;
+        Ok(())
     }
 
     /// Update an existing project in the config file. Preserves other keys, key order, comments and multiline strings.
@@ -3794,6 +4366,38 @@ impl Loaded {
             }
         }
 
+        if let Some(ref env) = edit.env {
+            if env.is_empty() {
+                proj_table.remove("env");
+            } else {
+                let mut inline = toml_edit::InlineTable::new();
+                for (k, v) in env {
+                    inline.insert(k, toml_edit::Value::from(v.as_str()));
+                }
+                set_table_val(proj_table, "env", toml_edit::Value::InlineTable(inline));
+            }
+        }
+
+        if let Some(pty) = edit.pty {
+            if !pty {
+                proj_table.remove("pty");
+            } else {
+                set_table_val(proj_table, "pty", toml_edit::Value::from(true));
+            }
+        }
+
+        if let Some(ref answers) = edit.auto_answers {
+            if answers.is_empty() {
+                proj_table.remove("auto_answers");
+            } else {
+                set_table_val(
+                    proj_table,
+                    "auto_answers",
+                    toml_edit::Value::Array(auto_answers_to_toml_array(answers)),
+                );
+            }
+        }
+
         if let Some(ref grp) = group_to_ensure {
             let groups = doc
                 .entry("group")
@@ -3849,6 +4453,9 @@ impl Loaded {
             port_mode: r.port_mode,
             port_arg: r.port_arg,
             port_env: r.port_env,
+            env: r.env.clone(),
+            pty: r.pty,
+            auto_answers: r.auto_answers.clone(),
         })
     }
 
@@ -3966,6 +4573,19 @@ impl Loaded {
         let key = generate_group_key(trimmed, &existing_keys);
         self.create_group(&key, Some(trimmed))?;
         Ok(Some(key))
+    }
+
+    /// Remove a group by key. Does not touch projects belonging to it.
+    pub fn remove_group(&mut self, key: &str) -> Result<()> {
+        let key = key.trim();
+        validate_group_key(key)?;
+        let mut doc = read_doc(&self.path)?;
+        if let Some(groups) = doc.get_mut("group").and_then(|g| g.as_table_mut()) {
+            groups.remove(key);
+        }
+        write_doc(&self.path, &doc)?;
+        self.config.group.remove(key);
+        Ok(())
     }
 
     /// Update or clear project group, writing back to config with toml_edit preserving comments.
@@ -4689,6 +5309,9 @@ port = 3002
             port_mode: "none".to_string(),
             port_arg: None,
             port_env: None,
+            env: Default::default(),
+            pty: false,
+            auto_answers: Vec::new(),
         };
         let json_fs: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row_fs).unwrap()).unwrap();
@@ -4716,6 +5339,9 @@ port = 3002
             port_mode: "none".to_string(),
             port_arg: None,
             port_env: None,
+            env: Default::default(),
+            pty: false,
+            auto_answers: Vec::new(),
         };
         let json_none: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row_none).unwrap()).unwrap();
@@ -5596,6 +6222,12 @@ port = 9000
             Some("g1")
         );
 
+        // Test remove_group
+        loaded.remove_group("g1").unwrap();
+        assert!(!loaded.groups().iter().any(|g| g.key == "g1"));
+        let text_after_remove = std::fs::read_to_string(&path).unwrap();
+        assert!(!text_after_remove.contains("[group.g1]"));
+
         // Reload and check
         let reloaded = load(Some(&path)).unwrap();
         let list2 = reloaded.list().unwrap();
@@ -5603,6 +6235,122 @@ port = 9000
         assert_eq!(p_a2.group.as_deref(), Some("auto_grp"));
         let p_b2 = list2.projects.iter().find(|p| p.id == "proj_b").unwrap();
         assert_eq!(p_b2.group, None);
+    }
+
+    #[test]
+    fn test_11_env_read_write_inline_table_and_preserves_comments() {
+        let toml_content = r#"# project comment
+[projects.demo]
+name = "Demo"
+root = "@ROOT@/demo"
+start = ["echo", "start"]
+port = 3000
+env = { CI = "1", FOO = "bar" }
+"#;
+        let path = temp_config("t11_env", toml_content);
+        let mut loaded = load(Some(&path)).unwrap();
+
+        let detail = loaded.project_detail("demo").unwrap();
+        assert_eq!(detail.env.get("CI").map(String::as_str), Some("1"));
+        assert_eq!(detail.env.get("FOO").map(String::as_str), Some("bar"));
+
+        // Update env
+        let mut new_env = std::collections::BTreeMap::new();
+        new_env.insert("CI".into(), "true".into());
+        new_env.insert("NEW_VAR".into(), "hello".into());
+
+        let edit = ProjectEdit {
+            env: Some(new_env),
+            ..Default::default()
+        };
+        let updated = loaded.update_project("demo", edit).unwrap();
+        assert_eq!(updated.env.get("CI").map(String::as_str), Some("true"));
+        assert_eq!(
+            updated.env.get("NEW_VAR").map(String::as_str),
+            Some("hello")
+        );
+        assert!(!updated.env.contains_key("FOO"));
+
+        let file_text = std::fs::read_to_string(&path).unwrap();
+        assert!(file_text.contains("# project comment"));
+        assert!(file_text.contains("env = {"));
+
+        let reloaded = load(Some(&path)).unwrap();
+        let reloaded_detail = reloaded.project_detail("demo").unwrap();
+        assert_eq!(
+            reloaded_detail.env.get("CI").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            reloaded_detail.env.get("NEW_VAR").map(String::as_str),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn test_12_pty_and_auto_answers_read_write_inline_table_array() {
+        let toml_content = r#"# project comment
+[projects.interactive]
+name = "Interactive"
+root = "@ROOT@/demo"
+start = ["echo", "start"]
+port = 3000
+pty = true
+auto_answers = [
+    { expect = "Select environment", send = "dev" }
+]
+"#;
+        let path = temp_config("t12_pty_answers", toml_content);
+        let mut loaded = load(Some(&path)).unwrap();
+
+        let detail = loaded.project_detail("interactive").unwrap();
+        assert!(detail.pty);
+        assert_eq!(detail.auto_answers.len(), 1);
+        assert_eq!(detail.auto_answers[0].expect, "Select environment");
+        assert_eq!(detail.auto_answers[0].send, "dev");
+        assert!(detail.auto_answers[0].once);
+
+        // Update auto_answers and pty
+        let edit = ProjectEdit {
+            pty: Some(false),
+            auto_answers: Some(vec![
+                AutoAnswer {
+                    expect: "(y/N)".into(),
+                    send: "y".into(),
+                    once: true,
+                    regex: false,
+                },
+                AutoAnswer {
+                    expect: "Continue?".into(),
+                    send: "yes".into(),
+                    once: false,
+                    regex: true,
+                },
+            ]),
+            ..Default::default()
+        };
+        let updated = loaded.update_project("interactive", edit).unwrap();
+        assert!(!updated.pty);
+        assert_eq!(updated.auto_answers.len(), 2);
+        assert_eq!(updated.auto_answers[0].expect, "(y/N)");
+        assert_eq!(updated.auto_answers[0].send, "y");
+        assert_eq!(updated.auto_answers[1].expect, "Continue?");
+        assert!(!updated.auto_answers[1].once);
+        assert!(updated.auto_answers[1].regex);
+
+        let file_text = std::fs::read_to_string(&path).unwrap();
+        assert!(file_text.contains("# project comment"));
+        assert!(!file_text.contains("pty = true"));
+        assert!(file_text.contains("auto_answers = ["));
+
+        let reloaded = load(Some(&path)).unwrap();
+        let reloaded_detail = reloaded.project_detail("interactive").unwrap();
+        assert!(!reloaded_detail.pty);
+        assert_eq!(reloaded_detail.auto_answers.len(), 2);
+        assert_eq!(reloaded_detail.auto_answers[0].expect, "(y/N)");
+        assert_eq!(reloaded_detail.auto_answers[1].expect, "Continue?");
+        assert!(!reloaded_detail.auto_answers[1].once);
+        assert!(reloaded_detail.auto_answers[1].regex);
     }
 }
 

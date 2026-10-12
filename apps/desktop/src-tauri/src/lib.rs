@@ -103,6 +103,26 @@ async fn log_tail(id: String, lines: Option<usize>) -> Result<LogTail, String> {
 }
 
 #[tauri::command]
+async fn send_input(
+    id: String,
+    text: Option<String>,
+    enter: Option<bool>,
+    key: Option<String>,
+) -> Result<(), String> {
+    blocking(move || {
+        let loaded = tongyun_dev_core::load(None).map_err(report)?;
+        let data = tongyun_dev_core::resolve_input_data(
+            text.as_deref(),
+            enter.unwrap_or(true),
+            key.as_deref(),
+        )
+        .map_err(report)?;
+        loaded.send_input(&id, &data).map_err(report)
+    })
+    .await
+}
+
+#[tauri::command]
 fn config_info() -> tongyun_dev_core::ConfigInfo {
     tongyun_dev_core::config_info()
 }
@@ -277,7 +297,8 @@ pub fn run() {
             scan_dir,
             import_scanned,
             create_group,
-            set_project_group
+            set_project_group,
+            send_input
         ])
         .run(tauri::generate_context!())
         .expect("error while running tongyun-dev");

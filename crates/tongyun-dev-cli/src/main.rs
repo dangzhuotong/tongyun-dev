@@ -158,6 +158,51 @@ enum Cmd {
         /// Project group name (optional)
         #[arg(long)]
         group: Option<String>,
+        /// Extra environment variables (KEY=VALUE, repeatable)
+        #[arg(long = "env", value_parser = parse_env_pair)]
+        env: Vec<(String, String)>,
+        /// Run in pseudo-terminal (PTY)
+        #[arg(long)]
+        pty: bool,
+        /// Auto answer rules ("MATCH=>SEND", repeatable)
+        #[arg(long = "auto-answer", value_parser = parse_auto_answer_pair)]
+        auto_answers: Vec<tongyun_dev_core::AutoAnswer>,
+    },
+    /// Edit an existing registered project in your config file
+    Edit {
+        /// Project id
+        id: String,
+        /// Extra environment variables (KEY=VALUE, repeatable)
+        #[arg(long = "env", value_parser = parse_env_pair)]
+        env: Vec<(String, String)>,
+        /// Enable pseudo-terminal (PTY)
+        #[arg(long, conflicts_with = "no_pty")]
+        pty: bool,
+        /// Disable pseudo-terminal (PTY)
+        #[arg(long, conflicts_with = "pty")]
+        no_pty: bool,
+        /// Auto answer rules ("MATCH=>SEND", repeatable)
+        #[arg(long = "auto-answer", value_parser = parse_auto_answer_pair)]
+        auto_answers: Vec<tongyun_dev_core::AutoAnswer>,
+        /// Clear all auto answer rules
+        #[arg(long)]
+        clear_auto_answers: bool,
+    },
+    /// Send input to a running interactive process
+    Input {
+        /// Project id
+        id: String,
+        /// Input text to send
+        #[arg(default_value = "")]
+        text: String,
+        /// Do not append newline to text
+        #[arg(long)]
+        no_enter: bool,
+        /// Send special key (up, down, left, right, enter, tab, esc, ctrl-c)
+        #[arg(long)]
+        key: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
     /// Set or clear the group for a registered project
     Group {
@@ -204,6 +249,37 @@ enum Cmd {
     },
 }
 
+fn parse_env_pair(s: &str) -> Result<(String, String), String> {
+    let Some((k, v)) = s.split_once('=') else {
+        return Err(format!("env must be in KEY=VALUE format, got `{s}`"));
+    };
+    let k = k.trim();
+    if k.is_empty() {
+        return Err(format!("env variable key cannot be empty in `{s}`"));
+    }
+    Ok((k.to_string(), v.to_string()))
+}
+
+fn parse_auto_answer_pair(s: &str) -> Result<tongyun_dev_core::AutoAnswer, String> {
+    let Some((exp, send)) = s.split_once("=>") else {
+        return Err(format!(
+            "auto-answer must be in 'MATCH=>SEND' format, got `{s}`"
+        ));
+    };
+    let exp = exp.trim();
+    if exp.is_empty() {
+        return Err(format!(
+            "auto-answer expect pattern cannot be empty in `{s}`"
+        ));
+    }
+    Ok(tongyun_dev_core::AutoAnswer {
+        expect: exp.to_string(),
+        send: send.trim().to_string(),
+        once: true,
+        regex: false,
+    })
+}
+
 // Existing list/status JSON keeps its original shape. Operations use a stable envelope.
 fn machine_operation(cmd: &Cmd) -> Option<(&str, &str)> {
     match cmd {
@@ -213,6 +289,7 @@ fn machine_operation(cmd: &Cmd) -> Option<(&str, &str)> {
         Cmd::Install { id, json: true } => Some(("install", id)),
         Cmd::Wait { id, json: true, .. } => Some(("wait", id)),
         Cmd::Logs { id, json: true, .. } => Some(("logs", id)),
+        Cmd::Input { id, json: true, .. } => Some(("input", id)),
         _ => None,
     }
 }
@@ -236,6 +313,20 @@ fn run_machine_operation(config: Option<&std::path::Path>, cmd: &Cmd) -> Result<
             Cmd::Wait { timeout, .. } => loaded.wait_ready(id, Duration::from_secs(*timeout))?,
             Cmd::Logs { lines, .. } => {
                 logs = Some(loaded.log_tail(id, *lines)?);
+                return Ok(());
+            }
+            Cmd::Input {
+                text,
+                no_enter,
+                key,
+                ..
+            } => {
+                let data = tongyun_dev_core::resolve_input_data(
+                    Some(text.as_str()),
+                    !no_enter,
+                    key.as_deref(),
+                )?;
+                loaded.send_input(id, &data)?;
                 return Ok(());
             }
             _ => unreachable!(),
@@ -457,6 +548,9 @@ fn main() -> Result<()> {
             port_arg,
             port_env,
             group,
+            env,
+            pty,
+            auto_answers,
         } => {
             let row = loaded.add_project(NewProject {
                 id,
@@ -479,6 +573,9 @@ fn main() -> Result<()> {
                 port_arg,
                 port_env,
                 group,
+                env: env.into_iter().collect(),
+                pty,
+                auto_answers,
                 ..Default::default()
             })?;
             println!(
@@ -487,6 +584,45 @@ fn main() -> Result<()> {
                 row.root,
                 loaded.path().display()
             );
+        }
+        Cmd::Edit {
+            id,
+            env,
+            pty,
+            no_pty,
+            auto_answers,
+            clear_auto_answers,
+        } => {
+            let mut edit = tongyun_dev_core::ProjectEdit::default();
+            if !env.is_empty() {
+                edit.env = Some(env.into_iter().collect());
+            }
+            if pty {
+                edit.pty = Some(true);
+            } else if no_pty {
+                edit.pty = Some(false);
+            }
+            if clear_auto_answers {
+                edit.auto_answers = Some(Vec::new());
+            } else if !auto_answers.is_empty() {
+                edit.auto_answers = Some(auto_answers);
+            }
+            let row = loaded.update_project(&id, edit)?;
+            println!("已更新项目 `{}`，写入 {}", row.id, loaded.path().display());
+        }
+        Cmd::Input {
+            id,
+            text,
+            no_enter,
+            key,
+            json: _,
+        } => {
+            let data = tongyun_dev_core::resolve_input_data(
+                Some(text.as_str()),
+                !no_enter,
+                key.as_deref(),
+            )?;
+            loaded.send_input(&id, &data)?;
         }
         Cmd::Group { id, key, clear } => {
             let row = if clear {
@@ -928,5 +1064,80 @@ mod tests {
                 ..
             }) if id == "web" && g == "frontend"
         ));
+    }
+
+    #[test]
+    fn parses_input_and_env_arguments() {
+        let cli = Cli::try_parse_from([
+            "tongyun-dev",
+            "add",
+            "web",
+            "--root",
+            "~/code/web",
+            "--start",
+            "pnpm dev",
+            "--env",
+            "CI=1",
+            "--env",
+            "APP_ENV=test",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Some(Cmd::Add { env, .. }) => {
+                assert_eq!(
+                    env,
+                    vec![
+                        ("CI".to_string(), "1".to_string()),
+                        ("APP_ENV".to_string(), "test".to_string())
+                    ]
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["tongyun-dev", "input", "web", "hello"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Input {
+                id,
+                text,
+                no_enter,
+                key,
+                json,
+            }) => {
+                assert_eq!(id, "web");
+                assert_eq!(text, "hello");
+                assert!(!no_enter);
+                assert_eq!(key, None);
+                assert!(!json);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "tongyun-dev",
+            "input",
+            "web",
+            "--key",
+            "up",
+            "--no-enter",
+            "--json",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Some(Cmd::Input {
+                id,
+                text,
+                no_enter,
+                key,
+                json,
+            }) => {
+                assert_eq!(id, "web");
+                assert_eq!(text, "");
+                assert!(no_enter);
+                assert_eq!(key.as_deref(), Some("up"));
+                assert!(json);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

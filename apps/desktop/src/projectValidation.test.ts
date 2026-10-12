@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { buildEditRequest, validateProjectForm, type EditBaseline, type ProjectFormData } from "./projectValidation";
+import {
+  buildEditRequest,
+  formatAutoAnswersLines,
+  formatEnvLines,
+  parseAutoAnswersLines,
+  parseEnvLines,
+  validateProjectForm,
+  type EditBaseline,
+  type ProjectFormData,
+} from "./projectValidation";
 
 describe("validateProjectForm (项目表单校验)", () => {
   const validData: ProjectFormData = {
@@ -332,5 +341,196 @@ describe("buildEditRequest port_mode / port_arg / port_env", () => {
       buildEditRequest(base, { ...form, port_mode: "config" })
     ).toEqual({ port_mode: "config" });
   });
+
+  describe("pty / env / auto_answers 变更提交", () => {
+    it("pty 发生变更时提交 pty", () => {
+      expect(buildEditRequest(base, { ...form, pty: true })).toEqual({
+        pty: true,
+      });
+
+      const baseWithPty: EditBaseline = { ...base, pty: true };
+      expect(buildEditRequest(baseWithPty, { ...form, pty: false })).toEqual({
+        pty: false,
+      });
+      expect(buildEditRequest(baseWithPty, { ...form, pty: true })).toEqual({});
+    });
+
+    it("env 发生变更时提交解析后的键值对", () => {
+      expect(
+        buildEditRequest(base, { ...form, env_text: "CI=1\nAPP_ENV=staging" })
+      ).toEqual({
+        env: { CI: "1", APP_ENV: "staging" },
+      });
+
+      const baseWithEnv: EditBaseline = {
+        ...base,
+        env: { CI: "1", APP_ENV: "staging" },
+      };
+      // 未变动不提交
+      expect(
+        buildEditRequest(baseWithEnv, {
+          ...form,
+          env_text: "CI=1\nAPP_ENV=staging",
+        })
+      ).toEqual({});
+
+      // 清空环境变量
+      expect(
+        buildEditRequest(baseWithEnv, { ...form, env_text: "" })
+      ).toEqual({
+        env: {},
+      });
+    });
+
+    it("auto_answers 发生变更时提交解析后的应答数组", () => {
+      expect(
+        buildEditRequest(base, {
+          ...form,
+          auto_answers_text: "Select env => dev\n(y/N) => y",
+        })
+      ).toEqual({
+        auto_answers: [
+          { expect: "Select env", send: "dev", once: true, regex: false },
+          { expect: "(y/N)", send: "y", once: true, regex: false },
+        ],
+      });
+
+      const baseWithAnswers: EditBaseline = {
+        ...base,
+        auto_answers: [
+          { expect: "Select env", send: "dev", once: true, regex: false },
+        ],
+      };
+      // 未变动不提交
+      expect(
+        buildEditRequest(baseWithAnswers, {
+          ...form,
+          auto_answers_text: "Select env => dev",
+        })
+      ).toEqual({});
+
+      // 清空自动应答
+      expect(
+        buildEditRequest(baseWithAnswers, { ...form, auto_answers_text: "" })
+      ).toEqual({
+        auto_answers: [],
+      });
+    });
+  });
 });
+
+describe("parseEnvLines & formatEnvLines", () => {
+  it("parses valid KEY=VALUE lines and ignores empty lines", () => {
+    const raw = "  CI=1 \n\n  PORT=3000\nHELLO=WORLD=TEST\n";
+    const res = parseEnvLines(raw);
+    expect(res.error).toBeUndefined();
+    expect(res.env).toEqual({
+      CI: "1",
+      PORT: "3000",
+      HELLO: "WORLD=TEST",
+    });
+  });
+
+  it("reports error when line is missing equal sign", () => {
+    const raw = "CI=1\nINVALID_LINE\nPORT=3000";
+    const res = parseEnvLines(raw);
+    expect(res.error).toContain("第 2 行");
+    expect(res.error).toContain("KEY=VALUE");
+  });
+
+  it("reports error when key is empty", () => {
+    const raw = "=value";
+    const res = parseEnvLines(raw);
+    expect(res.error).toContain("第 1 行");
+    expect(res.error).toContain("键名不能为空");
+  });
+
+  it("formats env map back to string lines", () => {
+    expect(formatEnvLines({ A: "1", B: "2" })).toBe("A=1\nB=2");
+    expect(formatEnvLines({})).toBe("");
+    expect(formatEnvLines(null)).toBe("");
+  });
+});
+
+describe("parseAutoAnswersLines & formatAutoAnswersLines", () => {
+  it("parses valid MATCH=>SEND lines and ignores empty lines", () => {
+    const raw = "  Select env => dev \n\n (y/N) => y\n";
+    const res = parseAutoAnswersLines(raw);
+    expect(res.error).toBeUndefined();
+    expect(res.answers).toEqual([
+      { expect: "Select env", send: "dev", once: true, regex: false },
+      { expect: "(y/N)", send: "y", once: true, regex: false },
+    ]);
+  });
+
+  it("reports error when line is missing =>", () => {
+    const raw = "Select env -> dev";
+    const res = parseAutoAnswersLines(raw);
+    expect(res.error).toContain("第 1 行");
+    expect(res.error).toContain("匹配文字 => 发送内容");
+  });
+
+  it("reports error when expect pattern is empty", () => {
+    const raw = " => dev";
+    const res = parseAutoAnswersLines(raw);
+    expect(res.error).toContain("第 1 行");
+    expect(res.error).toContain("匹配文字不能为空");
+  });
+
+  it("formats auto answers back to string lines", () => {
+    expect(
+      formatAutoAnswersLines([
+        { expect: "foo", send: "bar" },
+        { expect: "baz", send: "qux" },
+      ])
+    ).toBe("foo => bar\nbaz => qux");
+    expect(formatAutoAnswersLines([])).toBe("");
+    expect(formatAutoAnswersLines(null)).toBe("");
+  });
+});
+
+describe("validateProjectForm env & auto_answers validation", () => {
+  const baseValid: ProjectFormData = {
+    id: "demo",
+    name: "Demo",
+    root: "/tmp",
+    start: "echo 1",
+    stop: "",
+    port: 3000,
+    login_url: "",
+    health_url: "",
+    log_file: "",
+    node: "",
+    java: "",
+    enabled: true,
+    reason: "",
+    start_timeout_secs: "",
+  };
+
+  it("reports error when env_text has invalid line", () => {
+    const errors = validateProjectForm({ ...baseValid, env_text: "ILLEGAL" });
+    expect(errors.env_text).toBeDefined();
+    expect(errors.env_text).toContain("KEY=VALUE");
+  });
+
+  it("reports error when auto_answers_text has invalid line", () => {
+    const errors = validateProjectForm({
+      ...baseValid,
+      auto_answers_text: "NO_ARROW",
+    });
+    expect(errors.auto_answers_text).toBeDefined();
+    expect(errors.auto_answers_text).toContain("匹配文字 => 发送内容");
+  });
+
+  it("passes when env_text and auto_answers_text are valid", () => {
+    const errors = validateProjectForm({
+      ...baseValid,
+      env_text: "CI=1\nFOO=bar",
+      auto_answers_text: "(y/N) => y",
+    });
+    expect(errors.env_text).toBeUndefined();
+    expect(errors.auto_answers_text).toBeUndefined();
+  });
+});
+
 

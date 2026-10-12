@@ -711,3 +711,626 @@ fn foreign_listener_blocks_restart_without_running_start_command() {
     drop(listener);
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn pty_stdin_fifo_and_env_lifecycle() {
+    let dir = temp_dir("stdin_fifo");
+    let port = free_port();
+    let cfg = dir.join("projects.toml");
+    let d = dir.to_string_lossy().replace('\\', "/");
+
+    let script = "read line; echo got_input=$line; echo CI_VAL=$CI; exec sleep 30";
+    fs::write(
+        &cfg,
+        format!(
+            r#"[projects.interactive]
+name = "Interactive Service"
+root = "{d}"
+start = ["sh", "-c", "{script}"]
+background = true
+port = {port}
+log_dir = "{d}/logs"
+env = {{ CI = "test_ci_value", CUSTOM = "123" }}
+"#
+        ),
+    )
+    .unwrap();
+
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    let _guard = CleanupGuard::new(&loaded, "interactive", dir.clone());
+
+    let st = loaded.start_detached("interactive").unwrap();
+    assert_eq!(st.state, tongyun_dev_core::LifeState::Starting);
+
+    // 1. Check that FIFO was created at logs/interactive.stdin
+    let fifo_path = dir.join("logs/interactive.stdin");
+    assert!(
+        fifo_path.exists(),
+        "FIFO {} should exist",
+        fifo_path.display()
+    );
+
+    // 2. Send input via send_input
+    loaded.send_input("interactive", "hello_dev\n").unwrap();
+
+    // 3. Wait for log to contain got_input=hello_dev, CI_VAL=test_ci_value, and echo › hello_dev
+    let log_path = dir.join("logs/interactive.out");
+    let start_t = std::time::Instant::now();
+    let mut log_content = String::new();
+    while start_t.elapsed() < Duration::from_secs(5) {
+        if let Ok(c) = fs::read_to_string(&log_path) {
+            log_content = c;
+            if log_content.contains("got_input=hello_dev")
+                && log_content.contains("CI_VAL=test_ci_value")
+            {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(
+        log_content.contains("got_input=hello_dev"),
+        "log: {log_content}"
+    );
+    assert!(
+        log_content.contains("CI_VAL=test_ci_value"),
+        "log: {log_content}"
+    );
+    assert!(
+        log_content.contains("› [已发送 10 个字符]"),
+        "log: {log_content}"
+    );
+    assert!(!log_content.contains("› hello_dev"), "log: {log_content}");
+
+    // 4. Stop project and verify cleanup
+    let stopped = loaded.stop("interactive").unwrap();
+    assert_eq!(stopped.state, tongyun_dev_core::LifeState::Stopped);
+    assert!(!fifo_path.exists(), "FIFO must be removed after stop");
+    assert!(
+        !dir.join("logs/interactive.pid").exists(),
+        "pid file must be removed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn http_post_input_endpoint_and_security() {
+    let dir = temp_dir("http_input");
+    let service_port = free_port();
+    let cfg = dir.join("projects.toml");
+    let d = dir.to_string_lossy().replace('\\', "/");
+
+    let script = "read line; echo http_got=$line; exec sleep 30";
+    fs::write(
+        &cfg,
+        format!(
+            r#"[projects.http_test]
+name = "HTTP Test"
+root = "{d}"
+start = ["sh", "-c", "{script}"]
+background = true
+port = {service_port}
+log_dir = "{d}/logs"
+"#
+        ),
+    )
+    .unwrap();
+
+    let ui_port = free_port();
+    let ui_listener = TcpListener::bind(("127.0.0.1", ui_port)).unwrap();
+    let cfg_clone = cfg.clone();
+    thread::spawn(move || {
+        let _ = tongyun_dev_cli::server::serve(ui_listener, cfg_clone, ui_port);
+    });
+
+    // 1. Before project is running: POST /api/projects/http_test/input should return 409
+    let post_req = |body: &str, origin: &str| -> String {
+        format!(
+            "POST /api/projects/http_test/input HTTP/1.1\r\n\
+             Host: 127.0.0.1:{ui_port}\r\n\
+             Origin: {origin}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {}",
+            body.len(),
+            body
+        )
+    };
+
+    let resp = http(
+        ui_port,
+        &post_req(r#"{"text":"ping"}"#, &format!("http://127.0.0.1:{ui_port}")),
+    );
+    assert!(
+        resp.starts_with("HTTP/1.1 409"),
+        "expected 409 when not running, got: {resp}"
+    );
+
+    // 2. Cross-origin request: rejected with 403
+    let evil_resp = http(
+        ui_port,
+        &post_req(r#"{"text":"ping"}"#, "http://evil.example"),
+    );
+    assert!(
+        evil_resp.starts_with("HTTP/1.1 403"),
+        "expected 403 on evil origin, got: {evil_resp}"
+    );
+
+    // 3. Start project
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    let _guard = CleanupGuard::new(&loaded, "http_test", dir.clone());
+    loaded.start_detached("http_test").unwrap();
+
+    // 4. While running, POST input succeeds
+    let ok_resp = http(
+        ui_port,
+        &post_req(
+            r#"{"text":"pong","enter":true}"#,
+            &format!("http://127.0.0.1:{ui_port}"),
+        ),
+    );
+    assert!(
+        ok_resp.starts_with("HTTP/1.1 200"),
+        "expected 200, got: {ok_resp}"
+    );
+
+    // Check log received input
+    let log_path = dir.join("logs/http_test.out");
+    let start_t = std::time::Instant::now();
+    let mut log_content = String::new();
+    while start_t.elapsed() < Duration::from_secs(5) {
+        if let Ok(c) = fs::read_to_string(&log_path) {
+            log_content = c;
+            if log_content.contains("http_got=pong") {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(log_content.contains("http_got=pong"), "log: {log_content}");
+    assert!(
+        log_content.contains("› [已发送 5 个字符]"),
+        "log: {log_content}"
+    );
+    assert!(!log_content.contains("› pong"), "log: {log_content}");
+
+    loaded.stop("http_test").unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_answers_automatically_answers_prompt() {
+    let script_ok = std::process::Command::new("script")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
+        .unwrap_or(false);
+    if !script_ok {
+        eprintln!("script command not found, skipping auto_answers prompt.sh test");
+        return;
+    }
+
+    let dir = temp_dir("auto_answers_test");
+    let port = free_port();
+    let cfg = dir.join("projects.toml");
+    let d = dir.to_string_lossy().replace('\\', "/");
+
+    let prompt_sh = dir.join("prompt.sh");
+    fs::write(
+        &prompt_sh,
+        "#!/bin/bash\nread -p \"Select environment [dev/prod]: \" e\necho \"env=$e\"\nexec sleep 30\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(&prompt_sh).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&prompt_sh, perms).unwrap();
+
+    let p_path = prompt_sh.to_string_lossy().replace('\\', "/");
+    fs::write(
+        &cfg,
+        format!(
+            r#"[projects.prompt_app]
+name = "Prompt App"
+root = "{d}"
+start = ["{p_path}"]
+background = true
+pty = true
+port = {port}
+log_dir = "{d}/logs"
+auto_answers = [
+    {{ expect = "Select environment", send = "dev" }}
+]
+"#
+        ),
+    )
+    .unwrap();
+
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    let _guard = CleanupGuard::new(&loaded, "prompt_app", dir.clone());
+
+    let st = loaded.start_detached("prompt_app").unwrap();
+    assert_eq!(st.state, tongyun_dev_core::LifeState::Starting);
+
+    let log_path = dir.join("logs/prompt_app.out");
+    let start_t = std::time::Instant::now();
+    let mut log_content = String::new();
+    while start_t.elapsed() < Duration::from_secs(6) {
+        let _ = loaded.status("prompt_app");
+        if let Ok(c) = fs::read_to_string(&log_path) {
+            log_content = c;
+            if log_content.contains("env=dev") {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    assert!(log_content.contains("env=dev"), "log: {log_content}");
+
+    let stopped = loaded.stop("prompt_app").unwrap();
+    assert_eq!(stopped.state, tongyun_dev_core::LifeState::Stopped);
+    assert!(
+        !dir.join("logs/prompt_app.stdin").exists(),
+        "FIFO must be cleaned up"
+    );
+    assert!(
+        !dir.join("logs/prompt_app.answers.json").exists(),
+        "answers state file must be cleaned up"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pty_true_outputs_tty_and_cleans_up_on_stop() {
+    let script_ok = std::process::Command::new("script")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
+        .unwrap_or(false);
+    if !script_ok {
+        eprintln!("script command not found, skipping pty tty test");
+        return;
+    }
+
+    let dir = temp_dir("pty_tty_test");
+    let port = free_port();
+    let cfg = dir.join("projects.toml");
+    let d = dir.to_string_lossy().replace('\\', "/");
+
+    let script = "[ -t 0 ] && echo TTY_DETECTED; exec sleep 30";
+    fs::write(
+        &cfg,
+        format!(
+            r#"[projects.pty_srv]
+name = "PTY Service"
+root = "{d}"
+start = ["sh", "-c", "{script}"]
+background = true
+pty = true
+port = {port}
+log_dir = "{d}/logs"
+"#
+        ),
+    )
+    .unwrap();
+
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    let _guard = CleanupGuard::new(&loaded, "pty_srv", dir.clone());
+
+    let st = loaded.start_detached("pty_srv").unwrap();
+    assert_eq!(st.state, tongyun_dev_core::LifeState::Starting);
+    let pid = st.pid.expect("pid must exist");
+
+    let log_path = dir.join("logs/pty_srv.out");
+    let fifo_path = dir.join("logs/pty_srv.stdin");
+    assert!(fifo_path.exists(), "FIFO should exist for pty project");
+
+    let start_t = std::time::Instant::now();
+    let mut log_content = String::new();
+    while start_t.elapsed() < Duration::from_secs(5) {
+        if let Ok(c) = fs::read_to_string(&log_path) {
+            log_content = c;
+            if log_content.contains("TTY_DETECTED") {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(log_content.contains("TTY_DETECTED"), "log: {log_content}");
+
+    // Stop and verify process and FIFO cleanup
+    let stopped = loaded.stop("pty_srv").unwrap();
+    assert_eq!(stopped.state, tongyun_dev_core::LifeState::Stopped);
+    assert!(!is_process_alive(pid), "script process must be terminated");
+    assert!(!fifo_path.exists(), "FIFO must be removed after stop");
+    assert!(
+        !dir.join("logs/pty_srv.pid").exists(),
+        "pid file must be removed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_send_input_secret_pass_shows_placeholder_not_plaintext() {
+    let dir = temp_dir("secret_input_test");
+    let port = free_port();
+    let cfg = dir.join("projects.toml");
+    let d = dir.to_string_lossy().replace('\\', "/");
+
+    let script = "read -r secret; echo received_len=${#secret}; exec sleep 30";
+    fs::write(
+        &cfg,
+        format!(
+            r#"[projects.secret_app]
+name = "Secret App"
+root = "{d}"
+start = ["sh", "-c", "{script}"]
+background = true
+port = {port}
+log_dir = "{d}/logs"
+"#
+        ),
+    )
+    .unwrap();
+
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    let _guard = CleanupGuard::new(&loaded, "secret_app", dir.clone());
+
+    loaded.start_detached("secret_app").unwrap();
+
+    let secret_val = "secret-pass";
+    let input_str = format!("{secret_val}\n");
+    loaded.send_input("secret_app", &input_str).unwrap();
+
+    let log_path = dir.join("logs/secret_app.out");
+    let start_t = std::time::Instant::now();
+    let mut log_content = String::new();
+    while start_t.elapsed() < Duration::from_secs(5) {
+        if let Ok(c) = fs::read_to_string(&log_path) {
+            log_content = c;
+            if log_content.contains("received_len=11") {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(
+        log_content.contains("received_len=11"),
+        "log: {log_content}"
+    );
+    // 日志中不出现明文 secret-pass
+    assert!(
+        !log_content.contains("secret-pass"),
+        "log should NOT contain secret-pass: {log_content}"
+    );
+    // 出现占位符
+    let char_count = input_str.chars().count();
+    assert!(
+        log_content.contains(&format!("› [已发送 {char_count} 个字符]")),
+        "log should contain placeholder: {log_content}"
+    );
+
+    loaded.stop("secret_app").unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn test_send_input_limit_4096_bytes_error() {
+    let dir = temp_dir("limit_input_test");
+    let port = free_port();
+    let cfg = dir.join("projects.toml");
+    let d = dir.to_string_lossy().replace('\\', "/");
+
+    let script = "read -r line; echo got_len=${#line}; exec sleep 30";
+    fs::write(
+        &cfg,
+        format!(
+            r#"[projects.limit_app]
+name = "Limit App"
+root = "{d}"
+start = ["sh", "-c", "{script}"]
+background = true
+port = {port}
+log_dir = "{d}/logs"
+"#
+        ),
+    )
+    .unwrap();
+
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    let _guard = CleanupGuard::new(&loaded, "limit_app", dir.clone());
+
+    loaded.start_detached("limit_app").unwrap();
+
+    // 超过 4096 字节
+    let huge = "a".repeat(4097);
+    let err = loaded.send_input("limit_app", &huge).unwrap_err();
+    assert!(
+        err.to_string().contains("单次输入不能超过 4096 字节"),
+        "expected limit error, got: {err}"
+    );
+
+    // 子进程没有收到
+    thread::sleep(Duration::from_millis(300));
+    let log_path = dir.join("logs/limit_app.out");
+    if let Ok(content) = fs::read_to_string(&log_path) {
+        assert!(
+            !content.contains("got_len"),
+            "child process should not receive input: {content}"
+        );
+    }
+
+    loaded.stop("limit_app").unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn test_auto_answers_skips_echo_lines_once_false() {
+    let dir = temp_dir("echo_skip_test");
+    let port = free_port();
+    let cfg = dir.join("projects.toml");
+    let d = dir.to_string_lossy().replace('\\', "/");
+
+    let script = "echo start_marker; exec sleep 30";
+    fs::write(
+        &cfg,
+        format!(
+            r#"[projects.echo_skip_app]
+name = "Echo Skip App"
+root = "{d}"
+start = ["sh", "-c", "{script}"]
+background = true
+port = {port}
+log_dir = "{d}/logs"
+auto_answers = [
+    {{ expect = "› [已发送", send = "recursive_trigger", once = false }}
+]
+"#
+        ),
+    )
+    .unwrap();
+
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    let _guard = CleanupGuard::new(&loaded, "echo_skip_app", dir.clone());
+
+    loaded.start_detached("echo_skip_app").unwrap();
+
+    // 等待子进程启动输出
+    let log_path = dir.join("logs/echo_skip_app.out");
+    let start_t = std::time::Instant::now();
+    while start_t.elapsed() < Duration::from_secs(5) {
+        if let Ok(c) = fs::read_to_string(&log_path) {
+            if c.contains("start_marker") {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // 主动发送一次普通输入，产生 › [已发送 6 个字符] 回显
+    loaded.send_input("echo_skip_app", "hello\n").unwrap();
+
+    // status 检查 auto_answers
+    let _ = loaded.status("echo_skip_app");
+
+    // 检查 auto_answers 状态文件
+    let answers_state_path = dir.join("logs/echo_skip_app.answers.json");
+    if answers_state_path.exists() {
+        let content = fs::read_to_string(&answers_state_path).unwrap();
+        assert!(
+            !content.contains("recursive_trigger"),
+            "state should not trigger on echo line: {content}"
+        );
+    }
+
+    // 日志中不应包含 recursive_trigger
+    let final_log = fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(
+        !final_log.contains("recursive_trigger"),
+        "echo line should not trigger once=false auto answer: {final_log}"
+    );
+
+    loaded.stop("echo_skip_app").unwrap();
+}
+
+#[test]
+fn test_server_project_add_and_update_validation_failure_leaves_no_empty_group() {
+    let dir = temp_dir("srv_grp_valid");
+    let cfg = dir.join("projects.toml");
+    let d = dir.to_string_lossy().replace('\\', "/");
+
+    fs::write(
+        &cfg,
+        format!(
+            r#"[group.existing_grp]
+label = "已有分组"
+
+[projects.app1]
+name = "App 1"
+root = "{d}"
+start = ["sh", "-c", "sleep 30"]
+port = 8080
+"#
+        ),
+    )
+    .unwrap();
+
+    let ui_port = free_port();
+    let ui_listener = TcpListener::bind(("127.0.0.1", ui_port)).unwrap();
+    let cfg_clone = cfg.clone();
+    thread::spawn(move || {
+        let _ = tongyun_dev_cli::server::serve(ui_listener, cfg_clone, ui_port);
+    });
+
+    let post_req = |path: &str, body: &str| -> String {
+        format!(
+            "POST {path} HTTP/1.1\r\n\
+             Host: 127.0.0.1:{ui_port}\r\n\
+             Origin: http://127.0.0.1:{ui_port}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {}",
+            body.len(),
+            body
+        )
+    };
+    let patch_req = |path: &str, body: &str| -> String {
+        format!(
+            "PATCH {path} HTTP/1.1\r\n\
+             Host: 127.0.0.1:{ui_port}\r\n\
+             Origin: http://127.0.0.1:{ui_port}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {}",
+            body.len(),
+            body
+        )
+    };
+
+    // 1. POST /api/projects with invalid root/start and new group "ghost_grp"
+    let bad_add_body = r#"{
+        "id": "bad_proj",
+        "root": "",
+        "start": "",
+        "port": 0,
+        "group": "ghost_grp"
+    }"#;
+    let resp = http(ui_port, &post_req("/api/projects", bad_add_body));
+    assert!(
+        resp.starts_with("HTTP/1.1 400"),
+        "expected 400 on invalid add, got: {resp}"
+    );
+
+    // 校验 projects.toml 绝对没有留下 ghost_grp
+    let toml_content = fs::read_to_string(&cfg).unwrap();
+    assert!(
+        !toml_content.contains("ghost_grp"),
+        "config should NOT contain ghost_grp after failed add: {toml_content}"
+    );
+
+    // 2. PATCH /api/projects/app1 with invalid node version and new group "ghost_patch_grp"
+    let bad_patch_body = r#"{
+        "node": "invalid version with spaces and @@",
+        "group": "ghost_patch_grp"
+    }"#;
+    let patch_resp = http(ui_port, &patch_req("/api/projects/app1", bad_patch_body));
+    assert!(
+        patch_resp.starts_with("HTTP/1.1 400"),
+        "expected 400 on invalid patch, got: {patch_resp}"
+    );
+
+    // 校验 projects.toml 绝对没有留下 ghost_patch_grp
+    let toml_content_after_patch = fs::read_to_string(&cfg).unwrap();
+    assert!(
+        !toml_content_after_patch.contains("ghost_patch_grp"),
+        "config should NOT contain ghost_patch_grp after failed patch: {toml_content_after_patch}"
+    );
+}

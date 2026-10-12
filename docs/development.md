@@ -118,8 +118,11 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 
 - **标准输入管道（FIFO）**：
   - Unix 环境下，后台项目启动时在 `<log_dir>/<id>.stdin` 创建命名管道（FIFO），以 `O_RDWR` 绑定为子进程的标准输入。
-  - 用户或 Agent 可通过 `tongyun-dev input <id> <text>`、网页控制台 `POST /api/projects/:id/input` 或桌面界面向运行中的进程输入内容。非 PTY 模式下输入时默认在日志中回显 `› <text>`。
+  - 用户或 Agent 可通过 `tongyun-dev input <id> <text>`、网页控制台 `POST /api/projects/:id/input` 或桌面界面向运行中的进程输入内容。
+  - **输入上限与原子写入**：单次输入上限为 4096 字节（保证在 POSIX `PIPE_BUF` 内原子写入）。超过 4096 字节时返回「单次输入不能超过 4096 字节」（HTTP 400）；管道缓冲区满时返回「子进程没有读取输入（管道已满）」（HTTP 409）。
+  - **回显只写占位符**：非 PTY 模式下发送输入时，日志默认仅记录占位符（如 `› [已发送 N 个字符]`，按键为 `› [按键 up]` 等），避免密码等敏感输入落盘。
   - 项目停止后，自动清理 `<id>.stdin` 与应答状态记录。
+  - Windows 环境暂不支持向进程发送输入（提示「Windows 暂不支持向进程发送输入」）。
 - **伪终端运行（`pty = true`）**：
   - 许多 CLI 工具在非 TTY 环境下不输出交互式提示或选择菜单。设置 `pty = true` 时，系统使用 `script` 命令包装启动（macOS: `script -q /dev/null <argv>`；Linux: `script -qfec "<escaped_cmd>" /dev/null`），使子进程在伪终端（PTY）中运行。
   - PTY 模式下终端自身会回显输入字符，core 不再重复追加输入回显。
@@ -133,7 +136,8 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
         { expect = "(y/N)", send = "y" }
     ]
     ```
-  - 启动后在等待就绪循环和状态轮询时检查日志新增内容，命中 `expect` 时自动向管道写入 `send + "\n"`。
+  - **触发时机**：`status`、`wait` 命令以及网页/HTTP 状态类接口（如 `GET /api/projects`、`GET /api/projects/:id`）在轮询服务状态时，均会触发检查日志增量并执行 `auto_answers` 写入 stdin。
+  - **回显与防自触发**：`auto_answers` 发送回显同样只写占位符（`› [自动应答：第 i 条规则]`）；扫描日志匹配规则时跳过以 `› ` 开头的回显行，避免 `once = false` 规则自己触发自己。
   - 每条规则默认只触发一次（`once = false` 可多次）；可选 `regex = true` 支持正则表达式。重启服务时重置应答触发记录。
 
 ## 启动状态

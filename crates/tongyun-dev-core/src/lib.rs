@@ -180,6 +180,7 @@ struct Resolved {
 }
 
 impl Resolved {
+    #[cfg(unix)]
     pub fn stdin_fifo_path(&self) -> PathBuf {
         self.log_dir.join(format!("{}.stdin", self.id))
     }
@@ -639,6 +640,18 @@ impl Loaded {
 
         let new_text = String::from_utf8_lossy(&buf);
 
+        let filtered_lines: Vec<&str> = new_text
+            .lines()
+            .filter(|line| !line.starts_with("› "))
+            .collect();
+        if filtered_lines.is_empty() {
+            if let Ok(json) = serde_json::to_string(&state) {
+                let _ = std::fs::write(&state_path, json);
+            }
+            return Ok(());
+        }
+        let scan_text = filtered_lines.join("\n");
+
         for (idx, rule) in p.auto_answers.iter().enumerate() {
             let triggered_count = state.triggered_counts.get(&idx).copied().unwrap_or(0);
             if rule.once && triggered_count > 0 {
@@ -647,16 +660,17 @@ impl Loaded {
 
             let matched = if rule.regex {
                 match regex::Regex::new(&rule.expect) {
-                    Ok(re) => re.is_match(&new_text),
+                    Ok(re) => re.is_match(&scan_text),
                     Err(_) => false,
                 }
             } else {
-                new_text.contains(&rule.expect)
+                scan_text.contains(&rule.expect)
             };
 
             if matched {
                 let to_send = format!("{}\n", rule.send);
-                if let Err(e) = self.send_input(&p.id, &to_send) {
+                let echo = format!("› [自动应答：第 {} 条规则]", idx + 1);
+                if let Err(e) = self.send_input_internal(&p.id, &to_send, Some(echo)) {
                     eprintln!("auto_answer failed to send input for `{}`: {e}", p.id);
                 } else {
                     *state.triggered_counts.entry(idx).or_insert(0) += 1;
@@ -958,17 +972,32 @@ impl Loaded {
         Ok(())
     }
 
+    pub const MAX_INPUT_BYTES: usize = MAX_INPUT_BYTES;
+
     /// 向运行中的项目标准输入管道写入数据。
     pub fn send_input(&self, id: &str, data: &str) -> Result<()> {
-        let p = self.resolve(id)?;
+        self.send_input_internal(id, data, None)
+    }
+
+    pub(crate) fn send_input_internal(
+        &self,
+        id: &str,
+        data: &str,
+        custom_echo: Option<String>,
+    ) -> Result<()> {
         #[cfg(not(unix))]
         {
-            let _ = p;
+            let _ = id;
             let _ = data;
-            bail!("Windows 暂不支持");
+            let _ = custom_echo;
+            bail!("Windows 暂不支持向进程发送输入");
         }
         #[cfg(unix)]
         {
+            if data.len() > MAX_INPUT_BYTES {
+                bail!("单次输入不能超过 4096 字节");
+            }
+            let p = self.resolve(id)?;
             if tracked_pids(&p).is_empty() {
                 bail!("项目 `{id}` 未在运行");
             }
@@ -990,32 +1019,35 @@ impl Loaded {
                 bail!("无法写入输入管道（打开失败）：{err}");
             }
             let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-            file.write_all(data.as_bytes())
-                .with_context(|| format!("向项目 `{id}` 写入输入失败"))?;
+            if let Err(e) = file.write_all(data.as_bytes()) {
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.raw_os_error() == Some(libc::EAGAIN)
+                    || e.raw_os_error() == Some(libc::EWOULDBLOCK)
+                {
+                    bail!("子进程没有读取输入（管道已满）");
+                } else {
+                    bail!("向项目 `{id}` 写入输入失败: {e}");
+                }
+            }
 
             if !p.pty {
-                let echo = match data {
-                    "\x1b[A" => "› [Up]",
-                    "\x1b[B" => "› [Down]",
-                    "\x1b[C" => "› [Right]",
-                    "\x1b[D" => "› [Left]",
-                    "\t" => "› [Tab]",
-                    "\x1b" => "› [Esc]",
-                    "\x03" => "› [Ctrl+C]",
-                    "\n" | "\r" => "› [Enter]",
-                    other => {
-                        let trimmed = other.trim();
-                        if trimmed.is_empty() {
-                            "›"
-                        } else {
-                            &format!("› {trimmed}")
+                let echo_text = if let Some(echo) = custom_echo {
+                    echo
+                } else {
+                    match data {
+                        "\x1b[A" => "› [按键 up]".to_string(),
+                        "\x1b[B" => "› [按键 down]".to_string(),
+                        "\x1b[C" => "› [按键 right]".to_string(),
+                        "\x1b[D" => "› [按键 left]".to_string(),
+                        "\t" => "› [按键 tab]".to_string(),
+                        "\x1b" => "› [按键 esc]".to_string(),
+                        "\x03" => "› [按键 ctrl-c]".to_string(),
+                        "\n" | "\r" => "› [按键 enter]".to_string(),
+                        other => {
+                            let count = other.chars().count();
+                            format!("› [已发送 {count} 个字符]")
                         }
                     }
-                };
-                let echo_text = if echo.starts_with('›') {
-                    echo.to_string()
-                } else {
-                    format!("› {}", data.trim())
                 };
                 append_log_line(&p.log_file, &echo_text);
             }
@@ -1043,6 +1075,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Loaded> {
 }
 
 pub const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../../../config/projects.template.toml");
+pub const MAX_INPUT_BYTES: usize = 4096;
 
 pub fn map_key(key: &str) -> Option<&'static str> {
     match key.to_ascii_lowercase().as_str() {
@@ -3841,6 +3874,16 @@ fn write_doc(path: &Path, doc: &toml_edit::DocumentMut) -> Result<()> {
 }
 
 impl Loaded {
+    /// Validate project data for a new project before modifying any config file or groups.
+    pub fn validate_new_project(&self, req: &NewProject) -> Result<()> {
+        let (id, project) = req.clone().into_project()?;
+        if self.config.projects.contains_key(&id) {
+            bail!("project `{id}` already exists; remove it first or pick another id");
+        }
+        resolve_project(&id, &project, current_home().as_deref())?;
+        Ok(())
+    }
+
     /// Register a project and write it to the config file. Existing ids are refused.
     pub fn add_project(&mut self, req: NewProject) -> Result<ProjectRow> {
         let (id, project) = req.into_project()?;
@@ -4059,6 +4102,57 @@ impl Loaded {
             auto_answers: p.auto_answers.clone(),
             hints,
         })
+    }
+
+    /// Validate project edit data before modifying any config file or groups.
+    pub fn validate_update_project(&self, id: &str, edit: &ProjectEdit) -> Result<()> {
+        let existing = self
+            .config
+            .projects
+            .get(id)
+            .with_context(|| format!("unknown project id `{id}`; try `tongyun-dev list`"))?;
+
+        for (label, v) in [("node", &edit.node), ("java", &edit.java)] {
+            if let Some(v) = v {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() && !valid_version(trimmed) {
+                    bail!("{label} version `{trimmed}` may only contain letters, digits, `.`, `-`, `_`");
+                }
+            }
+        }
+
+        if let Some(ref port_mode) = edit.port_mode {
+            let trimmed = port_mode.trim().to_ascii_lowercase();
+            if !trimmed.is_empty() && !matches!(trimmed.as_str(), "none" | "arg" | "env" | "config")
+            {
+                bail!("port_mode must be one of none, arg, env, config, got `{trimmed}`");
+            }
+        }
+
+        let mut test_project = existing.clone();
+        if let Some(ref name) = edit.name {
+            test_project.name = name.trim().to_string();
+        }
+        if let Some(ref root) = edit.root {
+            test_project.root = root.trim().to_string();
+        }
+        if let Some(port) = edit.port {
+            test_project.port = port;
+        }
+        if let Some(ref start) = edit.start {
+            test_project.start = shell_argv(start.trim(), existing.shell.as_deref());
+        }
+        if let Some(ref stop) = edit.stop {
+            test_project.stop = shell_argv(stop.trim(), existing.shell.as_deref());
+        }
+        if let Some(enabled) = edit.enabled {
+            test_project.enabled = enabled;
+        }
+        if let Some(ref reason) = edit.reason {
+            test_project.reason = reason.trim().to_string();
+        }
+        resolve_project(id, &test_project, current_home().as_deref())?;
+        Ok(())
     }
 
     /// Update an existing project in the config file. Preserves other keys, key order, comments and multiline strings.
@@ -4479,6 +4573,19 @@ impl Loaded {
         let key = generate_group_key(trimmed, &existing_keys);
         self.create_group(&key, Some(trimmed))?;
         Ok(Some(key))
+    }
+
+    /// Remove a group by key. Does not touch projects belonging to it.
+    pub fn remove_group(&mut self, key: &str) -> Result<()> {
+        let key = key.trim();
+        validate_group_key(key)?;
+        let mut doc = read_doc(&self.path)?;
+        if let Some(groups) = doc.get_mut("group").and_then(|g| g.as_table_mut()) {
+            groups.remove(key);
+        }
+        write_doc(&self.path, &doc)?;
+        self.config.group.remove(key);
+        Ok(())
     }
 
     /// Update or clear project group, writing back to config with toml_edit preserving comments.
@@ -6114,6 +6221,12 @@ port = 9000
             loaded.resolve_or_create_group("g1").unwrap().as_deref(),
             Some("g1")
         );
+
+        // Test remove_group
+        loaded.remove_group("g1").unwrap();
+        assert!(!loaded.groups().iter().any(|g| g.key == "g1"));
+        let text_after_remove = std::fs::read_to_string(&path).unwrap();
+        assert!(!text_after_remove.contains("[group.g1]"));
 
         // Reload and check
         let reloaded = load(Some(&path)).unwrap();

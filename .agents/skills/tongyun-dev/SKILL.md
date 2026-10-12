@@ -64,7 +64,7 @@ Agent 驱动建议：`start <id> --timeout 60 --json` → 检查退出码和 `ok
 
 `start` / `restart` 的等待预算从启动命令返回后计算，不限制自定义脚本本身；慢探针可能额外约 5 秒。自动安装阶段等待失败会取消安装；只读 `wait` 不取消任何进程。
 
-向运行中的交互脚本发送输入：`tongyun-dev input <id> [text] [--no-enter] [--key key] [--json]`，键位支持 `up` / `down` / `left` / `right` / `enter` / `tab` / `esc` / `ctrl-c`。项目必须在运行中且拥有标准输入管道（FIFO）。
+向运行中的交互脚本发送输入：`tongyun-dev input <id> [text] [--no-enter] [--key key] [--json]`，键位支持 `up` / `down` / `left` / `right` / `enter` / `tab` / `esc` / `ctrl-c`。项目必须在运行中且拥有标准输入管道（FIFO）。注意：Windows 暂不支持向进程发送输入；单次输入上限 4096 字节（超限报错）；日志回显默认只记录占位符（不落明文）；管道满返回「子进程没有读取输入（管道已满）」。
 
 ## 4. HTTP 控制台（:9099）
 
@@ -76,7 +76,7 @@ Agent 驱动建议：`start <id> --timeout 60 --json` → 检查退出码和 `ok
 | GET | `/api/projects/{id}` | 项目设置详情 |
 | PATCH | `/api/projects/{id}` | 部分更新项目设置 |
 | GET | `/api/projects/{id}/logs` | 日志 |
-| POST | `/api/projects/{id}/input` | 发送输入/按键（非运行中返回 409） |
+| POST | `/api/projects/{id}/input` | 发送输入/按键（非运行中/管道满返回 409，超限返回 400，Windows 暂不支持） |
 | POST | `/api/projects/{id}/start\|stop\|restart\|install\|open\|open-dir` | 动作 |
 | POST | `/api/projects` | 新增登记 |
 | DELETE | `/api/projects/{id}` | 删登记 |

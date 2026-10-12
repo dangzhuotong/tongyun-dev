@@ -53,6 +53,7 @@ tongyun-dev ui [--port 9099]   # 网页控制台，默认 http://127.0.0.1:9099
 | `login_probe` | 登录/健康探针（含 `http_code`、`ok` 等） |
 | `log_path` | 日志路径 |
 | `port_conflict` / `port_holder` | 端口冲突信息 |
+| `hints` | 诊断建议（如 monorepo 脚本误用 `--port` 等，可选） |
 
 Agent 驱动建议：`start <id> --timeout 60 --json` → 检查退出码和 `ok` → 需要时 `logs <id> --json`；超时后读 `status <id> --json`，可再 `wait <id> --timeout 30 --json` 或显式 `stop <id> --json`。不要把等待超时当成进程已停止。
 

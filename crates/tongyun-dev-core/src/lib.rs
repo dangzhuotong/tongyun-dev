@@ -94,6 +94,15 @@ struct Project {
     /// 缺 node_modules 时启动前自动装依赖。缺省 true。
     #[serde(default)]
     auto_install: Option<bool>,
+    /// 端口传递方式："none"（缺省）、"arg"、"env"、"config"
+    #[serde(default)]
+    pub port_mode: Option<String>,
+    /// 端口参数名（缺省 "--port"）
+    #[serde(default)]
+    pub port_arg: Option<String>,
+    /// 端口环境变量名（缺省 "PORT"）
+    #[serde(default)]
+    pub port_env: Option<String>,
 }
 
 struct Vars {
@@ -129,6 +138,9 @@ struct Resolved {
     node_home: Option<PathBuf>,
     shell: Option<String>,
     auto_install: bool,
+    pub port_mode: String,
+    pub port_arg: Option<String>,
+    pub port_env: Option<String>,
 }
 
 impl Resolved {
@@ -158,15 +170,20 @@ impl Resolved {
     }
 
     pub fn assembled_start(&self) -> Vec<String> {
-        // 旧配置里常见 `pnpm dev -- --port X`：pnpm 会把 `--` 原样交给 vite / vue-cli，端口参数失效。
-        self.active_start()
-            .iter()
-            .map(|a| normalize_start_arg(a))
-            .collect()
+        let active = self.active_start();
+        if self.port_mode == "arg" {
+            append_port_arg(&active, self.port, self.port_arg.as_deref())
+        } else {
+            active
+        }
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+pub fn default_port_mode() -> String {
+    "none".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct ProjectRow {
     pub id: String,
     pub name: String,
@@ -191,6 +208,12 @@ pub struct ProjectRow {
     pub shell: Option<String>,
     /// 缺 node_modules 时启动前是否自动装依赖（缺省 true）。
     pub auto_install: bool,
+    #[serde(default = "default_port_mode")]
+    pub port_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_arg: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_env: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -320,6 +343,9 @@ pub struct StatusJson {
     /// 装依赖用的命令（例如 `pnpm install`）；不是前端项目时为空。
     #[serde(default)]
     pub install_command: String,
+    /// 诊断建议
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -365,6 +391,9 @@ impl Loaded {
                 node_home: resolved.node_home.as_ref().map(|p| path_to_string(p)),
                 shell: resolved.shell,
                 auto_install: resolved.auto_install,
+                port_mode: resolved.port_mode,
+                port_arg: resolved.port_arg,
+                port_env: resolved.port_env,
             });
         }
         Ok(ProjectList {
@@ -1108,6 +1137,33 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from);
+    let port_mode = match p
+        .port_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => {
+            let m = s.to_ascii_lowercase();
+            if !matches!(m.as_str(), "none" | "arg" | "env" | "config") {
+                bail!("port_mode must be one of none, arg, env, config, got `{s}`");
+            }
+            m
+        }
+        None => "none".to_string(),
+    };
+    let port_arg = p
+        .port_arg
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let port_env = p
+        .port_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
     Ok(Resolved {
         id: id.to_string(),
         name: if p.name.trim().is_empty() {
@@ -1137,6 +1193,9 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
         node_home,
         shell,
         auto_install: p.auto_install.unwrap_or(true),
+        port_mode,
+        port_arg,
+        port_env,
     })
 }
 
@@ -1570,7 +1629,7 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
     let start_error = marker.as_ref().and_then(|m| m.error.clone());
     let now = current_time_secs();
 
-    let (state, failure) = derive_state(StateInput {
+    let (mut state, mut failure) = derive_state(StateInput {
         process_alive,
         port_open: open,
         port_conflict,
@@ -1582,12 +1641,33 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
         start_error,
     });
 
+    let mut hints = Vec::new();
+    if let Some(h) = diagnose_start_command(&p.root, &p.start) {
+        hints.push(h);
+    }
+    let has_unknown_port_err = !process_alive && check_log_unknown_port_error(&p.log_file);
+    if has_unknown_port_err
+        && (state == LifeState::Failed || state == LifeState::Starting || marker.is_some())
+    {
+        state = LifeState::Failed;
+        let port_advice =
+            "启动脚本不认 --port 参数；建议去掉 --port，端口传递方式选「不传」".to_string();
+        if let Some(ref mut fail_msg) = failure {
+            if !fail_msg.contains("建议去掉 --port") {
+                fail_msg.push_str(&format!("：{port_advice}"));
+            }
+        } else {
+            failure = Some(format!("进程已退出：{port_advice}"));
+        }
+        if !hints.contains(&port_advice) {
+            hints.push(port_advice);
+        }
+    }
+
     if state == LifeState::Stopped && !process_alive {
         let _ = std::fs::remove_file(start_marker_path(&p.pid_file));
     }
 
-    let mut state = state;
-    let mut failure = failure;
     let mut started_at = started_at;
     if !matches!(state, LifeState::Ready | LifeState::PortOpen) {
         if let Some((st, why, at)) = install_overlay(read_install_marker(&p.pid_file)) {
@@ -1628,6 +1708,7 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
         install_command: detect_package_manager(&p.root)
             .map(|pm| pm.install_command().to_string())
             .unwrap_or_default(),
+        hints,
     }
 }
 
@@ -1721,6 +1802,276 @@ pub fn normalize_start_arg(arg: &str) -> String {
         lines.join("\n")
     } else {
         arg.to_string()
+    }
+}
+
+fn has_port_flag(toks: &[&str], flag: &str) -> bool {
+    toks.iter().any(|t| {
+        *t == flag
+            || *t == "--port"
+            || *t == "-p"
+            || t.starts_with(&format!("{flag}="))
+            || t.starts_with("--port=")
+            || t.starts_with("-p=")
+    })
+}
+
+fn append_port_to_words(line: &str, port: u16, flag: &str) -> String {
+    let toks: Vec<&str> = line.split_whitespace().collect();
+    if toks.is_empty() {
+        return line.to_string();
+    }
+    if has_port_flag(&toks, flag) {
+        return line.to_string();
+    }
+
+    let is_npm_run = toks.windows(2).any(|w| w[0] == "npm" && w[1] == "run");
+    let has_double_dash = toks.contains(&"--");
+
+    let mut out = line.trim_end().to_string();
+    if is_npm_run {
+        if has_double_dash {
+            out.push_str(&format!(" {flag} {port}"));
+        } else {
+            out.push_str(&format!(" -- {flag} {port}"));
+        }
+    } else {
+        out.push_str(&format!(" {flag} {port}"));
+    }
+    out
+}
+
+pub fn append_port_to_script(script: &str, port: u16, flag: &str) -> String {
+    let lines: Vec<&str> = script.split('\n').collect();
+    if lines.is_empty() {
+        return script.to_string();
+    }
+
+    let all_toks: Vec<&str> = script.split_whitespace().collect();
+    if has_port_flag(&all_toks, flag) {
+        return script.to_string();
+    }
+
+    let mut target_idx = None;
+    for (i, line) in lines.iter().enumerate().rev() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("exec ") || trimmed.starts_with("exec\t") {
+            target_idx = Some(i);
+            break;
+        }
+    }
+    if target_idx.is_none() {
+        for (i, line) in lines.iter().enumerate().rev() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                target_idx = Some(i);
+                break;
+            }
+        }
+    }
+    let target_idx = target_idx.unwrap_or(lines.len().saturating_sub(1));
+
+    let mut result = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i == target_idx {
+            result.push(append_port_to_words(line, port, flag));
+        } else {
+            result.push(line.to_string());
+        }
+    }
+    result.join("\n")
+}
+
+pub fn append_port_to_argv(argv: &[String], port: u16, flag: &str) -> Vec<String> {
+    if argv.is_empty() {
+        return Vec::new();
+    }
+    let toks: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+    if has_port_flag(&toks, flag) {
+        return argv.to_vec();
+    }
+
+    let mut out = argv.to_vec();
+    let is_npm_run = argv.len() >= 2 && argv[0] == "npm" && argv[1] == "run";
+    let has_double_dash = argv.iter().any(|s| s == "--");
+
+    if is_npm_run {
+        if !has_double_dash {
+            out.push("--".to_string());
+        }
+        out.push(flag.to_string());
+        out.push(port.to_string());
+    } else {
+        out.push(flag.to_string());
+        out.push(port.to_string());
+    }
+    out
+}
+
+/// 自动在命令末尾追加端口参数。
+/// pnpm/yarn → ` --port N`；npm run → ` -- --port N`（命令已有 `--` 就不再加）；其他命令直接追加 ` --port N`。
+/// 若命令里已指定 --port / -p / flag 则不重复追加。
+pub fn append_port_arg(cmd: &[String], port: u16, port_arg: Option<&str>) -> Vec<String> {
+    if cmd.is_empty() {
+        return Vec::new();
+    }
+    let flag = port_arg.unwrap_or("--port");
+
+    if cmd.len() == 3 && (cmd[0] == "bash" || cmd[0] == "sh") && (cmd[1] == "-c" || cmd[1] == "-lc")
+    {
+        let mut out = cmd.to_vec();
+        out[2] = append_port_to_script(&cmd[2], port, flag);
+        return out;
+    }
+    if cmd.len() == 3
+        && cmd[0].eq_ignore_ascii_case("cmd")
+        && (cmd[1].eq_ignore_ascii_case("/c") || cmd[1].eq_ignore_ascii_case("-c"))
+    {
+        let mut out = cmd.to_vec();
+        out[2] = append_port_to_script(&cmd[2], port, flag);
+        return out;
+    }
+    if cmd.len() == 6
+        && cmd[0].eq_ignore_ascii_case("powershell")
+        && cmd[4].eq_ignore_ascii_case("-command")
+    {
+        let mut out = cmd.to_vec();
+        out[5] = append_port_to_script(&cmd[5], port, flag);
+        return out;
+    }
+    if cmd.len() == 3
+        && cmd[0].eq_ignore_ascii_case("powershell")
+        && (cmd[1].eq_ignore_ascii_case("-command") || cmd[1].eq_ignore_ascii_case("-c"))
+    {
+        let mut out = cmd.to_vec();
+        out[2] = append_port_to_script(&cmd[2], port, flag);
+        return out;
+    }
+
+    append_port_to_argv(cmd, port, flag)
+}
+
+fn extract_script_name(cmd: &[String]) -> Option<String> {
+    let all_tokens: Vec<&str> = cmd.iter().flat_map(|s| s.split_whitespace()).collect();
+
+    for (i, t) in all_tokens.iter().enumerate() {
+        if is_pnpm_token(t) || *t == "yarn" || t.ends_with("/yarn") {
+            let mut j = i + 1;
+            if all_tokens.get(j) == Some(&"run") {
+                j += 1;
+            }
+            if let Some(script) = all_tokens.get(j) {
+                if !script.starts_with('-') && !matches!(*script, "&&" | "||" | ";" | "|" | "exec")
+                {
+                    return Some(script.to_string());
+                }
+            }
+        } else if *t == "npm" || t.ends_with("/npm") {
+            let mut j = i + 1;
+            if all_tokens.get(j) == Some(&"run") {
+                j += 1;
+                if let Some(script) = all_tokens.get(j) {
+                    if !script.starts_with('-')
+                        && !matches!(*script, "&&" | "||" | ";" | "|" | "exec")
+                    {
+                        return Some(script.to_string());
+                    }
+                }
+            }
+        } else if *t == "node" || t.ends_with("/node") {
+            let mut j = i + 1;
+            if let Some(entry) = all_tokens.get(j) {
+                if entry.ends_with(".js")
+                    || entry.ends_with(".ts")
+                    || entry.ends_with(".mjs")
+                    || entry.ends_with(".cjs")
+                {
+                    j += 1;
+                    if let Some(script) = all_tokens.get(j) {
+                        if !script.starts_with('-')
+                            && !matches!(*script, "&&" | "||" | ";" | "|" | "exec")
+                        {
+                            return Some(script.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 诊断启动命令：若 start 写死了 `--port` 且为 monorepo 启动脚本，给出警告
+pub fn diagnose_start_command(root: &Path, start_cmd: &[String]) -> Option<String> {
+    let has_port_flag = start_cmd.iter().any(|arg| {
+        arg.split_whitespace()
+            .any(|tok| tok == "--port" || tok.starts_with("--port="))
+    });
+    if !has_port_flag {
+        return None;
+    }
+
+    let script_name = extract_script_name(start_cmd).unwrap_or_else(|| "dev".to_string());
+
+    let is_monorepo_root =
+        root.join("turbo.json").is_file() || root.join("pnpm-workspace.yaml").is_file();
+
+    let pkg_path = root.join("package.json");
+    let is_monorepo = if let Ok(text) = std::fs::read_to_string(&pkg_path) {
+        if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&text) {
+            let script_body = pkg
+                .get("scripts")
+                .and_then(|s| s.as_object())
+                .and_then(|m| m.get(&script_name).or_else(|| m.get("dev")))
+                .and_then(|v| v.as_str());
+
+            if let Some(body) = script_body {
+                let b = body.trim();
+                let first_word = b.split_whitespace().next().unwrap_or("");
+                let is_direct_framework =
+                    matches!(first_word, "vite" | "vue-cli-service" | "next" | "nuxt")
+                        || b.starts_with("npx vite")
+                        || b.starts_with("npx next")
+                        || b.starts_with("npx nuxt");
+
+                if is_direct_framework && !is_monorepo_root {
+                    false
+                } else {
+                    first_word == "turbo"
+                        || first_word == "turbo-run"
+                        || first_word == "nx"
+                        || first_word == "lerna"
+                        || first_word == "node"
+                        || first_word == "ts-node"
+                        || first_word == "tsx"
+                        || is_monorepo_root
+                }
+            } else {
+                is_monorepo_root
+            }
+        } else {
+            is_monorepo_root
+        }
+    } else {
+        is_monorepo_root
+    };
+
+    if is_monorepo {
+        Some(format!(
+            "start 命令里写了 --port，但 {script_name} 是 monorepo 启动脚本，可能不认 --port；建议去掉 --port，端口传递方式选「不传」"
+        ))
+    } else {
+        None
+    }
+}
+
+pub fn check_log_unknown_port_error(log_path: &Path) -> bool {
+    if let Ok(text) = read_tail(log_path, 50) {
+        let lower = text.to_ascii_lowercase();
+        (lower.contains("unknown option") || lower.contains("unrecognized option"))
+            && lower.contains("--port")
+    } else {
+        false
     }
 }
 
@@ -2131,7 +2482,7 @@ fn cmd_start_detached(p: &Resolved) -> Result<()> {
     }
     let timeout_secs = start_ready_timeout_secs(p);
     let roots = ToolchainRoots::from_env();
-    let tc_env = toolchain_env(
+    let mut tc_env = toolchain_env(
         p.java.as_deref(),
         p.java_home.as_deref(),
         p.node.as_deref(),
@@ -2139,6 +2490,11 @@ fn cmd_start_detached(p: &Resolved) -> Result<()> {
         &roots,
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    if p.port_mode == "env" && p.port > 0 {
+        let env_key = p.port_env.as_deref().unwrap_or("PORT");
+        tc_env.push((env_key.to_string(), p.port.to_string()));
+    }
 
     let start_cmd = p.assembled_start();
     eprintln!("starting {} …", p.id);
@@ -2488,6 +2844,12 @@ pub struct NewProject {
     /// Tomcat 安装目录（WAR 项目用；写了就必须有 stop）。
     #[serde(default)]
     pub tomcat: Option<String>,
+    #[serde(default)]
+    pub port_mode: Option<String>,
+    #[serde(default)]
+    pub port_arg: Option<String>,
+    #[serde(default)]
+    pub port_env: Option<String>,
 }
 
 fn non_empty(v: &Option<String>) -> Option<String> {
@@ -2546,6 +2908,23 @@ impl NewProject {
                 bail!("shell must be one of bash, sh, cmd, powershell, got `{sh}`");
             }
         }
+        let port_mode = match self
+            .port_mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(s) => {
+                let m = s.to_ascii_lowercase();
+                if !matches!(m.as_str(), "none" | "arg" | "env" | "config") {
+                    bail!("port_mode must be one of none, arg, env, config, got `{s}`");
+                }
+                Some(m)
+            }
+            None => None,
+        };
+        let port_arg = non_empty(&self.port_arg);
+        let port_env = non_empty(&self.port_env);
         let java_home = non_empty(&self.java_home);
         let node_home = non_empty(&self.node_home);
         let name = non_empty(&self.name).unwrap_or_else(|| id.clone());
@@ -2559,7 +2938,7 @@ impl NewProject {
             root,
             enabled,
             reason,
-            start: shell_argv(&normalize_start_arg(&start), shell.as_deref()),
+            start: shell_argv(&start, shell.as_deref()),
             stop: non_empty(&self.stop)
                 .map(|s| shell_argv(&s, shell.as_deref()))
                 .unwrap_or_default(),
@@ -2581,6 +2960,9 @@ impl NewProject {
             node_home,
             shell,
             auto_install: self.auto_install.filter(|v| !v),
+            port_mode,
+            port_arg,
+            port_env,
         };
         Ok((id, project))
     }
@@ -2627,6 +3009,21 @@ fn project_table(p: &Project) -> toml_edit::Table {
     }
     if p.auto_install == Some(false) {
         t["auto_install"] = value(false);
+    }
+    if let Some(v) = &p.port_mode {
+        if !v.is_empty() {
+            t["port_mode"] = value(v.as_str());
+        }
+    }
+    if let Some(v) = &p.port_arg {
+        if !v.is_empty() {
+            t["port_arg"] = value(v.as_str());
+        }
+    }
+    if let Some(v) = &p.port_env {
+        if !v.is_empty() {
+            t["port_env"] = value(v.as_str());
+        }
     }
     let arr = |argv: &[String]| {
         let mut a = Array::new();
@@ -2725,6 +3122,12 @@ pub struct ProjectEdit {
     /// Some(false) 写 `auto_install = false`；Some(true) 删掉这个键（缺省就是自动装）。
     #[serde(default)]
     pub auto_install: Option<bool>,
+    #[serde(default)]
+    pub port_mode: Option<String>,
+    #[serde(default)]
+    pub port_arg: Option<String>,
+    #[serde(default)]
+    pub port_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -2748,19 +3151,28 @@ pub struct ProjectDetail {
     pub stop_grace_secs: Option<u64>,
     #[serde(default = "default_true")]
     pub auto_install: bool,
+    #[serde(default = "default_port_mode")]
+    pub port_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_arg: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
 }
 
 fn unpack_command(argv: &[String]) -> (String, bool) {
     if argv.is_empty() {
         (String::new(), true)
-    } else if argv.len() == 3
+    } else if (argv.len() == 3
         && (argv[0] == "bash" || argv[0] == "sh")
-        && (argv[1] == "-c" || argv[1] == "-lc")
-    {
-        (argv[2].clone(), true)
-    } else if argv.len() == 3
-        && argv[0].eq_ignore_ascii_case("cmd")
-        && (argv[1].eq_ignore_ascii_case("/c") || argv[1].eq_ignore_ascii_case("-c"))
+        && (argv[1] == "-c" || argv[1] == "-lc"))
+        || (argv.len() == 3
+            && argv[0].eq_ignore_ascii_case("cmd")
+            && (argv[1].eq_ignore_ascii_case("/c") || argv[1].eq_ignore_ascii_case("-c")))
+        || (argv.len() == 3
+            && argv[0].eq_ignore_ascii_case("powershell")
+            && (argv[1].eq_ignore_ascii_case("-command") || argv[1].eq_ignore_ascii_case("-c")))
     {
         (argv[2].clone(), true)
     } else if argv.len() == 6
@@ -2768,11 +3180,6 @@ fn unpack_command(argv: &[String]) -> (String, bool) {
         && argv[4].eq_ignore_ascii_case("-command")
     {
         (argv[5].clone(), true)
-    } else if argv.len() == 3
-        && argv[0].eq_ignore_ascii_case("powershell")
-        && (argv[1].eq_ignore_ascii_case("-command") || argv[1].eq_ignore_ascii_case("-c"))
-    {
-        (argv[2].clone(), true)
     } else {
         (argv.join(" "), false)
     }
@@ -2849,6 +3256,9 @@ impl Loaded {
             node_home: r.node_home.as_ref().map(|p| path_to_string(p)),
             shell: r.shell,
             auto_install: r.auto_install,
+            port_mode: r.port_mode,
+            port_arg: r.port_arg,
+            port_env: r.port_env,
         })
     }
 
@@ -2947,6 +3357,18 @@ impl Loaded {
             .with_context(|| format!("unknown project id `{id}`; try `tongyun-dev list`"))?;
         let (start, start_editable) = unpack_command(&p.start);
         let (stop, stop_editable) = unpack_command(&p.stop);
+        let r = self.resolve(id)?;
+        let mut hints = Vec::new();
+        if let Some(h) = diagnose_start_command(&r.root, &r.start) {
+            hints.push(h);
+        }
+        if check_log_unknown_port_error(&r.log_file) {
+            let port_advice =
+                "启动脚本不认 --port 参数；建议去掉 --port，端口传递方式选「不传」".to_string();
+            if !hints.contains(&port_advice) {
+                hints.push(port_advice);
+            }
+        }
         Ok(ProjectDetail {
             id: id.to_string(),
             name: if p.name.trim().is_empty() {
@@ -2970,6 +3392,10 @@ impl Loaded {
             start_timeout_secs: p.start_timeout_secs,
             stop_grace_secs: p.stop_grace_secs,
             auto_install: p.auto_install.unwrap_or(true),
+            port_mode: r.port_mode,
+            port_arg: r.port_arg,
+            port_env: r.port_env,
+            hints,
         })
     }
 
@@ -3030,7 +3456,7 @@ impl Loaded {
             if trimmed.is_empty() {
                 proj_table.remove("start");
             } else {
-                let argv = shell_argv(&normalize_start_arg(trimmed), existing.shell.as_deref());
+                let argv = shell_argv(trimmed, existing.shell.as_deref());
                 let mut a = toml_edit::Array::new();
                 for s in argv {
                     a.push(s.as_str());
@@ -3143,6 +3569,36 @@ impl Loaded {
             }
         }
 
+        if let Some(ref port_mode) = edit.port_mode {
+            let trimmed = port_mode.trim().to_ascii_lowercase();
+            if trimmed.is_empty() {
+                proj_table.remove("port_mode");
+            } else {
+                if !matches!(trimmed.as_str(), "none" | "arg" | "env" | "config") {
+                    bail!("port_mode must be one of none, arg, env, config, got `{trimmed}`");
+                }
+                set_table_val(proj_table, "port_mode", toml_edit::Value::from(trimmed));
+            }
+        }
+
+        if let Some(ref port_arg) = edit.port_arg {
+            let trimmed = port_arg.trim();
+            if trimmed.is_empty() {
+                proj_table.remove("port_arg");
+            } else {
+                set_table_val(proj_table, "port_arg", toml_edit::Value::from(trimmed));
+            }
+        }
+
+        if let Some(ref port_env) = edit.port_env {
+            let trimmed = port_env.trim();
+            if trimmed.is_empty() {
+                proj_table.remove("port_env");
+            } else {
+                set_table_val(proj_table, "port_env", toml_edit::Value::from(trimmed));
+            }
+        }
+
         let temp_config = parse_config(&doc.to_string())?;
         let updated_project = temp_config
             .projects
@@ -3173,6 +3629,9 @@ impl Loaded {
             node_home: r.node_home.as_ref().map(|p| path_to_string(p)),
             shell: r.shell,
             auto_install: r.auto_install,
+            port_mode: r.port_mode,
+            port_arg: r.port_arg,
+            port_env: r.port_env,
         })
     }
 
@@ -3397,6 +3856,7 @@ login_url = "http://127.0.0.1:8080/legacy_app/admin/login.html"
             port_holder: String::new(),
             deps_missing: false,
             install_command: String::new(),
+            hints: Vec::new(),
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
@@ -3728,7 +4188,10 @@ port = 9
         let cfg = parse_config(EXAMPLE_TOML).unwrap();
         let mut ids: Vec<_> = cfg.projects.keys().cloned().collect();
         ids.sort();
-        assert_eq!(ids, vec!["demo_api", "demo_legacy", "demo_web"]);
+        assert_eq!(
+            ids,
+            vec!["demo_api", "demo_legacy", "demo_monorepo", "demo_web"]
+        );
         for id in ["demo_api", "demo_web"] {
             let p = resolve_project(id, cfg.projects.get(id).unwrap(), Some(home)).unwrap();
             assert!(p.enabled, "{id}");
@@ -3764,6 +4227,16 @@ port = 9
         .unwrap();
         assert_eq!(web.node.as_deref(), Some("20"));
         assert_eq!(web.login_url, "http://127.0.0.1:5173/");
+
+        let mono = resolve_project(
+            "demo_monorepo",
+            cfg.projects.get("demo_monorepo").unwrap(),
+            Some(home),
+        )
+        .unwrap();
+        assert!(!mono.enabled);
+        assert_eq!(mono.port_mode, "none");
+        assert_eq!(mono.port, 3000);
 
         let legacy = resolve_project(
             "demo_legacy",
@@ -3867,6 +4340,9 @@ port = 3002
             node_home: fs.node_home.as_ref().map(|p| path_to_string(p)),
             shell: fs.shell.clone(),
             auto_install: fs.auto_install,
+            port_mode: "none".to_string(),
+            port_arg: None,
+            port_env: None,
         };
         let json_fs: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row_fs).unwrap()).unwrap();
@@ -3889,6 +4365,9 @@ port = 3002
             node_home: none.node_home.as_ref().map(|p| path_to_string(p)),
             shell: none.shell.clone(),
             auto_install: none.auto_install,
+            port_mode: "none".to_string(),
+            port_arg: None,
+            port_env: None,
         };
         let json_none: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row_none).unwrap()).unwrap();
@@ -4747,7 +5226,7 @@ mod deps_tests {
                 .assembled_start()
                 .join(" ")
         };
-        assert!(start_of("demo_web").contains("pnpm dev --port 5173 --host 127.0.0.1"));
+        assert!(start_of("demo_web").contains("pnpm dev --host 127.0.0.1 --port 5173"));
         assert!(start_of("demo_api").contains("mvn spring-boot:run"));
     }
 
@@ -4769,9 +5248,10 @@ start = ["pnpm", "dev", "--", "--port", "5174"]
         let cfg = parse_config(text).unwrap();
         let home = Some(Path::new("/Users/dev"));
         let web = resolve_project("web", cfg.projects.get("web").unwrap(), home).unwrap();
+        // 手写 start 命令原样执行，不再改写
         assert_eq!(
             web.assembled_start(),
-            vec!["bash", "-c", "exec pnpm dev --port 5173"]
+            vec!["bash", "-c", "exec pnpm dev -- --port 5173"]
         );
         assert!(web.auto_install);
         let manual =
@@ -5040,6 +5520,409 @@ mod scan_import_tests {
             text.contains("tongyun-dev 项目配置"),
             "template header kept"
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod port_mode_tests {
+    use super::*;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "tongyun_port_mode_{tag}_{}_{}",
+            std::process::id(),
+            current_time_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write(p: &Path, body: &str) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    fn has_node() -> bool {
+        std::process::Command::new("node")
+            .arg("-v")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn pure_unit_test_append_port_arg() {
+        // pnpm
+        let pnpm_cmd = vec!["pnpm".to_string(), "dev".to_string()];
+        assert_eq!(
+            append_port_arg(&pnpm_cmd, 5173, None),
+            vec!["pnpm", "dev", "--port", "5173"]
+        );
+
+        // yarn
+        let yarn_cmd = vec!["yarn".to_string(), "dev".to_string()];
+        assert_eq!(
+            append_port_arg(&yarn_cmd, 5173, None),
+            vec!["yarn", "dev", "--port", "5173"]
+        );
+
+        // npm run without double dash
+        let npm_cmd = vec!["npm".to_string(), "run".to_string(), "dev".to_string()];
+        assert_eq!(
+            append_port_arg(&npm_cmd, 5173, None),
+            vec!["npm", "run", "dev", "--", "--port", "5173"]
+        );
+
+        // npm run with existing double dash
+        let npm_dash_cmd = vec![
+            "npm".to_string(),
+            "run".to_string(),
+            "dev".to_string(),
+            "--".to_string(),
+            "--host".to_string(),
+        ];
+        assert_eq!(
+            append_port_arg(&npm_dash_cmd, 5173, None),
+            vec!["npm", "run", "dev", "--", "--host", "--port", "5173"]
+        );
+
+        // other command
+        let other_cmd = vec!["demo_api".to_string()];
+        assert_eq!(
+            append_port_arg(&other_cmd, 8080, None),
+            vec!["demo_api", "--port", "8080"]
+        );
+
+        // custom port_arg flag
+        assert_eq!(
+            append_port_arg(&other_cmd, 8080, Some("-p")),
+            vec!["demo_api", "-p", "8080"]
+        );
+
+        // already has --port or -p: do not duplicate
+        let with_port = vec![
+            "pnpm".to_string(),
+            "dev".to_string(),
+            "--port".to_string(),
+            "3000".to_string(),
+        ];
+        assert_eq!(append_port_arg(&with_port, 5173, None), with_port);
+
+        let with_p = vec![
+            "pnpm".to_string(),
+            "dev".to_string(),
+            "-p".to_string(),
+            "3000".to_string(),
+        ];
+        assert_eq!(append_port_arg(&with_p, 5173, None), with_p);
+
+        let with_eq = vec![
+            "pnpm".to_string(),
+            "dev".to_string(),
+            "--port=3000".to_string(),
+        ];
+        assert_eq!(append_port_arg(&with_eq, 5173, None), with_eq);
+
+        // single line bash -c
+        let bash_pnpm = vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            "exec pnpm dev --host 127.0.0.1".to_string(),
+        ];
+        assert_eq!(
+            append_port_arg(&bash_pnpm, 5173, None),
+            vec!["bash", "-c", "exec pnpm dev --host 127.0.0.1 --port 5173"]
+        );
+
+        let bash_npm = vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            "exec npm run dev".to_string(),
+        ];
+        assert_eq!(
+            append_port_arg(&bash_npm, 5173, None),
+            vec!["bash", "-c", "exec npm run dev -- --port 5173"]
+        );
+
+        let bash_npm_with_dash = vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            "exec npm run dev -- --host 127.0.0.1".to_string(),
+        ];
+        assert_eq!(
+            append_port_arg(&bash_npm_with_dash, 5173, None),
+            vec![
+                "bash",
+                "-c",
+                "exec npm run dev -- --host 127.0.0.1 --port 5173"
+            ]
+        );
+
+        // multi-line bash -c
+        let bash_multi = vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            "# setup\ncd app\nexec pnpm dev".to_string(),
+        ];
+        assert_eq!(
+            append_port_arg(&bash_multi, 5173, None),
+            vec!["bash", "-c", "# setup\ncd app\nexec pnpm dev --port 5173"]
+        );
+    }
+
+    #[test]
+    fn manual_start_with_double_dash_is_not_rewritten() {
+        let text = r#"
+[projects.demo_app]
+name = "Demo App"
+root = "/tmp/demo_app"
+port = 5555
+start = ["bash", "-c", "exec pnpm dev -- --port 5555 --host 127.0.0.1"]
+port_mode = "none"
+"#;
+        let cfg = parse_config(text).unwrap();
+        let proj = resolve_project(
+            "demo_app",
+            cfg.projects.get("demo_app").unwrap(),
+            Some(Path::new("/tmp")),
+        )
+        .unwrap();
+        assert_eq!(
+            proj.assembled_start(),
+            vec![
+                "bash",
+                "-c",
+                "exec pnpm dev -- --port 5555 --host 127.0.0.1"
+            ]
+        );
+    }
+
+    #[test]
+    fn diagnose_warns_on_fixture_and_silent_on_vite() {
+        let d = tmp("diagnose");
+
+        // 1. Monorepo fixture with turbo.json + pnpm-workspace.yaml + node turbo-run script
+        let mono_root = d.join("acme-monorepo");
+        write(
+            &mono_root.join("package.json"),
+            r#"{"name":"acme-monorepo","private":true,"scripts":{"dev":"node scripts/turbo-run/index.js dev"}}"#,
+        );
+        write(&mono_root.join("turbo.json"), "{}");
+        write(
+            &mono_root.join("pnpm-workspace.yaml"),
+            "packages: ['packages/*']",
+        );
+
+        let mono_start_with_port = vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            "exec pnpm dev -- --port 5555 --host 127.0.0.1".to_string(),
+        ];
+        let warn = diagnose_start_command(&mono_root, &mono_start_with_port);
+        assert!(
+            warn.is_some(),
+            "should warn on monorepo with --port in start"
+        );
+        assert!(
+            warn.unwrap()
+                .contains("建议去掉 --port，端口传递方式选「不传」"),
+            "should contain actionable suggestion"
+        );
+
+        let mono_start_without_port = vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            "exec pnpm dev --host 127.0.0.1".to_string(),
+        ];
+        assert_eq!(
+            diagnose_start_command(&mono_root, &mono_start_without_port),
+            None,
+            "no warning when --port is not present"
+        );
+
+        // 2. Single package vite project: no warning even with --port
+        let vite_root = d.join("acme-vite");
+        write(
+            &vite_root.join("package.json"),
+            r#"{"name":"acme-vite","scripts":{"dev":"vite"}}"#,
+        );
+        let vite_start = vec![
+            "bash".to_string(),
+            "-c".to_string(),
+            "exec pnpm dev -- --port 5173".to_string(),
+        ];
+        assert_eq!(
+            diagnose_start_command(&vite_root, &vite_start),
+            None,
+            "single package vite should not trigger monorepo warning"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn turbo_monorepo_node_fixture_lifecycle() {
+        if !has_node() {
+            eprintln!("skipping turbo_monorepo_node_fixture_lifecycle: node not installed");
+            return;
+        }
+
+        let d = tmp("turbo_fixture");
+        let fixture_root = d.join("acme-monorepo");
+        write(
+            &fixture_root.join("package.json"),
+            r#"{"name":"acme-monorepo","private":true,"scripts":{"dev":"node scripts/turbo-run/index.js dev"}}"#,
+        );
+        write(&fixture_root.join("turbo.json"), "{}");
+        write(
+            &fixture_root.join("pnpm-workspace.yaml"),
+            "packages:\n  - 'packages/*'\n",
+        );
+        let _ = std::fs::create_dir_all(fixture_root.join("node_modules"));
+
+        let node_script = r#"
+const http = require('http');
+const args = process.argv.slice(2);
+if (args.includes('--port') || args.some(a => a.startsWith('--port='))) {
+  console.error("ERROR Unknown option `--port`");
+  process.exit(1);
+}
+const port = parseInt(process.env.PORT || '4777', 10);
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('ok');
+});
+server.listen(port, '127.0.0.1', () => {
+  console.log('Server ready on ' + port);
+});
+"#;
+        write(
+            &fixture_root.join("scripts/turbo-run/index.js"),
+            node_script,
+        );
+
+        let log_dir = d.join("logs");
+        let cfg_path = d.join("projects.toml");
+
+        // 1. port_mode = "none": start command executes as-is, probe port 4777 succeeds
+        let toml_none = format!(
+            r#"
+[projects.mono_none]
+name = "Mono None"
+root = "{root}"
+port = 4777
+start = ["node", "scripts/turbo-run/index.js", "dev"]
+log_dir = "{log}"
+port_mode = "none"
+auto_install = false
+background = true
+"#,
+            root = path_to_string(&fixture_root),
+            log = path_to_string(&log_dir)
+        );
+        std::fs::write(&cfg_path, &toml_none).unwrap();
+
+        let loaded = load(Some(&cfg_path)).unwrap();
+        let _ = loaded.start_with_timeout("mono_none", Some(Duration::from_secs(5)));
+        let mut ready = false;
+        for _ in 0..30 {
+            if let Ok(st) = loaded.status("mono_none") {
+                if st.running && st.port_open {
+                    ready = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            ready,
+            "port_mode=none should start and port probe 4777 succeed"
+        );
+        let _ = loaded.stop("mono_none");
+
+        // 2. port_mode = "arg": tongyun-dev automatically appends --port, reproduces Unknown option failure
+        let toml_arg = format!(
+            r#"
+[projects.mono_arg]
+name = "Mono Arg"
+root = "{root}"
+port = 4778
+start = ["node", "scripts/turbo-run/index.js", "dev"]
+log_dir = "{log}"
+port_mode = "arg"
+auto_install = false
+background = true
+"#,
+            root = path_to_string(&fixture_root),
+            log = path_to_string(&log_dir)
+        );
+        std::fs::write(&cfg_path, &toml_arg).unwrap();
+
+        let loaded = load(Some(&cfg_path)).unwrap();
+        let _ = loaded.start_with_timeout("mono_arg", Some(Duration::from_secs(2)));
+        let mut failed_with_hint = false;
+        for _ in 0..30 {
+            if let Ok(st) = loaded.status("mono_arg") {
+                if st.state == LifeState::Failed {
+                    let fail_msg = st.failure.as_deref().unwrap_or("");
+                    let has_advice = fail_msg.contains("建议去掉 --port，端口传递方式选「不传」")
+                        || st
+                            .hints
+                            .iter()
+                            .any(|h| h.contains("建议去掉 --port，端口传递方式选「不传」"));
+                    if has_advice {
+                        failed_with_hint = true;
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            failed_with_hint,
+            "port_mode=arg should fail and contain actionable advice in failure/hints"
+        );
+        let _ = loaded.stop("mono_arg");
+
+        // 3. port_mode = "env": child process receives PORT environment variable and starts on port 4779
+        let toml_env = format!(
+            r#"
+[projects.mono_env]
+name = "Mono Env"
+root = "{root}"
+port = 4779
+start = ["node", "scripts/turbo-run/index.js", "dev"]
+log_dir = "{log}"
+port_mode = "env"
+port_env = "PORT"
+auto_install = false
+background = true
+"#,
+            root = path_to_string(&fixture_root),
+            log = path_to_string(&log_dir)
+        );
+        std::fs::write(&cfg_path, &toml_env).unwrap();
+
+        let loaded = load(Some(&cfg_path)).unwrap();
+        let _ = loaded.start_with_timeout("mono_env", Some(Duration::from_secs(5)));
+        let mut env_ready = false;
+        for _ in 0..30 {
+            if let Ok(st) = loaded.status("mono_env") {
+                if st.running && st.port_open {
+                    env_ready = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            env_ready,
+            "port_mode=env should start with PORT=4779 and probe succeed"
+        );
+        let _ = loaded.stop("mono_env");
+
         let _ = std::fs::remove_dir_all(&d);
     }
 }

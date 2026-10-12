@@ -95,6 +95,8 @@ pub struct Candidate {
     pub why: Vec<String>,
     /// Set when a project with the same root is already registered.
     pub existing_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_mode: Option<String>,
 }
 
 impl Candidate {
@@ -118,6 +120,7 @@ impl Candidate {
             } else {
                 None
             },
+            port_mode: self.port_mode.clone(),
             ..Default::default()
         }
     }
@@ -268,6 +271,7 @@ fn base_candidate(dir: &Path, home: Option<&Path>, kind: &str, label: &str) -> C
         needs_tomcat: false,
         why: Vec::new(),
         existing_id: None,
+        port_mode: None,
     }
 }
 
@@ -793,19 +797,27 @@ fn detect_node(dir: &Path, home: Option<&Path>) -> Option<Detection> {
                 .map(|p| (p, f.to_string()))
         })
     };
+    let is_monorepo = has_workspaces || dir.join("turbo.json").is_file();
     if let Some(p) = port_from_command(&script_body) {
         c.port = p;
         c.why.push(format!("端口来自 scripts.{script}"));
+        c.port_mode = None;
     } else if let Some((p, f)) = config_port() {
         c.port = p;
         c.why.push(format!("端口来自 {f}"));
+        c.port_mode = Some("config".to_string());
     } else if default_port > 0 {
         c.port = default_port;
         c.port_guessed = true;
         c.why
             .push(format!("没写端口，按 {label} 默认 {default_port}"));
+        c.port_mode = Some("none".to_string());
     } else {
         c.why.push("没找到端口，添加前请手动填".into());
+        c.port_mode = Some("none".to_string());
+    }
+    if is_monorepo {
+        c.port_mode = Some("none".to_string());
     }
     if c.port > 0 && kind != "node" {
         c.health_url = Some(format!("http://127.0.0.1:{}/", c.port));
@@ -1322,5 +1334,64 @@ mod tests {
             display_path(Path::new("/home/u/code/x"), Some(Path::new("/home/u"))),
             "~/code/x"
         );
+    }
+
+    #[test]
+    fn node_scan_port_mode_rules_and_start_cmd_has_no_port() {
+        let t = Tmp::new("port_mode_scan");
+
+        t.write(
+            "from_script/package.json",
+            r#"{"name":"from-script","scripts":{"dev":"vite --port 5200"},"devDependencies":{"vite":"5"}}"#,
+        );
+
+        t.write(
+            "from_config/package.json",
+            r#"{"name":"from-config","scripts":{"dev":"vite"},"devDependencies":{"vite":"5"}}"#,
+        );
+        t.write(
+            "from_config/vite.config.ts",
+            "export default { server: { port: 5300 } };",
+        );
+
+        t.write(
+            "from_default/package.json",
+            r#"{"name":"from-default","scripts":{"dev":"vite"},"devDependencies":{"vite":"5"}}"#,
+        );
+
+        t.write(
+            "mono_root/package.json",
+            r#"{"name":"mono-root","scripts":{"dev":"node scripts/turbo-run/index.js dev"}}"#,
+        );
+        t.write("mono_root/turbo.json", "{}");
+
+        let cs = run(&t);
+        assert_eq!(cs.len(), 4, "{cs:#?}");
+
+        let by_id = |id: &str| cs.iter().find(|c| c.id == id).unwrap();
+
+        let s1 = by_id("from-script");
+        assert_eq!(s1.start, "npm run dev");
+        assert!(!s1.start.contains("--port"));
+        assert_eq!(s1.port, 5200);
+        assert_eq!(s1.port_mode, None);
+
+        let s2 = by_id("from-config");
+        assert_eq!(s2.start, "npm run dev");
+        assert!(!s2.start.contains("--port"));
+        assert_eq!(s2.port, 5300);
+        assert_eq!(s2.port_mode.as_deref(), Some("config"));
+
+        let s3 = by_id("from-default");
+        assert_eq!(s3.start, "npm run dev");
+        assert!(!s3.start.contains("--port"));
+        assert_eq!(s3.port, 5173);
+        assert!(s3.port_guessed);
+        assert_eq!(s3.port_mode.as_deref(), Some("none"));
+
+        let s4 = by_id("mono-root");
+        assert_eq!(s4.start, "npm run dev");
+        assert!(!s4.start.contains("--port"));
+        assert_eq!(s4.port_mode.as_deref(), Some("none"));
     }
 }

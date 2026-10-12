@@ -143,6 +143,15 @@ enum Cmd {
         /// Do not install node_modules automatically before the first start
         #[arg(long)]
         no_auto_install: bool,
+        /// Port delivery mode (none, arg, env, config)
+        #[arg(long)]
+        port_mode: Option<String>,
+        /// Port argument flag for port_mode=arg (default --port)
+        #[arg(long, allow_hyphen_values = true)]
+        port_arg: Option<String>,
+        /// Port env var name for port_mode=env (default PORT)
+        #[arg(long)]
+        port_env: Option<String>,
     },
     /// Remove a registered project (project files are not touched)
     Remove { id: String },
@@ -241,6 +250,9 @@ fn print_status(st: &StatusJson, json: bool) -> Result<()> {
         if let Some(why) = &st.failure {
             println!("  failure {why}");
         }
+        for hint in &st.hints {
+            println!("  hint {hint}");
+        }
         if st.deps_missing {
             println!(
                 "  deps missing (node_modules); run `tongyun-dev install {}` ({})",
@@ -311,7 +323,7 @@ fn main() -> Result<()> {
                     print_status(&st, false)?;
                     if open {
                         if let Err(e) = loaded
-                            .page_url(&id)
+                            .page_url(id)
                             .and_then(|u| tongyun_dev_core::open_url(&u))
                         {
                             eprintln!("could not open page: {e:#}");
@@ -319,7 +331,7 @@ fn main() -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    if let Ok(st) = loaded.status(&id) {
+                    if let Ok(st) = loaded.status(id) {
                         print_status(&st, false)?;
                     }
                     return Err(e);
@@ -416,6 +428,9 @@ fn main() -> Result<()> {
             shell,
             foreground,
             no_auto_install,
+            port_mode,
+            port_arg,
+            port_env,
         } => {
             let row = loaded.add_project(NewProject {
                 id,
@@ -434,6 +449,9 @@ fn main() -> Result<()> {
                 shell,
                 background: Some(!foreground),
                 auto_install: no_auto_install.then_some(false),
+                port_mode,
+                port_arg,
+                port_env,
                 ..Default::default()
             })?;
             println!(
@@ -688,6 +706,41 @@ mod tests {
                 assert_eq!(java.as_deref(), Some("17"));
                 assert_eq!(port, 5173);
                 assert!(!foreground);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_accepts_port_mode_flags() {
+        let cli = Cli::try_parse_from([
+            "tongyun-dev",
+            "add",
+            "web",
+            "--root",
+            "~/code/web",
+            "--start",
+            "pnpm dev",
+            "--port",
+            "5173",
+            "--port-mode",
+            "arg",
+            "--port-arg",
+            "-p",
+            "--port-env",
+            "VITE_PORT",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Some(Cmd::Add {
+                port_mode,
+                port_arg,
+                port_env,
+                ..
+            }) => {
+                assert_eq!(port_mode.as_deref(), Some("arg"));
+                assert_eq!(port_arg.as_deref(), Some("-p"));
+                assert_eq!(port_env.as_deref(), Some("VITE_PORT"));
             }
             other => panic!("unexpected {other:?}"),
         }

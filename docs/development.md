@@ -91,7 +91,13 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 - **后台运行项目（`background = true`）**：
   - 如 Spring Boot 项目（`demo_api`）或前端项目（`demo_web`）。命令在独立的新进程组中执行，stdout/stderr 追加写入日志，PID 记录至 pid 文件。
   - **前端依赖自动安装**：若项目根目录有 `package.json` 但缺失 `node_modules`，且配置 `auto_install = true`（缺省值），启动前会先按锁文件（pnpm / yarn / npm）自动执行依赖安装，状态置为 `installing`，装好后接着启动。
-  - **端口参数规范**：pnpm 直接传递端口参数（如 `pnpm dev --port 5173`），不要写 `--`；npm 才需要 `npm run dev -- --port 5173`。
+  - **端口传递方式说明**：
+    - 每个项目可通过 `port_mode` 配置端口传递方式（缺省 `"none"`）。
+    - `"none"`（缺省）：tongyun-dev 不往命令里加任何端口，也不设 `PORT`；端口仅用于探活（端口检测 / health_url / 打开页面）。适用于 monorepo、自身配置文件中已指定端口或使用自定义脚本解析参数的项目。
+    - `"arg"`：启动时由 tongyun-dev 自动在命令末尾追加端口参数。追加规则：pnpm/yarn 追加 `--port N`；npm run 追加 `-- --port N`（已有 `--` 则不再重复添加）；其他命令直接追加 `--port N`。可通过 `port_arg`（缺省 `"--port"`）自定义参数名（如 `-p`）。若命令中已写了 `--port` / `-p` 则不重复追加。用户手写的 start 命令原样执行，不会无条件改写。
+    - `"env"`：启动时给子进程设置环境变量 `PORT=N`。可通过 `port_env`（缺省 `"PORT"`）自定义变量名（如 `VITE_PORT`）。
+    - `"config"`：端口配置在项目自身的配置文件（如 `vite.config` 等）中，行为同 `"none"`，便于在 UI 上标注来源。
+    - **启动命令诊断**：若 start 命令写死了 `--port` 且检测为 monorepo 启动脚本，会在 status / detail 中给出警告提示；若启动失败且日志尾部包含 `Unknown option --port`，会在失败原因中给出修改建议。
 - **Tomcat 项目**：
   - 针对传统 WAR 项目（`demo_legacy`），配置 `tomcat` 字段。`stop` 命令优先执行配置脚本（如 `catalina.sh stop 15 -force`）。
   - 若停止超时后仍需发信号终止，仅针对 Java/Tomcat 进程，不杀占用端口的其他无关程序。
@@ -145,6 +151,9 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 | `java` | 可选（如 `"17"`）。启动前自动找到对应版本并注入 JAVA_HOME / PATH，不 source sdkman/fnm；缺失时给出可读报错 |
 | `java_home` / `node_home` | 可选。显式指定安装目录（Windows 或特殊环境自定义安装路径时使用） |
 | `auto_install` | 可选，缺省 `true`。前端缺少 node_modules 时启动前自动装依赖；`false` 时仅提示依赖未安装 |
+| `port_mode` | 可选。端口传递方式：`none`（缺省，不传参不设环境变量）、`arg`（自动追加命令行参数）、`env`（注入环境变量）、`config`（项目自有配置，同 none） |
+| `port_arg` | 可选。`port_mode = "arg"` 时的参数名称，缺省 `"--port"`（可自定义为 `"-p"` 等） |
+| `port_env` | 可选。`port_mode = "env"` 时的环境变量名称，缺省 `"PORT"`（可自定义为 `"VITE_PORT"` 等） |
 | `shell` | 可选。单条命令使用的 shell（macOS/Linux 默认 `"bash"`，可选 `"sh"`；Windows 默认 `"cmd"`，可选 `"powershell"`） |
 | `start_windows` / `stop_windows` | 可选。Windows 环境下优先使用的启动 / 停止命令数组 |
 | `start_timeout_secs` | 可选（如 `30`）。启动就绪等待超时秒数，优先级高于环境变量 `TONGYUN_DEV_START_TIMEOUT` 与默认 180 秒 |

@@ -2993,7 +2993,10 @@ fn configure_pty_slave(slave: std::os::unix::io::RawFd) -> Result<()> {
     }
     term.c_iflag |= libc::ICRNL;
     term.c_oflag |= libc::OPOST | libc::ONLCR;
-    term.c_lflag |= libc::ICANON | libc::ECHO | libc::ISIG;
+    // Keep cooked input (ICANON) and signals (ISIG), but never echo keystrokes.
+    // ECHO would copy passwords from the master back into the project log.
+    term.c_lflag |= libc::ICANON | libc::ISIG;
+    term.c_lflag &= !(libc::ECHO | libc::ECHOE | libc::ECHOK | libc::ECHONL);
     if unsafe { libc::tcsetattr(slave, libc::TCSANOW, &term) } != 0 {
         let err = std::io::Error::last_os_error();
         bail!("tcsetattr on pty slave: {err}");

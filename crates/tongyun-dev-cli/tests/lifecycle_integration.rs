@@ -1213,6 +1213,76 @@ env = {{ CI = "pty_ci" }}
 
 #[cfg(unix)]
 #[test]
+fn pty_password_prompt_does_not_echo_secret_into_log() {
+    let dir = temp_dir("pty_secret");
+    let port = free_port();
+    let cfg = dir.join("projects.toml");
+    let d = dir.to_string_lossy().replace('\\', "/");
+
+    let script = "printf 'Password:'; read -r secret; echo received_len=${#secret}; exec sleep 30";
+    fs::write(
+        &cfg,
+        format!(
+            r#"[projects.pty_secret]
+name = "PTY Secret"
+root = "{d}"
+start = ["sh", "-c", "{script}"]
+background = true
+pty = true
+port = {port}
+log_dir = "{d}/logs"
+"#
+        ),
+    )
+    .unwrap();
+
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    let _guard = CleanupGuard::new(&loaded, "pty_secret", dir.clone());
+    loaded.start_detached("pty_secret").unwrap();
+
+    let log_path = dir.join("logs/pty_secret.out");
+    let start_t = std::time::Instant::now();
+    let mut log_content = String::new();
+    while start_t.elapsed() < Duration::from_secs(5) {
+        if let Ok(c) = fs::read_to_string(&log_path) {
+            log_content = c;
+            if log_content.contains("Password:") {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        log_content.contains("Password:"),
+        "prompt should be logged: {log_content}"
+    );
+
+    loaded.send_input("pty_secret", "secret123\n").unwrap();
+
+    let start_t = std::time::Instant::now();
+    while start_t.elapsed() < Duration::from_secs(5) {
+        if let Ok(c) = fs::read_to_string(&log_path) {
+            log_content = c;
+            if log_content.contains("received_len=9") {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        log_content.contains("received_len=9"),
+        "input should reach the process: {log_content}"
+    );
+    assert!(
+        !log_content.contains("secret123"),
+        "pty log must not contain the password: {log_content}"
+    );
+
+    loaded.stop("pty_secret").unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn test_send_input_secret_pass_shows_placeholder_not_plaintext() {
     let dir = temp_dir("secret_input_test");
     let port = free_port();

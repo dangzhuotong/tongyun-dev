@@ -127,7 +127,7 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
   - Windows 环境暂不支持向进程发送输入（提示「Windows 暂不支持向进程发送输入」）。
 - **伪终端运行（`pty = true`）**：
   - 许多 CLI 工具在非 TTY 环境下不输出交互式提示或选择菜单。Unix（macOS 与 Linux 同一路径）在 `pty = true` 时 fork 一个常驻 relay（进程组组长，pid 文件记录的是 relay）：用 libc `openpty` 创建伪终端（失败则 `posix_openpt` + `grantpt` + `unlockpt`），再 fork/exec 真正的启动命令。子进程 `setsid` 后把 slave 设为控制终端（`TIOCSCTTY`），标准输入/输出/错误都在 slave 上，因此 `isatty` 为真。relay 把 FIFO 输入写到 master，把 master 输出追加到日志。不调用系统 `script`。
-  - PTY 模式下终端自身会回显输入字符，core 不再重复追加输入回显（不写占位符，也不从本层把明文再记一遍）。
+  - PTY slave 默认关闭 `ECHO`（以及 `ECHOE` / `ECHOK` / `ECHONL`），键盘输入不会经行规程回显进日志。`send_input` 和 relay 也不把用户输入明文写入项目日志；需要本地回显的程序可以自己打开 ECHO。
   - Windows 忽略 `pty`（与未设置时一样启动；向进程发送输入仍不支持）。
 - **额外环境变量（`env`）**：
   - 配置 `env = { CI = "1", APP_ENV = "dev" }`，可在启动子进程与依赖安装时注入自定义环境变量。用户显式配置的环境变量优先于工具链注入的环境变量。

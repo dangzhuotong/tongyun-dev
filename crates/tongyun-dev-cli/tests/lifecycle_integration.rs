@@ -891,3 +891,157 @@ log_dir = "{d}/logs"
 
     loaded.stop("http_test").unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn auto_answers_automatically_answers_prompt() {
+    let script_ok = std::process::Command::new("script")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
+        .unwrap_or(false);
+    if !script_ok {
+        eprintln!("script command not found, skipping auto_answers prompt.sh test");
+        return;
+    }
+
+    let dir = temp_dir("auto_answers_test");
+    let port = free_port();
+    let cfg = dir.join("projects.toml");
+    let d = dir.to_string_lossy().replace('\\', "/");
+
+    let prompt_sh = dir.join("prompt.sh");
+    fs::write(
+        &prompt_sh,
+        "#!/bin/bash\nread -p \"Select environment [dev/prod]: \" e\necho \"env=$e\"\nexec sleep 30\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(&prompt_sh).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&prompt_sh, perms).unwrap();
+
+    let p_path = prompt_sh.to_string_lossy().replace('\\', "/");
+    fs::write(
+        &cfg,
+        format!(
+            r#"[projects.prompt_app]
+name = "Prompt App"
+root = "{d}"
+start = ["{p_path}"]
+background = true
+pty = true
+port = {port}
+log_dir = "{d}/logs"
+auto_answers = [
+    {{ expect = "Select environment", send = "dev" }}
+]
+"#
+        ),
+    )
+    .unwrap();
+
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    let _guard = CleanupGuard::new(&loaded, "prompt_app", dir.clone());
+
+    let st = loaded.start_detached("prompt_app").unwrap();
+    assert_eq!(st.state, tongyun_dev_core::LifeState::Starting);
+
+    let log_path = dir.join("logs/prompt_app.out");
+    let start_t = std::time::Instant::now();
+    let mut log_content = String::new();
+    while start_t.elapsed() < Duration::from_secs(6) {
+        let _ = loaded.status("prompt_app");
+        if let Ok(c) = fs::read_to_string(&log_path) {
+            log_content = c;
+            if log_content.contains("env=dev") {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    assert!(log_content.contains("env=dev"), "log: {log_content}");
+
+    let stopped = loaded.stop("prompt_app").unwrap();
+    assert_eq!(stopped.state, tongyun_dev_core::LifeState::Stopped);
+    assert!(
+        !dir.join("logs/prompt_app.stdin").exists(),
+        "FIFO must be cleaned up"
+    );
+    assert!(
+        !dir.join("logs/prompt_app.answers.json").exists(),
+        "answers state file must be cleaned up"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pty_true_outputs_tty_and_cleans_up_on_stop() {
+    let script_ok = std::process::Command::new("script")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success() || !o.stdout.is_empty() || !o.stderr.is_empty())
+        .unwrap_or(false);
+    if !script_ok {
+        eprintln!("script command not found, skipping pty tty test");
+        return;
+    }
+
+    let dir = temp_dir("pty_tty_test");
+    let port = free_port();
+    let cfg = dir.join("projects.toml");
+    let d = dir.to_string_lossy().replace('\\', "/");
+
+    let script = "[ -t 0 ] && echo TTY_DETECTED; exec sleep 30";
+    fs::write(
+        &cfg,
+        format!(
+            r#"[projects.pty_srv]
+name = "PTY Service"
+root = "{d}"
+start = ["sh", "-c", "{script}"]
+background = true
+pty = true
+port = {port}
+log_dir = "{d}/logs"
+"#
+        ),
+    )
+    .unwrap();
+
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    let _guard = CleanupGuard::new(&loaded, "pty_srv", dir.clone());
+
+    let st = loaded.start_detached("pty_srv").unwrap();
+    assert_eq!(st.state, tongyun_dev_core::LifeState::Starting);
+    let pid = st.pid.expect("pid must exist");
+
+    let log_path = dir.join("logs/pty_srv.out");
+    let fifo_path = dir.join("logs/pty_srv.stdin");
+    assert!(fifo_path.exists(), "FIFO should exist for pty project");
+
+    let start_t = std::time::Instant::now();
+    let mut log_content = String::new();
+    while start_t.elapsed() < Duration::from_secs(5) {
+        if let Ok(c) = fs::read_to_string(&log_path) {
+            log_content = c;
+            if log_content.contains("TTY_DETECTED") {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(log_content.contains("TTY_DETECTED"), "log: {log_content}");
+
+    // Stop and verify process and FIFO cleanup
+    let stopped = loaded.stop("pty_srv").unwrap();
+    assert_eq!(stopped.state, tongyun_dev_core::LifeState::Stopped);
+    assert!(!is_process_alive(pid), "script process must be terminated");
+    assert!(!fifo_path.exists(), "FIFO must be removed after stop");
+    assert!(
+        !dir.join("logs/pty_srv.pid").exists(),
+        "pid file must be removed"
+    );
+}

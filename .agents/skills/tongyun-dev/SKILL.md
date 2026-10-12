@@ -64,6 +64,8 @@ Agent 驱动建议：`start <id> --timeout 60 --json` → 检查退出码和 `ok
 
 `start` / `restart` 的等待预算从启动命令返回后计算，不限制自定义脚本本身；慢探针可能额外约 5 秒。自动安装阶段等待失败会取消安装；只读 `wait` 不取消任何进程。
 
+向运行中的交互脚本发送输入：`tongyun-dev input <id> [text] [--no-enter] [--key key] [--json]`，键位支持 `up` / `down` / `left` / `right` / `enter` / `tab` / `esc` / `ctrl-c`。项目必须在运行中且拥有标准输入管道（FIFO）。
+
 ## 4. HTTP 控制台（:9099）
 
 本机 `tongyun-dev ui` 后：

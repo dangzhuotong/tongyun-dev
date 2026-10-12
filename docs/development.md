@@ -114,6 +114,28 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 - **日志输出与跟踪**：
   - `logs` 查看日志尾部；`--follow` 在文件尚未生成时会自动等待，并在生成后持续跟随。
 
+## 交互式启动脚本（PTY、标准输入管道与自动应答）
+
+- **标准输入管道（FIFO）**：
+  - Unix 环境下，后台项目启动时在 `<log_dir>/<id>.stdin` 创建命名管道（FIFO），以 `O_RDWR` 绑定为子进程的标准输入。
+  - 用户或 Agent 可通过 `tongyun-dev input <id> <text>`、网页控制台 `POST /api/projects/:id/input` 或桌面界面向运行中的进程输入内容。非 PTY 模式下输入时默认在日志中回显 `› <text>`。
+  - 项目停止后，自动清理 `<id>.stdin` 与应答状态记录。
+- **伪终端运行（`pty = true`）**：
+  - 许多 CLI 工具在非 TTY 环境下不输出交互式提示或选择菜单。设置 `pty = true` 时，系统使用 `script` 命令包装启动（macOS: `script -q /dev/null <argv>`；Linux: `script -qfec "<escaped_cmd>" /dev/null`），使子进程在伪终端（PTY）中运行。
+  - PTY 模式下终端自身会回显输入字符，core 不再重复追加输入回显。
+- **额外环境变量（`env`）**：
+  - 配置 `env = { CI = "1", APP_ENV = "dev" }`，可在启动子进程与依赖安装时注入自定义环境变量。用户显式配置的环境变量优先于工具链注入的环境变量。
+- **自动应答规则（`auto_answers`）**：
+  - 当启动脚本需要交互式确认（例如环境选择、`(y/N)` 确认等），可配置自动应答规则：
+    ```toml
+    auto_answers = [
+        { expect = "Select environment", send = "dev" },
+        { expect = "(y/N)", send = "y" }
+    ]
+    ```
+  - 启动后在等待就绪循环和状态轮询时检查日志新增内容，命中 `expect` 时自动向管道写入 `send + "\n"`。
+  - 每条规则默认只触发一次（`once = false` 可多次）；可选 `regex = true` 支持正则表达式。重启服务时重置应答触发记录。
+
 ## 启动状态
 
 `tongyun-dev` 采用核心启停状态机（`LifeState`），Status JSON 中的 `state` 包含六个状态：
@@ -163,6 +185,8 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 | `stop_grace_secs` | 可选（如 `5`）。停止等待 TERM 宽限秒数，超时后发送 KILL，默认 8 秒 |
 | `group` | 可选。所属分组 key（引用顶层 `[group.<key>]`；未定义也作为同名组展示）。在 `--json` 中输出为 `group` 字段（未设置时为 `null`） |
 | `env` | 可选。额外环境变量键值对（例如 `env = { CI = "1", APP_ENV = "dev" }`），注入启动和依赖安装环境，用户显式配置的值优先 |
+| `pty` | 可选（缺省 `false`）。是否在伪终端（PTY）中运行后台进程，解决交互式提示在非 TTY 下不显示的问题 |
+| `auto_answers` | 可选。自动应答规则数组（例如 `[{ expect = "Select environment", send = "dev" }]`），启动时匹配日志输出并自动向标准输入发送内容 |
 | `log_dir` / `log_file` / `pid_file` | 可省略。默认日志与 PID 路径为 `~/.tongyun-dev/logs/<id>.out` 和 `.pid` |
 
 ### 分组配置 `[group.<key>]`

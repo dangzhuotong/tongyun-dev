@@ -4098,6 +4098,7 @@ dependencies = [
  "anyhow",
  "dirs 5.0.1",
  "libc",
+ "regex",
  "serde",
  "serde_json",
  "toml 0.8.23",

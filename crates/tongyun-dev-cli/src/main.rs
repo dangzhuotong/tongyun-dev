@@ -161,6 +161,12 @@ enum Cmd {
         /// Extra environment variables (KEY=VALUE, repeatable)
         #[arg(long = "env", value_parser = parse_env_pair)]
         env: Vec<(String, String)>,
+        /// Run in pseudo-terminal (PTY)
+        #[arg(long)]
+        pty: bool,
+        /// Auto answer rules ("MATCH=>SEND", repeatable)
+        #[arg(long = "auto-answer", value_parser = parse_auto_answer_pair)]
+        auto_answers: Vec<tongyun_dev_core::AutoAnswer>,
     },
     /// Edit an existing registered project in your config file
     Edit {
@@ -169,6 +175,18 @@ enum Cmd {
         /// Extra environment variables (KEY=VALUE, repeatable)
         #[arg(long = "env", value_parser = parse_env_pair)]
         env: Vec<(String, String)>,
+        /// Enable pseudo-terminal (PTY)
+        #[arg(long, conflicts_with = "no_pty")]
+        pty: bool,
+        /// Disable pseudo-terminal (PTY)
+        #[arg(long, conflicts_with = "pty")]
+        no_pty: bool,
+        /// Auto answer rules ("MATCH=>SEND", repeatable)
+        #[arg(long = "auto-answer", value_parser = parse_auto_answer_pair)]
+        auto_answers: Vec<tongyun_dev_core::AutoAnswer>,
+        /// Clear all auto answer rules
+        #[arg(long)]
+        clear_auto_answers: bool,
     },
     /// Send input to a running interactive process
     Input {
@@ -240,6 +258,26 @@ fn parse_env_pair(s: &str) -> Result<(String, String), String> {
         return Err(format!("env variable key cannot be empty in `{s}`"));
     }
     Ok((k.to_string(), v.to_string()))
+}
+
+fn parse_auto_answer_pair(s: &str) -> Result<tongyun_dev_core::AutoAnswer, String> {
+    let Some((exp, send)) = s.split_once("=>") else {
+        return Err(format!(
+            "auto-answer must be in 'MATCH=>SEND' format, got `{s}`"
+        ));
+    };
+    let exp = exp.trim();
+    if exp.is_empty() {
+        return Err(format!(
+            "auto-answer expect pattern cannot be empty in `{s}`"
+        ));
+    }
+    Ok(tongyun_dev_core::AutoAnswer {
+        expect: exp.to_string(),
+        send: send.trim().to_string(),
+        once: true,
+        regex: false,
+    })
 }
 
 // Existing list/status JSON keeps its original shape. Operations use a stable envelope.
@@ -511,6 +549,8 @@ fn main() -> Result<()> {
             port_env,
             group,
             env,
+            pty,
+            auto_answers,
         } => {
             let row = loaded.add_project(NewProject {
                 id,
@@ -534,6 +574,8 @@ fn main() -> Result<()> {
                 port_env,
                 group,
                 env: env.into_iter().collect(),
+                pty,
+                auto_answers,
                 ..Default::default()
             })?;
             println!(
@@ -543,10 +585,27 @@ fn main() -> Result<()> {
                 loaded.path().display()
             );
         }
-        Cmd::Edit { id, env } => {
+        Cmd::Edit {
+            id,
+            env,
+            pty,
+            no_pty,
+            auto_answers,
+            clear_auto_answers,
+        } => {
             let mut edit = tongyun_dev_core::ProjectEdit::default();
             if !env.is_empty() {
                 edit.env = Some(env.into_iter().collect());
+            }
+            if pty {
+                edit.pty = Some(true);
+            } else if no_pty {
+                edit.pty = Some(false);
+            }
+            if clear_auto_answers {
+                edit.auto_answers = Some(Vec::new());
+            } else if !auto_answers.is_empty() {
+                edit.auto_answers = Some(auto_answers);
             }
             let row = loaded.update_project(&id, edit)?;
             println!("已更新项目 `{}`，写入 {}", row.id, loaded.path().display());

@@ -245,7 +245,9 @@ async fn create_group(
 async fn set_project_group(id: String, group: Option<String>) -> Result<ProjectRow, String> {
     blocking(move || {
         let mut loaded = tongyun_dev_core::load(None).map_err(report)?;
-        loaded.set_project_group(&id, group.as_deref()).map_err(report)
+        loaded
+            .set_project_group(&id, group.as_deref())
+            .map_err(report)
     })
     .await
 }

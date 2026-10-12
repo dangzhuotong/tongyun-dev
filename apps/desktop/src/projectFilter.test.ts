@@ -1,16 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { countByFilter, filterProjects, matchesQuery, matchesStatus, queryTokens } from "./projectFilter";
 
-const P = (id: string, name: string, port: number, root = `/Users/a/code/${id}`, configured = true, enabled = true) => ({
+const P = (id: string, name: string, port: number, root = `~/code/demo/${id}`, configured = true, enabled = true) => ({
   id, name, port, root, configured, enabled,
 });
 const projects = [
   P("acme-web", "ACME 官网前端", 3000),
   P("acme-admin", "ACME 管理后台", 8080),
   P("acme-api", "ACME 主服务", 8081),
-  P("acme-ap", "AP 采购平台", 8090, "/Users/a/work/ap"),
-  P("acme-ops", "运维看板", 0, "/Users/a/code/ops", false),
-  P("acme-legacy", "旧版报表", 9000, "/Users/a/code/legacy", true, false),
+  P("acme-ap", "ACME 接入平台", 8090, "~/code/demo/work/ap"),
+  P("acme-ops", "运维看板", 0, "~/code/demo/ops", false),
+  P("acme-legacy", "旧版报表", 9000, "~/code/demo/legacy", true, false),
 ];
 const statuses = {
   "acme-admin": { state: "ready" as const },

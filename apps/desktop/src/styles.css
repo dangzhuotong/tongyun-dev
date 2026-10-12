@@ -535,9 +535,11 @@ svg {
   transition: background 0.15s, outline 0.15s;
 }
 
+.group-section.drag-over,
 .group-header.drag-over {
   background: var(--ty-matcha-tint);
   outline: 2px dashed var(--ty-matcha);
+  border-radius: var(--ty-radius-xs);
 }
 
 .group-header-btn {

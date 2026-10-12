@@ -67,6 +67,89 @@ export function generateGroupKey(label: string, existingKeys: string[] = []): st
   return `g${idx}`;
 }
 
+export interface ResolvedFormGroup {
+  /** 提交给项目的 group key。若输入为空则为 undefined（清空/未分组）。 */
+  key?: string;
+  /** 若需要新建组，包含待建组的 key 与 label */
+  newGroup?: {
+    key: string;
+    label: string;
+  };
+}
+
+/**
+ * 获取项目表单初始展示的分组名称（若已有对应组的 label 则展示 label，否则展示 key）。
+ */
+export function getInitialGroupLabel(
+  key: string | undefined | null,
+  groups: GroupInfo[] = []
+): string {
+  const trimmed = (key ?? "").trim();
+  if (!trimmed) return "";
+  const found = groups.find((g) => g.key === trimmed);
+  return found?.label || trimmed;
+}
+
+/**
+ * 将用户在项目表单中输入或选择的分组名称解析为后端合法的 group key：
+ * 1. 输入为空或纯空白：不设组（返回 undefined）
+ * 2. 先按 label（以及 key）在已有分组中查找（精确匹配优先，支持大小写不敏感匹配）：
+ *    若匹配到已有组，直接使用其 key，不新建组
+ * 3. 若已有组中查不到（用户输入了新组名）：
+ *    使用 generateGroupKey 生成合法 key，
+ *    返回该 key 并标记 newGroup: { key, label: trimmedInput }，
+ *    以便保存前调用 create_group(key, label) 创建新组。
+ */
+export function resolveFormGroup(
+  rawInput: string | undefined | null,
+  groups: GroupInfo[] = [],
+  existingKeys: string[] = []
+): ResolvedFormGroup {
+  const trimmed = (rawInput ?? "").trim();
+  if (!trimmed) {
+    return { key: undefined };
+  }
+
+  const allExistingKeys = Array.from(
+    new Set([
+      ...groups.map((g) => g.key).filter(Boolean),
+      ...existingKeys.filter(Boolean),
+    ])
+  );
+
+  // 优先精确匹配 label 或 key
+  const exact = groups.find((g) => g.label === trimmed || g.key === trimmed);
+  if (exact) {
+    return { key: exact.key };
+  }
+
+  // 大小写不敏感匹配 label 或 key
+  const lower = trimmed.toLowerCase();
+  const caseInsensitive = groups.find(
+    (g) => g.label.toLowerCase() === lower || g.key.toLowerCase() === lower
+  );
+  if (caseInsensitive) {
+    return { key: caseInsensitive.key };
+  }
+
+  // 若直接在 existingKeys 中匹配到
+  const directKey = allExistingKeys.find((k) => k.toLowerCase() === lower);
+  if (directKey) {
+    return { key: directKey };
+  }
+
+  // 查不到，生成合法 key
+  const generatedKey = generateGroupKey(trimmed, allExistingKeys);
+  return {
+    key: generatedKey,
+    newGroup: {
+      key: generatedKey,
+      label: trimmed,
+    },
+  };
+}
+
+
 /**
  * 对分组名列表进行排序（兼容旧接口）：
  * 1. 若配置了 group_order，则在 group_order 中的分组按照其在 group_order 中的顺序排在最前；

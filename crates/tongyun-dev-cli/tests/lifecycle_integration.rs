@@ -184,6 +184,11 @@ fn web_console_lists_adds_and_removes_through_core() {
 
     // POST /api/groups creates a new group
     let add_group = r#"{"key":"backend","label":"后端服务"}"#;
+    let evil_group_resp = post_json(ui, "/api/groups", add_group, Some("http://evil.example"));
+    assert!(
+        evil_group_resp.starts_with("HTTP/1.1 403"),
+        "{evil_group_resp}"
+    );
     let resp = post_json(ui, "/api/groups", add_group, None);
     assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
     assert!(resp.contains("\"key\":\"backend\""));

@@ -3998,10 +3998,10 @@ login_url = "http://127.0.0.1:8080/legacy_app/admin/login.html"
 
     #[test]
     fn expands_tilde_and_home_forms() {
-        let home = Path::new("/Users/dev");
+        let home = Path::new("/home/demo");
         assert_eq!(
             expand_tilde_with("~/code/acme/legacy-app", Some(home)).unwrap(),
-            "/Users/dev/code/acme/legacy-app"
+            "/home/demo/code/acme/legacy-app"
         );
         assert_eq!(
             expand_tilde_with(
@@ -4009,11 +4009,11 @@ login_url = "http://127.0.0.1:8080/legacy_app/admin/login.html"
                 Some(home)
             )
             .unwrap(),
-            "/Users/dev/.tongyun-dev/logs/legacy_app_catalina.out"
+            "/home/demo/.tongyun-dev/logs/legacy_app_catalina.out"
         );
         assert_eq!(
             expand_tilde_with("${HOME}/opt/tomcat-9", Some(home)).unwrap(),
-            "/Users/dev/opt/tomcat-9"
+            "/home/demo/opt/tomcat-9"
         );
         let err = expand_tilde_with("~/code/acme/legacy-app", None).unwrap_err();
         assert!(err.to_string().contains("HOME is not set"));
@@ -4021,35 +4021,35 @@ login_url = "http://127.0.0.1:8080/legacy_app/admin/login.html"
 
     #[test]
     fn legacy_paths_resolve_without_tilde() {
-        let p = legacy_app(Path::new("/Users/dev"));
-        assert_eq!(p.root, PathBuf::from("/Users/dev/code/acme/legacy-app"));
+        let p = legacy_app(Path::new("/home/demo"));
+        assert_eq!(p.root, PathBuf::from("/home/demo/code/acme/legacy-app"));
         assert_eq!(
             p.tomcat.as_deref(),
-            Some(Path::new("/Users/dev/opt/tomcat-9"))
+            Some(Path::new("/home/demo/opt/tomcat-9"))
         );
         assert!(p.enabled);
         assert!(!p.background);
         assert!(p.reason.is_empty());
         assert_eq!(
             p.log_file,
-            PathBuf::from("/Users/dev/.tongyun-dev/logs/legacy_app_catalina.out")
+            PathBuf::from("/home/demo/.tongyun-dev/logs/legacy_app_catalina.out")
         );
         assert_eq!(
             p.pid_file,
-            PathBuf::from("/Users/dev/.tongyun-dev/logs/legacy_app_tomcat.pid")
+            PathBuf::from("/home/demo/.tongyun-dev/logs/legacy_app_tomcat.pid")
         );
         assert_eq!(
             p.start,
             vec![
                 "bash".to_string(),
-                "/Users/dev/code/acme/legacy-app/scripts/start-legacy.sh".to_string(),
+                "/home/demo/code/acme/legacy-app/scripts/start-legacy.sh".to_string(),
             ]
         );
         assert_eq!(
             p.stop,
             vec![
                 "bash".to_string(),
-                "/Users/dev/opt/tomcat-9/bin/catalina.sh".to_string(),
+                "/home/demo/opt/tomcat-9/bin/catalina.sh".to_string(),
                 "stop".to_string(),
                 "15".to_string(),
                 "-force".to_string(),
@@ -4109,9 +4109,9 @@ login_url = "http://127.0.0.1:8080/legacy_app/admin/login.html"
                 http_code: None,
                 ok: false,
             },
-            log_path: "/Users/dev/.tongyun-dev/logs/legacy_app_catalina.out".into(),
-            pid_path: "/Users/dev/.tongyun-dev/logs/legacy_app_tomcat.pid".into(),
-            root: "/Users/dev/code/acme/legacy-app".into(),
+            log_path: "/home/demo/.tongyun-dev/logs/legacy_app_catalina.out".into(),
+            pid_path: "/home/demo/.tongyun-dev/logs/legacy_app_tomcat.pid".into(),
+            root: "/home/demo/code/acme/legacy-app".into(),
             port_conflict: false,
             port_holder: String::new(),
             deps_missing: false,
@@ -4148,7 +4148,7 @@ login_url = "http://127.0.0.1:8080/legacy_app/admin/login.html"
         assert_eq!(v["login_probe"]["ok"], false);
         assert_eq!(
             v["log_path"],
-            "/Users/dev/.tongyun-dev/logs/legacy_app_catalina.out"
+            "/home/demo/.tongyun-dev/logs/legacy_app_catalina.out"
         );
     }
 
@@ -4425,7 +4425,7 @@ port = 9
         let p = resolve_project(
             "demo",
             cfg.projects.get("demo").unwrap(),
-            Some(Path::new("/Users/dev")),
+            Some(Path::new("/home/demo")),
         )
         .unwrap();
         assert!(p.enabled);
@@ -4434,17 +4434,17 @@ port = 9
         assert!(p.login_url.is_empty());
         assert_eq!(
             p.log_file,
-            PathBuf::from("/Users/dev/.tongyun-dev/logs/demo.out")
+            PathBuf::from("/home/demo/.tongyun-dev/logs/demo.out")
         );
         assert_eq!(
             p.pid_file,
-            PathBuf::from("/Users/dev/.tongyun-dev/logs/demo.pid")
+            PathBuf::from("/home/demo/.tongyun-dev/logs/demo.pid")
         );
     }
 
     #[test]
     fn example_config_resolves() {
-        let home = Path::new("/Users/dev");
+        let home = Path::new("/home/demo");
         let cfg = parse_config(EXAMPLE_TOML).unwrap();
         let mut ids: Vec<_> = cfg.projects.keys().cloned().collect();
         ids.sort();
@@ -4474,10 +4474,10 @@ port = 9
         assert_eq!(api.java.as_deref(), Some("17"));
         assert_eq!(api.port, 8081);
         assert!(api.start.join(" ").contains("spring-boot:run"));
-        assert_eq!(api.root, PathBuf::from("/Users/dev/code/demo/demo-api"));
+        assert_eq!(api.root, PathBuf::from("/home/demo/code/demo/demo-api"));
         assert_eq!(
             api.log_file,
-            PathBuf::from("/Users/dev/.tongyun-dev/logs/demo_api.out")
+            PathBuf::from("/home/demo/.tongyun-dev/logs/demo_api.out")
         );
         let web = resolve_project(
             "demo_web",
@@ -4508,7 +4508,7 @@ port = 9
         assert!(!legacy.reason.is_empty());
         assert_eq!(
             legacy.tomcat.as_deref(),
-            Some(Path::new("/Users/dev/opt/tomcat-9"))
+            Some(Path::new("/home/demo/opt/tomcat-9"))
         );
         let err = cmd_start(&legacy).unwrap_err().to_string();
         assert!(err.contains("disabled"), "{err}");
@@ -4559,7 +4559,7 @@ start = ["true"]
 port = 3002
 "#;
         let cfg: FileConfig = parse_config(toml_str).unwrap();
-        let home = Path::new("/Users/dev");
+        let home = Path::new("/home/demo");
 
         let fs = resolve_project(
             "fullstack",
@@ -5581,7 +5581,7 @@ mod deps_tests {
 
     #[test]
     fn shipped_configs_have_no_pnpm_double_dash() {
-        let home = Path::new("/Users/dev");
+        let home = Path::new("/home/demo");
         for text in [EXAMPLE_TOML, TEMPLATE_TOML] {
             let cfg = parse_config(text).unwrap();
             for (id, p) in &cfg.projects {
@@ -5623,7 +5623,7 @@ auto_install = false
 start = ["pnpm", "dev", "--", "--port", "5174"]
 "#;
         let cfg = parse_config(text).unwrap();
-        let home = Some(Path::new("/Users/dev"));
+        let home = Some(Path::new("/home/demo"));
         let web = resolve_project("web", cfg.projects.get("web").unwrap(), home).unwrap();
         // 手写 start 命令原样执行，不再改写
         assert_eq!(

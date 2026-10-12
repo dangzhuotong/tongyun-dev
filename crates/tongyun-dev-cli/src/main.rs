@@ -29,6 +29,9 @@ enum Cmd {
     List {
         #[arg(long)]
         json: bool,
+        /// Include groups in JSON output: {"projects":[...],"groups":[{key,label,order}]}
+        #[arg(long)]
+        with_groups: bool,
     },
     /// Start a project and wait until the login page / port responds
     Start {
@@ -323,7 +326,7 @@ fn main() -> Result<()> {
         }
     };
     match cmd {
-        Cmd::List { json } => print_list(&loaded, json)?,
+        Cmd::List { json, with_groups } => print_list(&loaded, json, with_groups)?,
         Cmd::Start {
             ref id,
             open,
@@ -634,10 +637,25 @@ fn print_scan(report: &ScanReport) {
     }
 }
 
-fn print_list(loaded: &Loaded, json: bool) -> Result<()> {
+fn print_list(loaded: &Loaded, json: bool, with_groups: bool) -> Result<()> {
     let list = loaded.list().context("list projects")?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&list.projects)?);
+        if with_groups {
+            #[derive(serde::Serialize)]
+            struct ListWithGroups<'a> {
+                projects: &'a [tongyun_dev_core::ProjectRow],
+                groups: &'a [tongyun_dev_core::GroupInfo],
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&ListWithGroups {
+                    projects: &list.projects,
+                    groups: &list.groups,
+                })?
+            );
+        } else {
+            println!("{}", serde_json::to_string_pretty(&list.projects)?);
+        }
     } else {
         for project in &list.projects {
             let mut line = format!("{}\t{}\t{}", project.id, project.name, project.root);
@@ -667,7 +685,22 @@ mod tests {
     #[test]
     fn parses_cli_arguments() {
         let cli = Cli::try_parse_from(["tongyun-dev", "list", "--json"]).unwrap();
-        assert!(matches!(cli.cmd, Some(Cmd::List { json: true })));
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::List {
+                json: true,
+                with_groups: false
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["tongyun-dev", "list", "--json", "--with-groups"]).unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::List {
+                json: true,
+                with_groups: true
+            })
+        ));
 
         let cli = Cli::try_parse_from(["tongyun-dev", "start", "my_api", "--open"]).unwrap();
         assert!(matches!(cli.cmd, Some(Cmd::Start { ref id, open: true, .. }) if id == "my_api"));

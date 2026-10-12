@@ -750,38 +750,39 @@ export function App() {
               {sections.map((section) => {
                 const collapsed = isGroupCollapsed(section.key, collapsedGroups, isFiltering);
                 return (
-                  <div key={section.key} className="group-section">
-                    <div
-                      className={`group-header${dragOverGroup === section.key ? " drag-over" : ""}`}
-                      onDragOver={(e) => {
-                        e.preventDefault();
-                        e.dataTransfer.dropEffect = "move";
-                        if (dragOverGroup !== section.key) {
-                          setDragOverGroup(section.key);
-                        }
-                      }}
-                      onDragLeave={(e) => {
-                        if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-                          setDragOverGroup(null);
-                        }
-                      }}
-                      onDrop={async (e) => {
-                        e.preventDefault();
+                  <div
+                    key={section.key}
+                    className={`group-section${dragOverGroup === section.key ? " drag-over" : ""}`}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "move";
+                      if (dragOverGroup !== section.key) {
+                        setDragOverGroup(section.key);
+                      }
+                    }}
+                    onDragLeave={(e) => {
+                      if (!e.currentTarget.contains(e.relatedTarget as Node)) {
                         setDragOverGroup(null);
-                        const draggedId = e.dataTransfer.getData("text/plain");
-                        if (!draggedId) return;
-                        try {
-                          const targetGroup = section.isUngrouped ? null : section.key;
-                          await invoke("set_project_group", { id: draggedId, group: targetGroup });
-                          await loadProjects();
-                          if (selected === draggedId) {
-                            await refresh(draggedId);
-                          }
-                        } catch (err: unknown) {
-                          setError(String(err));
+                      }
+                    }}
+                    onDrop={async (e) => {
+                      e.preventDefault();
+                      setDragOverGroup(null);
+                      const draggedId = e.dataTransfer.getData("text/plain");
+                      if (!draggedId) return;
+                      try {
+                        const targetGroup = section.isUngrouped ? null : section.key;
+                        await invoke("set_project_group", { id: draggedId, group: targetGroup });
+                        await loadProjects();
+                        if (selected === draggedId) {
+                          await refresh(draggedId);
                         }
-                      }}
-                    >
+                      } catch (err: unknown) {
+                        setError(String(err));
+                      }
+                    }}
+                  >
+                    <div className="group-header">
                       <button
                         type="button"
                         className="group-header-btn"
@@ -1230,6 +1231,7 @@ export function App() {
         <ProjectForm
           mode={formModal.mode}
           initialDetail={formModal.detail}
+          groups={projects?.groups}
           existingGroups={existingGroupKeys}
           onClose={() => setFormModal((prev) => ({ ...prev, open: false }))}
           onSuccess={async (savedId) => {

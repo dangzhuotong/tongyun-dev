@@ -262,3 +262,29 @@ fn foreign_port_blocks_start_without_creating_a_process() {
     assert!(!f.root.join("logs/demo.pid").exists());
     drop(listener);
 }
+
+#[test]
+fn list_json_with_groups_contract() {
+    let f = Fixture::new(
+        r#"["echo", "ok"]"#,
+        "[group.demo]\nlabel = \"Demo 业务线\"\norder = 1\n",
+    );
+    // Standard list --json is an array of projects
+    let output = f.cli(&["list", "--json"]);
+    assert!(output.status.success());
+    let arr: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(arr.is_array());
+    assert_eq!(arr[0]["id"], "demo");
+
+    // list --json --with-groups returns { projects: [...], groups: [...] }
+    let output_wg = f.cli(&["list", "--json", "--with-groups"]);
+    assert!(output_wg.status.success());
+    let obj: Value = serde_json::from_slice(&output_wg.stdout).unwrap();
+    assert!(obj.is_object());
+    assert!(obj["projects"].is_array());
+    assert_eq!(obj["projects"][0]["id"], "demo");
+    assert!(obj["groups"].is_array());
+    assert_eq!(obj["groups"][0]["key"], "demo");
+    assert_eq!(obj["groups"][0]["label"], "Demo 业务线");
+    assert_eq!(obj["groups"][0]["order"], 1);
+}

@@ -939,6 +939,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
     }
     let currentLogId = null;
     let lastProjects = [];
+    let lastGroups = [];
     const busyIds = {};
     let query = '';
     let statusFilter = 'all';
@@ -968,10 +969,21 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
 
     async function fetchProjects() {
       try {
-        const res = await fetch('/api/projects');
+        const [res, gRes] = await Promise.all([
+          fetch('/api/projects'),
+          fetch('/api/groups').catch(() => null)
+        ]);
         const data = await res.json();
         if (!Array.isArray(data)) throw new Error(data.error || '加载失败');
         lastProjects = data;
+        if (gRes && gRes.ok) {
+          try {
+            const gData = await gRes.json();
+            if (gData && Array.isArray(gData.groups)) {
+              lastGroups = gData.groups;
+            }
+          } catch (_) {}
+        }
         renderProjects(data);
       } catch (e) {
         console.error(e);
@@ -1159,20 +1171,33 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         grid.innerHTML = visible.map(renderProjectCard).join('');
         return;
       }
+      const groupMap = {};
+      lastGroups.forEach(g => {
+        if (g && g.key) groupMap[g.key] = g;
+      });
       const groups = {};
       visible.forEach(p => {
-        const g = (p.group && p.group.trim()) || '未分组';
-        if (!groups[g]) groups[g] = [];
-        groups[g].push(p);
+        const key = (p.group && p.group.trim()) || '';
+        const info = key ? groupMap[key] : null;
+        const gKey = key || '__ungrouped__';
+        const label = info ? (info.label || key) : (key || '未分组');
+        const order = info && info.order != null ? info.order : null;
+        if (!groups[gKey]) {
+          groups[gKey] = { key: gKey, label, order, projects: [] };
+        }
+        groups[gKey].projects.push(p);
       });
-      const names = Object.keys(groups).sort((a, b) => {
-        if (a === '未分组') return 1;
-        if (b === '未分组') return -1;
-        return a.localeCompare(b, 'zh-CN');
+      const groupList = Object.values(groups).sort((a, b) => {
+        if (a.key === '__ungrouped__') return 1;
+        if (b.key === '__ungrouped__') return -1;
+        if (a.order != null && b.order != null) return a.order - b.order;
+        if (a.order != null) return -1;
+        if (b.order != null) return 1;
+        return a.label.localeCompare(b.label, 'zh-CN');
       });
-      grid.innerHTML = names.map(g => {
-        const heading = `<div class="group-heading"><span>${escapeHtml(g)}</span><span class="count">${groups[g].length} 个项目</span></div>`;
-        return heading + groups[g].map(renderProjectCard).join('');
+      grid.innerHTML = groupList.map(g => {
+        const heading = `<div class="group-heading"><span>${escapeHtml(g.label)}</span><span class="count">${g.projects.length} 个项目</span></div>`;
+        return heading + g.projects.map(renderProjectCard).join('');
       }).join('');
     }
 

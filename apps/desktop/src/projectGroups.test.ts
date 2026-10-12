@@ -1,16 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   generateGroupKey,
+  getInitialGroupLabel,
   getProjectGroup,
   groupProjects,
   isGroupCollapsed,
   isProjectRunning,
+  resolveFormGroup,
   shouldShowGroupHeaders,
   sortGroupNames,
   UNGROUPED_NAME,
   type FilterProject,
 } from "./projectGroups";
-import type { LifeState } from "./types";
+import type { GroupInfo, LifeState } from "./types";
 
 describe("projectGroups (项目分组与排序逻辑)", () => {
   describe("getProjectGroup", () => {
@@ -299,6 +301,87 @@ describe("projectGroups (项目分组与排序逻辑)", () => {
       expect(sections[3].isUngrouped).toBe(true);
       expect(sections[3].label).toBe(UNGROUPED_NAME);
       expect(sections[3].totalCount).toBe(1);
+    });
+  });
+
+  describe("getInitialGroupLabel", () => {
+    const groups: GroupInfo[] = [
+      { key: "g1", label: "前端项目", order: 1 },
+      { key: "demo", label: "Demo 组", order: 2 },
+    ];
+
+    it("returns group label when key matches", () => {
+      expect(getInitialGroupLabel("g1", groups)).toBe("前端项目");
+      expect(getInitialGroupLabel("demo", groups)).toBe("Demo 组");
+    });
+
+    it("returns raw key when no group definition matches", () => {
+      expect(getInitialGroupLabel("other_key", groups)).toBe("other_key");
+    });
+
+    it("returns empty string when key is empty or null", () => {
+      expect(getInitialGroupLabel("", groups)).toBe("");
+      expect(getInitialGroupLabel(null, groups)).toBe("");
+      expect(getInitialGroupLabel(undefined, groups)).toBe("");
+    });
+  });
+
+  describe("resolveFormGroup", () => {
+    const groups: GroupInfo[] = [
+      { key: "g1", label: "前端项目", order: 1 },
+      { key: "backend", label: "后端服务", order: 2 },
+      { key: "demo", label: "Demo", order: 3 },
+    ];
+    const existingKeys = ["g1", "backend", "demo", "legacy"];
+
+    it("returns undefined key for empty or whitespace input", () => {
+      expect(resolveFormGroup("", groups, existingKeys)).toEqual({ key: undefined });
+      expect(resolveFormGroup("   ", groups, existingKeys)).toEqual({ key: undefined });
+      expect(resolveFormGroup(null, groups, existingKeys)).toEqual({ key: undefined });
+      expect(resolveFormGroup(undefined, groups, existingKeys)).toEqual({ key: undefined });
+    });
+
+    it("matches existing group by label exactly", () => {
+      const res = resolveFormGroup("前端项目", groups, existingKeys);
+      expect(res).toEqual({ key: "g1" });
+      expect(res.newGroup).toBeUndefined();
+    });
+
+    it("matches existing group by key", () => {
+      const res = resolveFormGroup("backend", groups, existingKeys);
+      expect(res).toEqual({ key: "backend" });
+      expect(res.newGroup).toBeUndefined();
+    });
+
+    it("matches existing group case-insensitively", () => {
+      const res = resolveFormGroup("DEMO", groups, existingKeys);
+      expect(res).toEqual({ key: "demo" });
+      expect(res.newGroup).toBeUndefined();
+    });
+
+    it("matches key present in existingKeys even without group declaration", () => {
+      const res = resolveFormGroup("legacy", groups, existingKeys);
+      expect(res).toEqual({ key: "legacy" });
+      expect(res.newGroup).toBeUndefined();
+    });
+
+    it("creates new group for unmatched Chinese name using generateGroupKey", () => {
+      // existingKeys has g1, so next is g2
+      const res = resolveFormGroup("移动端开发", groups, existingKeys);
+      expect(res.key).toBe("g2");
+      expect(res.newGroup).toEqual({
+        key: "g2",
+        label: "移动端开发",
+      });
+    });
+
+    it("creates new group for unmatched ASCII name using kebab-case", () => {
+      const res = resolveFormGroup("Analytics Dashboard", groups, existingKeys);
+      expect(res.key).toBe("analytics-dashboard");
+      expect(res.newGroup).toEqual({
+        key: "analytics-dashboard",
+        label: "Analytics Dashboard",
+      });
     });
   });
 });

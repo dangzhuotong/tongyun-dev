@@ -31,7 +31,7 @@ cargo run -p tongyun-dev-cli -- remove demo_web
 
 常用 CLI 命令格式：
 - `tongyun-dev scan <dir> [--depth N] [--apply] [--json]`：扫描目录，识别项目并可选写入配置
-- `tongyun-dev list [--json]`：列出所有已登记项目
+- `tongyun-dev list [--json] [--with-groups]`：列出所有已登记项目；`--json` 输出项目数组 `[...]`，搭配 `--with-groups` 输出 `{"projects":[...],"groups":[{key,label,order}]}`
 - `tongyun-dev status [id] [--json]`：查看项目状态（不带 id 为全部项目）
 - `tongyun-dev start <id> [--open]`：启动项目并等待端口连通/探针就绪；`--open` 就绪后用浏览器打开
 - `tongyun-dev stop <id>`：停止项目
@@ -219,7 +219,7 @@ tongyun-dev logs demo_api --lines 80 --json
 | `logs` | 日志读取结果 `{path, missing, text}`；其他动作时为 null |
 | `error` | 错误原因字符串；成功时为 null |
 
-退出码：成功 0，操作失败 1，参数错误 2。参数解析错误由 CLI 输出到 stderr，不输出 JSON。`list --json` 与 `status --json` 的成功输出保持原有数组/状态对象结构，不包装上述对象。
+退出码：成功 0，操作失败 1，参数错误 2。参数解析错误由 CLI 输出到 stderr，不输出 JSON。`list --json` 与 `status --json` 的成功输出保持原有数组/状态对象结构，不包装上述对象；新增 `list --json --with-groups` 输出包含分组的完整结构 `{"projects":[...],"groups":[{key,label,order}]}`。
 
 - `wait` 只观察已存在的服务；停止、启动失败或端口冲突会立即返回错误，等待超时不会取消其他调用启动的服务或安装。
 - `start` / `restart` 的 `--timeout` 是启动命令返回后的就绪等待预算，覆盖自动安装阶段；不改配置里的 `start_timeout_secs`，也不限制前置停止或自定义启动脚本本身的执行时长。不传时采用项目的启动超时。一次状态探测最多可能额外花费约 5 秒。

@@ -496,7 +496,27 @@ fn main() -> Result<()> {
                 if trimmed.is_empty() {
                     loaded.set_project_group(&id, None)?
                 } else {
-                    loaded.set_project_group(&id, Some(trimmed))?
+                    let existing_groups = loaded.groups();
+                    let matched_key = existing_groups
+                        .iter()
+                        .find(|info| info.label == trimmed || info.key == trimmed)
+                        .or_else(|| {
+                            existing_groups.iter().find(|info| {
+                                info.label.eq_ignore_ascii_case(trimmed)
+                                    || info.key.eq_ignore_ascii_case(trimmed)
+                            })
+                        })
+                        .map(|info| info.key.clone());
+
+                    if let Some(ref k) = matched_key {
+                        loaded.set_project_group(&id, Some(k))?
+                    } else if tongyun_dev_core::validate_group_key(trimmed).is_ok() {
+                        loaded.set_project_group(&id, Some(trimmed))?
+                    } else {
+                        anyhow::bail!(
+                            "未找到分组 `{trimmed}`，请先使用 `tongyun-dev group-add <key> --label {trimmed}` 创建分组"
+                        );
+                    }
                 }
             } else {
                 anyhow::bail!("请指定分组 key，或使用 --clear 清空分组");

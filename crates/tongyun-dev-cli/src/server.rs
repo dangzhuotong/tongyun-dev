@@ -281,7 +281,7 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
             let Some(id) = project_route(path, "") else {
                 return err_json(404, "not found");
             };
-            let edit: ProjectEdit = match serde_json::from_slice(&req.body) {
+            let mut edit: ProjectEdit = match serde_json::from_slice(&req.body) {
                 Ok(edit) => edit,
                 Err(e) => return err_json(400, format!("bad payload: {e}")),
             };
@@ -290,6 +290,12 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                 Ok(l) => l,
                 Err(e) => return err_json(500, format!("{e:#}")),
             };
+            if let Some(ref g) = edit.group {
+                match loaded.resolve_or_create_group(g) {
+                    Ok(resolved) => edit.group = Some(resolved.unwrap_or_default()),
+                    Err(e) => return err_json(400, format!("{e:#}")),
+                }
+            }
             match loaded.update_project(id, edit) {
                 Ok(row) => json_body(200, json!({"ok": true, "project": row})),
                 Err(e) => err_json(400, format!("{e:#}")),
@@ -337,7 +343,7 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
             }
         }
         "POST" if path == "/api/projects" => {
-            let new: NewProject = match serde_json::from_slice(&req.body) {
+            let mut new: NewProject = match serde_json::from_slice(&req.body) {
                 Ok(n) => n,
                 Err(e) => return err_json(400, format!("bad payload: {e}")),
             };
@@ -347,6 +353,12 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                 Ok(l) => l,
                 Err(e) => return err_json(500, format!("{e:#}")),
             };
+            if let Some(ref g) = new.group {
+                match loaded.resolve_or_create_group(g) {
+                    Ok(resolved) => new.group = resolved,
+                    Err(e) => return err_json(400, format!("{e:#}")),
+                }
+            }
             match loaded.add_project(new) {
                 Ok(row) => json_body(200, json!({"ok": true, "project": row})),
                 Err(e) => err_json(400, format!("{e:#}")),
@@ -766,7 +778,8 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       </div>
       <div class="form-group">
         <label>所属分组（可选）</label>
-        <input id="addGroup" placeholder="例如：Demo、前端、后端" />
+        <input id="addGroup" list="groupList" placeholder="选择已有分组或输入新分组名" />
+        <datalist id="groupList"></datalist>
       </div>
       <div class="form-group">
         <label>项目根路径</label>
@@ -981,6 +994,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
             const gData = await gRes.json();
             if (gData && Array.isArray(gData.groups)) {
               lastGroups = gData.groups;
+              renderGroupDatalist();
             }
           } catch (_) {}
         }
@@ -1240,6 +1254,52 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
     }
 
     let editingProject = null;
+    function renderGroupDatalist() {
+      const dl = document.getElementById('groupList');
+      if (!dl) return;
+      dl.innerHTML = (lastGroups || []).map(g => `<option value="${escapeHtml(g.label || g.key)}">${escapeHtml(g.key !== (g.label || g.key) ? g.key : '')}</option>`).join('');
+    }
+    function getInitialGroupLabel(key) {
+      const trimmed = (key || '').trim();
+      if (!trimmed) return '';
+      const found = (lastGroups || []).find(g => g.key === trimmed);
+      return (found && found.label) ? found.label : trimmed;
+    }
+    function generateGroupKey(label, existingKeys = []) {
+      const trimmed = (label || '').trim();
+      const isAscii = /^[\x00-\x7F]+$/.test(trimmed);
+      if (isAscii && trimmed.length > 0) {
+        let candidate = trimmed
+          .toLowerCase()
+          .replace(/[^a-z0-9_-]+/g, '-')
+          .replace(/^-+|-+$/g, '');
+        if (candidate.length > 40) {
+          candidate = candidate.slice(0, 40).replace(/-+$/, '');
+        }
+        if (candidate.length > 0 && !existingKeys.includes(candidate)) {
+          return candidate;
+        }
+      }
+      let idx = 1;
+      while (existingKeys.includes(`g${idx}`)) {
+        idx++;
+      }
+      return `g${idx}`;
+    }
+    function resolveFormGroup(rawInput, groups = []) {
+      const trimmed = (rawInput || '').trim();
+      if (!trimmed) return { key: '' };
+      const allExistingKeys = Array.from(new Set(groups.map(g => g.key).filter(Boolean)));
+      const exact = groups.find(g => g.label === trimmed || g.key === trimmed);
+      if (exact) return { key: exact.key };
+      const lower = trimmed.toLowerCase();
+      const ci = groups.find(g => (g.label || '').toLowerCase() === lower || (g.key || '').toLowerCase() === lower);
+      if (ci) return { key: ci.key };
+      const direct = allExistingKeys.find(k => k.toLowerCase() === lower);
+      if (direct) return { key: direct };
+      const genKey = generateGroupKey(trimmed, allExistingKeys);
+      return { key: genKey, newGroup: { key: genKey, label: trimmed } };
+    }
     function openAddModal() {
       editingProject = null;
       document.getElementById('editOptions').hidden = true;
@@ -1249,6 +1309,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         input.value = ''; input.disabled = false;
       }
       document.getElementById('addPort').value = '8080';
+      renderGroupDatalist();
       document.getElementById('addModal').style.display = 'flex';
     }
     async function editProject(id) {
@@ -1264,6 +1325,9 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         document.getElementById('editAutoInstall').checked = editingProject.auto_install;
         const fields = {Id: 'id', Name: 'name', Group: 'group', Root: 'root', Start: 'start', Stop: 'stop', Port: 'port', Url: 'login_url', Node: 'node', Java: 'java'};
         for (const [key, field] of Object.entries(fields)) document.getElementById('add' + key).value = editingProject[field] ?? '';
+        if (editingProject.group) {
+          document.getElementById('addGroup').value = getInitialGroupLabel(editingProject.group);
+        }
         document.getElementById('addId').disabled = true;
         document.getElementById('addStart').disabled = !editingProject.start_editable;
         document.getElementById('addStop').disabled = !editingProject.stop_editable;
@@ -1280,7 +1344,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
     async function submitAddProject() {
       const id = document.getElementById('addId').value.trim();
       const name = document.getElementById('addName').value.trim();
-      const group = document.getElementById('addGroup').value.trim();
+      const rawGroup = document.getElementById('addGroup').value.trim();
       const root = document.getElementById('addRoot').value.trim();
       const start = document.getElementById('addStart').value.trim();
       const stop = document.getElementById('addStop').value.trim();
@@ -1296,19 +1360,37 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
 
       const minimumPort = editingProject && !document.getElementById('editEnabled').checked ? 0 : 1;
       if (!Number.isInteger(port) || port < minimumPort || port > 65535) { alert('启用项目的端口须为 1–65535 的整数'); return; }
-      const payload = {
-        id, name, group: group || null, root, start,
-        stop: stop || null,
-        port,
-        login_url: url || null,
-        node: node || null,
-        java: java || null
-      };
 
       const save = document.getElementById('projectSave');
       if (save.disabled) return;
       save.disabled = true;
       try {
+        const resolved = resolveFormGroup(rawGroup, lastGroups || []);
+        if (resolved.newGroup) {
+          try {
+            await postJson('/api/groups', {
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ key: resolved.newGroup.key, label: resolved.newGroup.label })
+            });
+            if (!lastGroups.some(g => g.key === resolved.newGroup.key)) {
+              lastGroups.push({ key: resolved.newGroup.key, label: resolved.newGroup.label });
+              renderGroupDatalist();
+            }
+          } catch (ge) {
+            console.warn('创建分组失败或已存在：', ge);
+          }
+        }
+        const group = resolved.key || '';
+
+        const payload = {
+          id, name, group: group || null, root, start,
+          stop: stop || null,
+          port,
+          login_url: url || null,
+          node: node || null,
+          java: java || null
+        };
+
         if (editingProject) {
           delete payload.id;
           payload.group = group;

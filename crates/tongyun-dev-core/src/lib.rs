@@ -496,6 +496,53 @@ pub fn validate_group_key(key: &str) -> Result<()> {
     Ok(())
 }
 
+/// Generate a valid group key from a label:
+/// - ASCII labels: lowercase, replace illegal chars (`[^a-z0-9_-]`) with `-`, trim leading/trailing `-`, truncate to <=40 chars.
+///   If non-empty and not already in `existing_keys`, return it.
+/// - Non-ASCII labels, empty labels, or if candidate is already in `existing_keys`:
+///   Generate `g1`, `g2`, ... avoiding existing keys.
+pub fn generate_group_key<S: AsRef<str>, I: IntoIterator<Item = S>>(
+    label: &str,
+    existing_keys: I,
+) -> String {
+    let keys: std::collections::HashSet<String> = existing_keys
+        .into_iter()
+        .map(|s| s.as_ref().to_string())
+        .collect();
+    let trimmed = label.trim();
+    if trimmed.is_ascii() && !trimmed.is_empty() {
+        let lower = trimmed.to_ascii_lowercase();
+        let mut candidate = String::with_capacity(lower.len());
+        let mut prev_hyphen = false;
+        for c in lower.chars() {
+            if matches!(c, 'a'..='z' | '0'..='9' | '_' | '-') {
+                candidate.push(c);
+                prev_hyphen = c == '-';
+            } else if !prev_hyphen {
+                candidate.push('-');
+                prev_hyphen = true;
+            }
+        }
+        let trimmed_cand = candidate.trim_matches('-');
+        let mut candidate_str = trimmed_cand.to_string();
+        if candidate_str.len() > 40 {
+            candidate_str.truncate(40);
+            candidate_str = candidate_str.trim_end_matches('-').to_string();
+        }
+        if !candidate_str.is_empty() && !keys.contains(&candidate_str) {
+            return candidate_str;
+        }
+    }
+    let mut idx = 1;
+    loop {
+        let key = format!("g{idx}");
+        if !keys.contains(&key) {
+            return key;
+        }
+        idx += 1;
+    }
+}
+
 impl Loaded {
     pub fn status(&self, id: &str) -> Result<StatusJson> {
         let project = self.resolve(id)?;
@@ -3883,6 +3930,44 @@ impl Loaded {
         })
     }
 
+    /// Resolve a group input (key or label) for a project:
+    /// - If input is empty/whitespace: returns `Ok(None)` (clear group)
+    /// - If matches an existing group's label or key (exact, or case-insensitive):
+    ///   returns `Ok(Some(existing_group_key))`
+    /// - Otherwise (new group):
+    ///   generates a valid key via `generate_group_key`,
+    ///   creates the group via `create_group(key, Some(input))`,
+    ///   and returns `Ok(Some(key))`.
+    pub fn resolve_or_create_group(&mut self, input: &str) -> Result<Option<String>> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+
+        let groups = self.groups();
+        // 1. Exact match on label or key
+        if let Some(g) = groups
+            .iter()
+            .find(|g| g.label == trimmed || g.key == trimmed)
+        {
+            return Ok(Some(g.key.clone()));
+        }
+
+        // 2. Case-insensitive match on label or key
+        if let Some(g) = groups
+            .iter()
+            .find(|g| g.label.eq_ignore_ascii_case(trimmed) || g.key.eq_ignore_ascii_case(trimmed))
+        {
+            return Ok(Some(g.key.clone()));
+        }
+
+        // 3. New group: generate key and create group
+        let existing_keys: Vec<String> = groups.iter().map(|g| g.key.clone()).collect();
+        let key = generate_group_key(trimmed, &existing_keys);
+        self.create_group(&key, Some(trimmed))?;
+        Ok(Some(key))
+    }
+
     /// Update or clear project group, writing back to config with toml_edit preserving comments.
     pub fn set_project_group(&mut self, id: &str, group: Option<&str>) -> Result<ProjectRow> {
         let val = group.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("");
@@ -5470,6 +5555,46 @@ port = 9000
         assert!(validate_group_key("Invalid_Upper").is_err());
         assert!(validate_group_key("has space").is_err());
         assert!(validate_group_key(&"a".repeat(41)).is_err());
+
+        // generate_group_key tests
+        assert_eq!(generate_group_key("Demo", &[] as &[&str]), "demo");
+        assert_eq!(generate_group_key("API_v2", &[] as &[&str]), "api_v2");
+        assert_eq!(generate_group_key("web-app", &[] as &[&str]), "web-app");
+        assert_eq!(
+            generate_group_key("Demo Service", &[] as &[&str]),
+            "demo-service"
+        );
+        assert_eq!(
+            generate_group_key("Foo@Bar#123", &[] as &[&str]),
+            "foo-bar-123"
+        );
+        assert_eq!(
+            generate_group_key("  --hello..world-- ", &[] as &[&str]),
+            "hello-world"
+        );
+        assert_eq!(generate_group_key("前端项目", &[] as &[&str]), "g1");
+        assert_eq!(generate_group_key("后端项目", &["g1"]), "g2");
+        assert_eq!(generate_group_key("微服务", &["g1", "g2"]), "g3");
+        assert_eq!(generate_group_key("demo", &["demo"]), "g1");
+        assert_eq!(generate_group_key("demo", &["demo", "g1"]), "g2");
+        assert_eq!(generate_group_key("", &[] as &[&str]), "g1");
+
+        // resolve_or_create_group tests
+        assert_eq!(loaded.resolve_or_create_group("").unwrap(), None);
+        assert_eq!(loaded.resolve_or_create_group("   ").unwrap(), None);
+        let res_fe = loaded.resolve_or_create_group("前端").unwrap();
+        assert_eq!(res_fe.as_deref(), Some("g1"));
+        let groups = loaded.groups();
+        let g1_info = groups.iter().find(|g| g.key == "g1").unwrap();
+        assert_eq!(g1_info.label, "前端");
+        assert_eq!(
+            loaded.resolve_or_create_group("前端").unwrap().as_deref(),
+            Some("g1")
+        );
+        assert_eq!(
+            loaded.resolve_or_create_group("g1").unwrap().as_deref(),
+            Some("g1")
+        );
 
         // Reload and check
         let reloaded = load(Some(&path)).unwrap();

@@ -8,14 +8,14 @@ const projects = [
   P("acme-web", "ACME 官网前端", 3000),
   P("acme-admin", "ACME 管理后台", 8080),
   P("acme-api", "ACME 主服务", 8081),
-  P("acme-ap", "ACME 接入平台", 8090, "~/code/demo/work/ap"),
+  P("acme-app", "ACME 移动端应用", 8090, "~/code/demo/work/app"),
   P("acme-ops", "运维看板", 0, "~/code/demo/ops", false),
   P("acme-legacy", "旧版报表", 9000, "~/code/demo/legacy", true, false),
 ];
 const statuses = {
   "acme-admin": { state: "ready" as const },
   "acme-api": { state: "starting" as const },
-  "acme-ap": { state: "failed" as const },
+  "acme-app": { state: "failed" as const },
   "acme-web": { state: "port_open" as const },
   "acme-legacy": { state: "stopped" as const },
 };
@@ -35,7 +35,7 @@ describe("matchesQuery", () => {
     expect(filterProjects(projects, statuses, "管理", "all").map((p) => p.id)).toEqual(["acme-admin"]);
   });
   it("按 id，忽略大小写", () => {
-    expect(filterProjects(projects, statuses, "ACME-AP", "all").map((p) => p.id)).toEqual(["acme-api", "acme-ap"]);
+    expect(filterProjects(projects, statuses, "ACME-AP", "all").map((p) => p.id)).toEqual(["acme-api", "acme-app"]);
   });
   it("按端口", () => {
     expect(filterProjects(projects, statuses, "8081", "all").map((p) => p.id)).toEqual(["acme-api"]);
@@ -45,7 +45,7 @@ describe("matchesQuery", () => {
     expect(filterProjects(projects, statuses, "0", "all").map((p) => p.id)).not.toContain("acme-ops");
   });
   it("按目录", () => {
-    expect(filterProjects(projects, statuses, "/work/", "all").map((p) => p.id)).toEqual(["acme-ap"]);
+    expect(filterProjects(projects, statuses, "/work/", "all").map((p) => p.id)).toEqual(["acme-app"]);
   });
   it("多个关键词需同时命中", () => {
     expect(filterProjects(projects, statuses, "acme 后台", "all").map((p) => p.id)).toEqual(["acme-admin"]);
@@ -59,7 +59,7 @@ describe("matchesStatus", () => {
   });
   it("启动中 / 失败", () => {
     expect(filterProjects(projects, statuses, "", "starting").map((p) => p.id)).toEqual(["acme-api"]);
-    expect(filterProjects(projects, statuses, "", "failed").map((p) => p.id)).toEqual(["acme-ap"]);
+    expect(filterProjects(projects, statuses, "", "failed").map((p) => p.id)).toEqual(["acme-app"]);
   });
   it("未配置只看 configured", () => {
     expect(filterProjects(projects, statuses, "", "unconfigured").map((p) => p.id)).toEqual(["acme-ops"]);

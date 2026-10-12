@@ -1,6 +1,13 @@
+import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { LogTail } from "./types";
-import { findMatches, getLogLevel } from "./logFormat";
+import { findMatches, formatLogText, getLogLevel } from "./logFormat";
+import {
+  type InputPayload,
+  QUICK_INPUT_BUTTONS,
+  type QuickButton,
+  resolveKeyboardInput,
+} from "./inputKeys";
 import { ArrowDownIcon, ChevronDownIcon, ChevronUpIcon, FileIcon, PauseIcon, SearchIcon, XIcon } from "./icons";
 
 export type LogPanelProps = {
@@ -9,6 +16,8 @@ export type LogPanelProps = {
   canOpenLog: boolean;
   onOpenLog: () => void;
   selected: string;
+  running?: boolean;
+  onSendInput?: (params: InputPayload) => Promise<void>;
 };
 
 export function LogPanel({
@@ -17,6 +26,8 @@ export function LogPanel({
   canOpenLog,
   onOpenLog,
   selected,
+  running = false,
+  onSendInput,
 }: LogPanelProps) {
   const [query, setQuery] = useState("");
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
@@ -24,9 +35,19 @@ export function LogPanel({
   const containerRef = useRef<HTMLPreElement>(null);
   const isScrollingRef = useRef(false);
 
+  const [inputText, setInputText] = useState("");
+  const [inputError, setInputError] = useState("");
+  const [sending, setSending] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setInputError("");
+  }, [selected, running]);
+
   const lines = useMemo(() => {
     if (!log?.text) return [];
-    const list = log.text.split("\n");
+    const formatted = formatLogText(log.text);
+    const list = formatted.split("\n");
     if (list.length > 0 && list[list.length - 1] === "") {
       list.pop();
     }
@@ -133,6 +154,59 @@ export function LogPanel({
     }
     return map;
   }, [matches]);
+
+  async function handleSend(
+    payload: InputPayload,
+    clearOnSuccess = false
+  ) {
+    if (!selected || !running) return;
+    setInputError("");
+    setSending(true);
+    try {
+      if (onSendInput) {
+        await onSendInput(payload);
+      } else {
+        await invoke("send_input", {
+          id: selected,
+          text: payload.text ?? null,
+          enter: payload.enter ?? null,
+          key: payload.key ?? null,
+        });
+      }
+      if (clearOnSuccess) {
+        setInputText("");
+      }
+    } catch (err: unknown) {
+      const msg =
+        typeof err === "string"
+          ? err
+          : err instanceof Error
+          ? err.message
+          : String(err);
+      setInputError(msg || "发送输入失败");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function handleInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (!running) return;
+    const payload = resolveKeyboardInput(
+      { key: e.key, ctrlKey: e.ctrlKey, metaKey: e.metaKey },
+      inputText
+    );
+    if (payload) {
+      e.preventDefault();
+      const clear = Boolean(payload.text);
+      handleSend(payload, clear);
+    }
+  }
+
+  function handleQuickButtonClick(btn: QuickButton) {
+    if (!running || sending) return;
+    handleSend(btn.payload, false);
+    inputRef.current?.focus();
+  }
 
   return (
     <section className="log" id="log-panel" aria-label="log panel">
@@ -258,6 +332,49 @@ export function LogPanel({
             已暂停 · 回到底部
           </button>
         )}
+      </div>
+
+      <div className="log-input-bar">
+        <div className="log-input-main">
+          <input
+            ref={inputRef}
+            type="text"
+            className="log-terminal-input"
+            value={inputText}
+            onChange={(e) => {
+              setInputText(e.target.value);
+              if (inputError) setInputError("");
+            }}
+            onKeyDown={handleInputKeyDown}
+            disabled={!running || sending}
+            placeholder={
+              running
+                ? "输入内容，回车发送；为空时按 ↑ ↓ ← → Tab Esc 直接发键"
+                : "项目运行中才能输入"
+            }
+            title={running ? "" : "项目运行中才能输入"}
+            aria-label="终端输入框"
+          />
+          {inputError && (
+            <span className="log-input-error" role="alert" title={inputError}>
+              {inputError}
+            </span>
+          )}
+        </div>
+        <div className="log-quick-buttons" role="group" aria-label="快捷按键">
+          {QUICK_INPUT_BUTTONS.map((btn) => (
+            <button
+              key={btn.label}
+              type="button"
+              className="log-input-btn"
+              disabled={!running || sending}
+              onClick={() => handleQuickButtonClick(btn)}
+              title={running ? btn.title : "项目运行中才能输入"}
+            >
+              {btn.label}
+            </button>
+          ))}
+        </div>
       </div>
     </section>
   );

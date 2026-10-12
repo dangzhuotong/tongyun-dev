@@ -3,9 +3,12 @@ import {
   countMatches,
   escapeHtml,
   findMatches,
+  formatLogText,
   getLogLevel,
+  resolveCarriageReturns,
   stateLabel,
   stateShortLabel,
+  stripAnsi,
 } from "./logFormat";
 
 describe("getLogLevel (错误行与警告行识别)", () => {
@@ -134,5 +137,59 @@ describe("installing（安装依赖中）", () => {
   it("详情和侧栏都显示装依赖和秒数", () => {
     expect(stateLabel({ state: "installing", elapsed_secs: 12 })).toBe("安装依赖中 · 已 12 秒");
     expect(stateShortLabel({ state: "installing", elapsed_secs: 3 })).toBe("装依赖 · 3s");
+  });
+});
+
+describe("stripAnsi (去除 ANSI CSI / OSC 转义序列)", () => {
+  it("strips CSI color and style codes", () => {
+    const colored = "\x1b[31mError:\x1b[0m \x1b[1;32mConnection established\x1b[m";
+    expect(stripAnsi(colored)).toBe("Error: Connection established");
+  });
+
+  it("strips CSI cursor movement and line clear codes", () => {
+    const cursor = "\x1b[2K\x1b[1A\x1b[?25lLoading...\x1b[?25h";
+    expect(stripAnsi(cursor)).toBe("Loading...");
+  });
+
+  it("strips OSC window title and hyperlink sequences", () => {
+    const oscTitle = "\x1b]0;my-app title\x07Starting dev server...";
+    expect(stripAnsi(oscTitle)).toBe("Starting dev server...");
+
+    const oscLink = "\x1b]8;;https://example.com\x1b\\Click here\x1b]8;;\x1b\\";
+    expect(stripAnsi(oscLink)).toBe("Click here");
+  });
+
+  it("keeps plain text untouched", () => {
+    expect(stripAnsi("Simple log output 123")).toBe("Simple log output 123");
+  });
+});
+
+describe("resolveCarriageReturns (处理 \\r 覆盖行)", () => {
+  it("resolves single line with progress overwrite", () => {
+    const progress = "Download: 10%\rDownload: 50%\rDownload: 100%";
+    expect(resolveCarriageReturns(progress)).toBe("Download: 100%");
+  });
+
+  it("overwrites characters from column 0 on shorter updates", () => {
+    const line = "abcdefgh\r123";
+    expect(resolveCarriageReturns(line)).toBe("123defgh");
+  });
+
+  it("handles multi-line text and normal CRLF newlines without corrupting", () => {
+    const text = "Line 1\r\nLine 2\r\nLine 3\r\n";
+    expect(resolveCarriageReturns(text)).toBe("Line 1\nLine 2\nLine 3\n");
+  });
+
+  it("handles standalone trailing \\r or leading \\r", () => {
+    expect(resolveCarriageReturns("abc\r")).toBe("abc");
+    expect(resolveCarriageReturns("\rxyz")).toBe("xyz");
+    expect(resolveCarriageReturns("a\r\rb")).toBe("b");
+  });
+});
+
+describe("formatLogText (综合去除 ANSI 并处理 \\r 覆盖)", () => {
+  it("strips ANSI colors and applies \\r overwrite in single step", () => {
+    const input = "\x1b[33mStep 1/2\x1b[0m\r\x1b[32mStep 2/2: Done!\x1b[0m\r\n\x1b[1mNext line\x1b[0m";
+    expect(formatLogText(input)).toBe("Step 2/2: Done!\nNext line");
   });
 });

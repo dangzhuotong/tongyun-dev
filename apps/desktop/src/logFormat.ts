@@ -2,6 +2,50 @@ import type { LifeState, Status } from "./types";
 
 export type LogLevel = "error" | "warn" | "normal";
 
+export const ANSI_OSC_REGEX = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+export const ANSI_CSI_REGEX = /\x1b\[[0-9:;<=>?]*[ -/]*[@-~]/g;
+
+/**
+ * 去掉 ANSI CSI 与 OSC 转义序列（颜色代码、光标移动、窗口标题等）。
+ */
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_OSC_REGEX, "").replace(ANSI_CSI_REGEX, "");
+}
+
+/**
+ * 处理单行内的 \r（回车符覆盖）。
+ * 模拟终端在同一行输出时的光标归零与字符覆盖效果。
+ */
+export function resolveCarriageReturnLine(line: string): string {
+  if (!line.includes("\r")) return line;
+  const segments = line.split("\r");
+  const buffer: string[] = [];
+  for (const seg of segments) {
+    for (let i = 0; i < seg.length; i++) {
+      buffer[i] = seg[i];
+    }
+  }
+  return buffer.join("");
+}
+
+/**
+ * 先将 Windows CRLF (\r\n) 规整为 \n，再对每行内部的 \r 覆盖进行解析处理。
+ */
+export function resolveCarriageReturns(text: string): string {
+  const normalized = text.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  const processed = lines.map(resolveCarriageReturnLine);
+  return processed.join("\n");
+}
+
+/**
+ * 格式化日志文本用于界面展示：
+ * 去掉 ANSI CSI/OSC 控制序列，并处理 \r 覆盖行。
+ */
+export function formatLogText(text: string): string {
+  return resolveCarriageReturns(stripAnsi(text));
+}
+
 export type SearchMatch = {
   lineIndex: number;
   start: number;

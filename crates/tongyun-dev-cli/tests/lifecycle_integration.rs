@@ -181,6 +181,42 @@ fn web_console_lists_adds_and_removes_through_core() {
     let detail = get("/api/projects/web_app");
     assert!(detail.contains("Renamed") && detail.contains("5180"));
     assert!(detail.contains("\"node\":null"));
+
+    // POST /api/groups creates a new group
+    let add_group = r#"{"key":"backend","label":"后端服务"}"#;
+    let resp = post_json(ui, "/api/groups", add_group, None);
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    assert!(resp.contains("\"key\":\"backend\""));
+
+    let groups_resp = get("/api/groups");
+    assert!(groups_resp.contains("\"key\":\"backend\"") && groups_resp.contains("后端服务"));
+
+    // PATCH group updates the group and is reflected in the project list.
+    let edit_group = r#"{"group":"frontend"}"#;
+    let resp = patch(edit_group, &format!("http://127.0.0.1:{ui}"));
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let list_after_group = get("/api/projects");
+    assert!(
+        list_after_group.contains("\"group\":\"frontend\""),
+        "group visible in project list"
+    );
+    let detail_after_group = get("/api/projects/web_app");
+    assert!(
+        detail_after_group.contains("\"group\":\"frontend\""),
+        "group visible in detail"
+    );
+
+    // Clear group by setting empty string
+    let clear_group = r#"{"group":""}"#;
+    let resp = patch(clear_group, &format!("http://127.0.0.1:{ui}"));
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let list_after_clear = get("/api/projects");
+    assert!(
+        list_after_clear.contains("\"group\":null"),
+        "cleared group is null in list"
+    );
+
+    let text = fs::read_to_string(&cfg).unwrap();
     let bad = patch(r#"{"port":0}"#, &format!("http://127.0.0.1:{ui}"));
     assert!(bad.starts_with("HTTP/1.1 400"), "{bad}");
     assert_eq!(fs::read_to_string(&cfg).unwrap(), text);

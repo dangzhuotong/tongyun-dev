@@ -3,6 +3,7 @@ export type LifeState = "stopped" | "installing" | "starting" | "port_open" | "r
 export type Project = {
   id: string;
   name: string;
+  group?: string | null;
   root: string;
   enabled: boolean;
   configured: boolean;
@@ -28,6 +29,7 @@ export type ProjectRow = Project;
 export type ProjectList = {
   config_path: string;
   projects: Project[];
+  group_order?: string[];
 };
 
 export type LoginProbe = {
@@ -75,6 +77,7 @@ export type ConfigInfo = {
 export type ProjectDetail = {
   id: string;
   name: string;
+  group?: string | null;
   root: string;
   start: string;
   start_editable: boolean;
@@ -100,6 +103,7 @@ export type ProjectDetail = {
 export type NewProjectReq = {
   id: string;
   name?: string | null;
+  group?: string | null;
   root: string;
   start: string;
   stop?: string | null;
@@ -123,6 +127,7 @@ export type NewProjectReq = {
 
 export type ProjectEditReq = {
   name?: string | null;
+  group?: string | null;
   root?: string | null;
   start?: string | null;
   stop?: string | null;

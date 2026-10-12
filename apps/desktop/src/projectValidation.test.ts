@@ -198,6 +198,14 @@ describe("buildEditRequest auto_install（缺 node_modules 自动装依赖）", 
       auto_install: true,
     });
   });
+
+  it("修改分组提交新分组，清空分组提交空字符串", () => {
+    expect(buildEditRequest(base, { ...form, group: "Frontend" })).toEqual({ group: "Frontend" });
+    expect(buildEditRequest({ ...base, group: "Frontend" }, { ...form, group: "" })).toEqual({
+      group: "",
+    });
+    expect(buildEditRequest({ ...base, group: "Frontend" }, { ...form, group: "Frontend" })).toEqual({});
+  });
 });
 
 describe("validateProjectForm port_mode 校验", () => {

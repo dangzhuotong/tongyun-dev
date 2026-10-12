@@ -37,6 +37,8 @@ tongyun-dev ui [--port 9099]   # 网页控制台，默认 http://127.0.0.1:9099
 | `install <id> [--json]` | 装前端依赖 | |
 | `scan <dir> [--depth N] [--apply] [--json]` | 扫描识别项目；`--apply` 写入配置 | 先无 apply 预览 |
 | `add` / `remove` | 登记 / 删登记 | 不动项目文件 |
+| `group <id> [key] [--clear]` | 设置或清空项目分组 | `--clear` 清空 |
+| `group-add <key> [--label 名]` | 新建分组 | 写入 `[group.<key>]` |
 | `ui` | 起控制台 | 默认 9099 |
 
 ## 3. `status --json` 稳定字段

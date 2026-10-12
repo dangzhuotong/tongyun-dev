@@ -8,6 +8,7 @@ export { validateProjectForm, type ProjectFormData };
 interface ProjectFormProps {
   mode: "create" | "edit";
   initialDetail?: ProjectDetail | null;
+  existingGroups?: string[];
   onClose: () => void;
   onSuccess: (projectId: string) => Promise<void> | void;
 }
@@ -15,6 +16,7 @@ interface ProjectFormProps {
 export function ProjectForm({
   mode,
   initialDetail,
+  existingGroups = [],
   onClose,
   onSuccess,
 }: ProjectFormProps) {
@@ -25,6 +27,7 @@ export function ProjectForm({
   const [form, setForm] = useState<ProjectFormData>(() => ({
     id: initialDetail?.id ?? "",
     name: initialDetail?.name ?? "",
+    group: initialDetail?.group ?? "",
     root: initialDetail?.root ?? "",
     start: initialDetail?.start ?? "",
     stop: initialDetail?.stop ?? "",
@@ -115,6 +118,7 @@ export function ProjectForm({
         const createReq: NewProjectReq = {
           id: form.id.trim(),
           name: form.name.trim() || undefined,
+          group: form.group?.trim() || undefined,
           root: form.root.trim(),
           start: form.start.trim(),
           stop: form.stop.trim() || undefined,
@@ -211,6 +215,26 @@ export function ProjectForm({
                 onChange={(e) => handleChange("name", e.target.value)}
               />
             </div>
+          </div>
+
+          {/* 所属分组 */}
+          <div className="form-group">
+            <label htmlFor="field-group">所属分组</label>
+            <input
+              id="field-group"
+              type="text"
+              list="group-datalist"
+              value={form.group ?? ""}
+              placeholder="例如：Demo、前端、后端（可选）"
+              onChange={(e) => handleChange("group", e.target.value)}
+            />
+            {existingGroups.length > 0 && (
+              <datalist id="group-datalist">
+                {existingGroups.map((g) => (
+                  <option key={g} value={g} />
+                ))}
+              </datalist>
+            )}
           </div>
 
           {/* 根目录 */}

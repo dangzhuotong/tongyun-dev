@@ -6,9 +6,19 @@
 #   桌面 App / 网页控制台 →「扫描目录…」     # 勾选后写进你的配置
 # 字段说明见 config/projects.template.toml 和 docs/development.md。
 
+# 分组定义（可选）
+[group.demo]
+label = "Demo 业务线"
+order = 1
+
+[group.legacy]
+label = "历史归档"
+order = 2
+
 # Spring Boot 后端（Maven），Java 17，后台运行。
 [projects.demo_api]
 name = "Demo API"
+group = "demo"
 root = "~/code/demo/demo-api"
 port = 8081
 background = true
@@ -19,6 +29,7 @@ start = ["bash", "-c", "exec mvn spring-boot:run"]
 # Vite 前端（pnpm），Node 20。使用 port_mode = "arg" 自动追加端口参数。
 [projects.demo_web]
 name = "Demo Web"
+group = "demo"
 root = "~/code/demo/demo-web"
 port = 5173
 port_mode = "arg"
@@ -43,6 +54,7 @@ start = ["bash", "-c", "exec pnpm dev"]
 # 老式 Tomcat WAR 项目：写 tomcat 和 stop。填好路径后把 enabled 改成 true。
 [projects.demo_legacy]
 name = "Demo Legacy (Tomcat)"
+group = "legacy"
 enabled = false
 reason = "示例：先在本机装好 Tomcat 并改 tomcat / root 路径"
 root = "~/code/demo/demo-legacy"

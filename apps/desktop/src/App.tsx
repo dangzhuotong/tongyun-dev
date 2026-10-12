@@ -909,6 +909,15 @@ export function App() {
                   </div>
                 </div>
               )}
+              {((status?.hints && status.hints.length > 0) ? status.hints : (current.hints ?? [])).map((hint, idx) => (
+                <div key={idx} className="callout warn">
+                  <AlertIcon className="callout-icon" />
+                  <div className="callout-text">
+                    <strong>启动提示</strong>
+                    <p>{hint}</p>
+                  </div>
+                </div>
+              ))}
               {error && (
                 <div className="callout danger">
                   <AlertIcon className="callout-icon" />

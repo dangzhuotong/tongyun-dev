@@ -2869,22 +2869,732 @@ fn prepare_stdin_fifo(fifo_path: &Path) -> Result<std::fs::File> {
 }
 
 #[cfg(unix)]
-fn shell_escape(s: &str) -> String {
-    if s.is_empty() {
-        return "''".to_string();
+struct CloseFd(std::os::unix::io::RawFd);
+
+#[cfg(unix)]
+impl Drop for CloseFd {
+    fn drop(&mut self) {
+        if self.0 >= 0 {
+            unsafe { libc::close(self.0) };
+            self.0 = -1;
+        }
     }
-    if s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '='))
+}
+
+#[cfg(unix)]
+fn last_errno() -> libc::c_int {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        *libc::__errno_location()
+    }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    unsafe {
+        *libc::__error()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
     {
-        return s.to_string();
+        std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
     }
-    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg(unix)]
+fn claim_owned_fd(fd: std::os::unix::io::RawFd) -> Result<std::os::unix::io::RawFd> {
+    let fd = if fd > 2 {
+        fd
+    } else {
+        let duped = unsafe { libc::fcntl(fd, libc::F_DUPFD, 3) };
+        if duped < 0 {
+            let err = std::io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            bail!("dup pty fd: {err}");
+        }
+        unsafe { libc::close(fd) };
+        duped
+    };
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        let err = std::io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        bail!("fcntl getfd: {err}");
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        let err = std::io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        bail!("fcntl cloexec: {err}");
+    }
+    Ok(fd)
+}
+
+#[cfg(unix)]
+fn open_pty_pair() -> Result<(std::os::unix::io::RawFd, std::os::unix::io::RawFd)> {
+    let mut master: libc::c_int = -1;
+    let mut slave: libc::c_int = -1;
+    let mut win: libc::winsize = unsafe { std::mem::zeroed() };
+    win.ws_row = 24;
+    win.ws_col = 80;
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &win,
+        )
+    };
+    if rc == 0 && master >= 0 && slave >= 0 {
+        return Ok((master, slave));
+    }
+    if master >= 0 {
+        unsafe { libc::close(master) };
+    }
+    if slave >= 0 {
+        unsafe { libc::close(slave) };
+    }
+
+    let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+    if master < 0 {
+        let err = std::io::Error::last_os_error();
+        bail!("openpty/posix_openpt failed: {err}");
+    }
+    if unsafe { libc::grantpt(master) } != 0 {
+        let err = std::io::Error::last_os_error();
+        unsafe { libc::close(master) };
+        bail!("grantpt failed: {err}");
+    }
+    if unsafe { libc::unlockpt(master) } != 0 {
+        let err = std::io::Error::last_os_error();
+        unsafe { libc::close(master) };
+        bail!("unlockpt failed: {err}");
+    }
+    let name_ptr = unsafe { libc::ptsname(master) };
+    if name_ptr.is_null() {
+        let err = std::io::Error::last_os_error();
+        unsafe { libc::close(master) };
+        bail!("ptsname failed: {err}");
+    }
+    let slave = unsafe { libc::open(name_ptr, libc::O_RDWR | libc::O_NOCTTY) };
+    if slave < 0 {
+        let err = std::io::Error::last_os_error();
+        unsafe { libc::close(master) };
+        bail!("open pty slave failed: {err}");
+    }
+    unsafe {
+        libc::ioctl(slave, libc::TIOCSWINSZ, &win);
+    }
+    Ok((master, slave))
+}
+
+#[cfg(unix)]
+fn configure_pty_slave(slave: std::os::unix::io::RawFd) -> Result<()> {
+    let mut term: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(slave, &mut term) } != 0 {
+        let err = std::io::Error::last_os_error();
+        bail!("tcgetattr on pty slave: {err}");
+    }
+    term.c_iflag |= libc::ICRNL;
+    term.c_oflag |= libc::OPOST | libc::ONLCR;
+    term.c_lflag |= libc::ICANON | libc::ECHO | libc::ISIG;
+    if unsafe { libc::tcsetattr(slave, libc::TCSANOW, &term) } != 0 {
+        let err = std::io::Error::last_os_error();
+        bail!("tcsetattr on pty slave: {err}");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn upsert_env(map: &mut Vec<(Vec<u8>, Vec<u8>)>, key: &[u8], value: &[u8]) {
+    if let Some(slot) = map.iter_mut().find(|(k, _)| k == key) {
+        slot.1 = value.to_vec();
+    } else {
+        map.push((key.to_vec(), value.to_vec()));
+    }
+}
+
+#[cfg(unix)]
+fn build_relay_env(
+    toolchain: &[(String, String)],
+    project: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<std::ffi::CString>> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut map: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for (k, v) in std::env::vars_os() {
+        map.push((k.as_bytes().to_vec(), v.as_bytes().to_vec()));
+    }
+    for (k, v) in toolchain {
+        if !v.is_empty() {
+            upsert_env(&mut map, k.as_bytes(), v.as_bytes());
+        }
+    }
+    for (k, v) in project {
+        upsert_env(&mut map, k.as_bytes(), v.as_bytes());
+    }
+    let mut out = Vec::with_capacity(map.len());
+    for (k, v) in map {
+        let mut item = Vec::with_capacity(k.len() + 1 + v.len());
+        item.extend_from_slice(&k);
+        item.push(b'=');
+        item.extend_from_slice(&v);
+        if let Ok(c) = std::ffi::CString::new(item) {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(unix)]
+fn env_bytes<'a>(env: &'a [std::ffi::CString], key: &str) -> Option<&'a [u8]> {
+    let prefix = format!("{key}=");
+    let prefix = prefix.as_bytes();
+    for item in env {
+        let bytes = item.as_bytes();
+        if let Some(rest) = bytes.strip_prefix(prefix) {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn resolve_program(cmd: &str, path_env: Option<&[u8]>, root: &Path) -> Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    if cmd.contains('/') {
+        let candidate = if Path::new(cmd).is_absolute() {
+            PathBuf::from(cmd)
+        } else {
+            root.join(cmd)
+        };
+        let c_path = std::ffi::CString::new(candidate.as_os_str().as_bytes())
+            .with_context(|| format!("spawn {cmd}: path contains nul"))?;
+        if unsafe { libc::access(c_path.as_ptr(), libc::X_OK) } != 0 {
+            let err = std::io::Error::last_os_error();
+            bail!("spawn {cmd}: {err}");
+        }
+        return std::ffi::CString::new(cmd.as_bytes())
+            .with_context(|| format!("spawn {cmd}: path contains nul"));
+    }
+    let owned;
+    let path = if let Some(p) = path_env {
+        owned = String::from_utf8_lossy(p).into_owned();
+        owned.as_str()
+    } else {
+        "/usr/bin:/bin"
+    };
+    for dir in path.split(':') {
+        if dir.is_empty() {
+            continue;
+        }
+        let candidate = Path::new(dir).join(cmd);
+        let Ok(c_path) = std::ffi::CString::new(candidate.as_os_str().as_bytes()) else {
+            continue;
+        };
+        if unsafe { libc::access(c_path.as_ptr(), libc::X_OK) } == 0 {
+            return Ok(c_path);
+        }
+    }
+    bail!("spawn {cmd}: No such file or directory");
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct PtyRelayArgs {
+    master: std::os::unix::io::RawFd,
+    slave: std::os::unix::io::RawFd,
+    fifo: std::os::unix::io::RawFd,
+    log_fd: std::os::unix::io::RawFd,
+    argv: *const *const libc::c_char,
+    envp: *const *const libc::c_char,
+    exe: *const libc::c_char,
+    cwd: *const libc::c_char,
+    fifo_path: *const libc::c_char,
+}
+
+#[cfg(unix)]
+static PTY_RELAY_CHILD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+#[cfg(unix)]
+extern "C" fn pty_relay_on_signal(_sig: libc::c_int) {
+    let child = PTY_RELAY_CHILD.load(std::sync::atomic::Ordering::Relaxed);
+    unsafe {
+        if child > 1 {
+            libc::kill(-child, libc::SIGTERM);
+            libc::kill(child, libc::SIGTERM);
+        }
+        libc::_exit(0);
+    }
+}
+
+#[cfg(unix)]
+fn write_all_raw(fd: std::os::unix::io::RawFd, mut data: &[u8]) {
+    while !data.is_empty() {
+        let n = unsafe { libc::write(fd, data.as_ptr().cast::<libc::c_void>(), data.len()) };
+        if n < 0 {
+            let err = last_errno();
+            if err == libc::EINTR {
+                continue;
+            }
+            return;
+        }
+        let Some(count) = usize::try_from(n).ok().filter(|count| *count > 0) else {
+            return;
+        };
+        data = &data[count..];
+    }
+}
+
+#[cfg(unix)]
+unsafe fn set_nonblock(fd: std::os::unix::io::RawFd) {
+    let flags = libc::fcntl(fd, libc::F_GETFL);
+    if flags >= 0 {
+        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+}
+
+#[cfg(unix)]
+unsafe fn close_extra_fds(keep: &[std::os::unix::io::RawFd; 4]) {
+    let open_max = libc::sysconf(libc::_SC_OPEN_MAX);
+    let max_fd = if (1..=4096).contains(&open_max) {
+        i32::try_from(open_max).unwrap_or(1024)
+    } else {
+        1024
+    };
+    for fd in 0..max_fd {
+        if keep.contains(&fd) {
+            continue;
+        }
+        libc::close(fd);
+    }
+}
+
+#[cfg(unix)]
+unsafe fn unblock_all_signals() {
+    let mut set: libc::sigset_t = std::mem::zeroed();
+    libc::sigemptyset(&mut set);
+    libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
+}
+
+#[cfg(unix)]
+unsafe fn block_stop_signals() {
+    let mut set: libc::sigset_t = std::mem::zeroed();
+    libc::sigemptyset(&mut set);
+    libc::sigaddset(&mut set, libc::SIGTERM);
+    libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+}
+
+#[cfg(unix)]
+unsafe fn install_relay_term_handler() {
+    let mut action: libc::sigaction = std::mem::zeroed();
+    action.sa_sigaction = pty_relay_on_signal as *const () as libc::sighandler_t;
+    libc::sigemptyset(&mut action.sa_mask);
+    action.sa_flags = 0;
+    libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+}
+
+#[cfg(unix)]
+unsafe fn reset_command_signals() {
+    let mut action: libc::sigaction = std::mem::zeroed();
+    action.sa_sigaction = libc::SIG_DFL;
+    libc::sigemptyset(&mut action.sa_mask);
+    action.sa_flags = 0;
+    for sig in [
+        libc::SIGPIPE,
+        libc::SIGINT,
+        libc::SIGTERM,
+        libc::SIGHUP,
+        libc::SIGQUIT,
+        libc::SIGTTIN,
+        libc::SIGTTOU,
+        libc::SIGCHLD,
+    ] {
+        libc::sigaction(sig, &action, std::ptr::null_mut());
+    }
+}
+
+/// Long-lived PTY relay. Runs only in the forked child and never returns.
+///
+/// The parent (possibly multi-threaded) has already created the PTY, FIFO, log,
+/// and argument vectors. This process only uses libc so it does not touch locks
+/// that other threads may have held across `fork`.
+#[cfg(unix)]
+unsafe fn pty_relay_entry(args: PtyRelayArgs) -> ! {
+    block_stop_signals();
+    if libc::setsid() < 0 {
+        libc::setpgid(0, 0);
+    }
+    close_extra_fds(&[args.master, args.slave, args.fifo, args.log_fd]);
+    set_nonblock(args.master);
+    set_nonblock(args.fifo);
+
+    let child = libc::fork();
+    if child < 0 {
+        write_all_raw(args.log_fd, b"pty relay: fork command failed\n");
+        libc::_exit(1);
+    }
+    if child == 0 {
+        unblock_all_signals();
+        reset_command_signals();
+        let sid = libc::setsid();
+        let ctty = libc::ioctl(args.slave, libc::TIOCSCTTY, 0);
+        let pgid = libc::getpid();
+        libc::ioctl(args.slave, libc::TIOCSPGRP, &pgid);
+        if args.slave != 0 {
+            libc::dup2(args.slave, 0);
+        }
+        if args.slave != 1 {
+            libc::dup2(args.slave, 1);
+        }
+        if args.slave != 2 {
+            libc::dup2(args.slave, 2);
+        }
+        if args.slave > 2 {
+            libc::close(args.slave);
+        }
+        libc::close(args.master);
+        libc::close(args.fifo);
+        libc::close(args.log_fd);
+        if sid < 0 {
+            write_all_raw(2, b"pty relay: setsid failed\n");
+        }
+        if ctty < 0 {
+            write_all_raw(2, b"pty relay: set controlling tty failed\n");
+        }
+        if libc::chdir(args.cwd) != 0 {
+            write_all_raw(2, b"pty relay: chdir failed\n");
+            libc::_exit(1);
+        }
+        libc::execve(args.exe, args.argv, args.envp);
+        write_all_raw(2, b"pty relay: exec failed\n");
+        libc::_exit(127);
+    }
+
+    libc::close(args.slave);
+    PTY_RELAY_CHILD.store(child, std::sync::atomic::Ordering::Relaxed);
+    install_relay_term_handler();
+    unblock_all_signals();
+
+    const BUF: usize = 8192;
+    let mut inbuf = [0u8; BUF];
+    let mut in_len: usize = 0;
+    let mut in_off: usize = 0;
+    let mut outbuf = [0u8; BUF];
+    let mut master_open = true;
+
+    loop {
+        let mut status: libc::c_int = 0;
+        let waited = libc::waitpid(child, &mut status, libc::WNOHANG);
+        if waited == child || (waited < 0 && last_errno() == libc::ECHILD) {
+            if master_open {
+                loop {
+                    let n = libc::read(
+                        args.master,
+                        outbuf.as_mut_ptr().cast::<libc::c_void>(),
+                        outbuf.len(),
+                    );
+                    if let Some(count) = usize::try_from(n).ok().filter(|count| *count > 0) {
+                        write_all_raw(args.log_fd, &outbuf[..count]);
+                        continue;
+                    }
+                    break;
+                }
+            }
+            libc::close(args.master);
+            libc::close(args.fifo);
+            libc::close(args.log_fd);
+            libc::unlink(args.fifo_path);
+            let code = if libc::WIFEXITED(status) {
+                libc::WEXITSTATUS(status)
+            } else {
+                1
+            };
+            libc::_exit(code);
+        }
+
+        if in_off > 0 {
+            let rest = in_len - in_off;
+            if rest > 0 {
+                std::ptr::copy(inbuf.as_ptr().add(in_off), inbuf.as_mut_ptr(), rest);
+            }
+            in_len = rest;
+            in_off = 0;
+        }
+
+        let mut fds = [
+            libc::pollfd {
+                fd: -1,
+                events: 0,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: -1,
+                events: 0,
+                revents: 0,
+            },
+        ];
+        let mut nfd: usize = 0;
+        if master_open || in_len > in_off {
+            let mut events: libc::c_short = 0;
+            if master_open {
+                events |= libc::POLLIN as libc::c_short;
+            }
+            if in_len > in_off {
+                events |= libc::POLLOUT as libc::c_short;
+            }
+            fds[nfd] = libc::pollfd {
+                fd: args.master,
+                events,
+                revents: 0,
+            };
+            nfd += 1;
+        }
+        if in_len < BUF {
+            fds[nfd] = libc::pollfd {
+                fd: args.fifo,
+                events: libc::POLLIN as libc::c_short,
+                revents: 0,
+            };
+            nfd += 1;
+        }
+        if nfd == 0 {
+            let pause = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 200_000_000,
+            };
+            libc::nanosleep(&pause, std::ptr::null_mut());
+            continue;
+        }
+        let pr = libc::poll(fds.as_mut_ptr(), nfd as libc::nfds_t, 200);
+        if pr < 0 {
+            if last_errno() == libc::EINTR {
+                continue;
+            }
+            break;
+        }
+        let mut progress = false;
+        for slot in fds.iter().take(nfd) {
+            if slot.revents == 0 {
+                continue;
+            }
+            if slot.fd == args.master
+                && master_open
+                && (slot.revents & libc::POLLIN as libc::c_short) != 0
+            {
+                let n = libc::read(
+                    args.master,
+                    outbuf.as_mut_ptr().cast::<libc::c_void>(),
+                    outbuf.len(),
+                );
+                if let Some(count) = usize::try_from(n).ok().filter(|count| *count > 0) {
+                    write_all_raw(args.log_fd, &outbuf[..count]);
+                    progress = true;
+                } else if n < 0 {
+                    let err = last_errno();
+                    if err == libc::EIO
+                        || (err != libc::EAGAIN && err != libc::EWOULDBLOCK && err != libc::EINTR)
+                    {
+                        master_open = false;
+                    }
+                } else {
+                    master_open = false;
+                }
+            }
+            if slot.fd == args.master
+                && (slot.revents & libc::POLLOUT as libc::c_short) != 0
+                && in_off < in_len
+            {
+                let n = libc::write(
+                    args.master,
+                    inbuf.as_ptr().add(in_off).cast::<libc::c_void>(),
+                    in_len - in_off,
+                );
+                if let Some(count) = usize::try_from(n).ok().filter(|count| *count > 0) {
+                    in_off += count;
+                    progress = true;
+                } else if n < 0 {
+                    let err = last_errno();
+                    if err == libc::EIO || err == libc::EPIPE {
+                        in_off = 0;
+                        in_len = 0;
+                        master_open = false;
+                    }
+                }
+            }
+            if slot.fd == args.fifo
+                && (slot.revents & libc::POLLIN as libc::c_short) != 0
+                && in_len < BUF
+            {
+                let n = libc::read(
+                    args.fifo,
+                    inbuf.as_mut_ptr().add(in_len).cast::<libc::c_void>(),
+                    BUF - in_len,
+                );
+                if let Some(count) = usize::try_from(n).ok().filter(|count| *count > 0) {
+                    in_len += count;
+                    progress = true;
+                }
+            }
+        }
+        if pr > 0 && !progress {
+            let pause = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 20_000_000,
+            };
+            libc::nanosleep(&pause, std::ptr::null_mut());
+        }
+    }
+
+    libc::close(args.master);
+    libc::close(args.fifo);
+    libc::close(args.log_fd);
+    libc::unlink(args.fifo_path);
+    libc::_exit(1);
+}
+
+#[cfg(unix)]
+fn reap_relay(pid: libc::pid_t) {
+    let mut status: libc::c_int = 0;
+    loop {
+        let r = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if r == pid {
+            break;
+        }
+        if r < 0 {
+            let err = std::io::Error::last_os_error().raw_os_error();
+            if err == Some(libc::EINTR) {
+                continue;
+            }
+            break;
+        }
+    }
+}
+
+/// Unix `pty = true`: fork a process-group leader that owns the PTY.
+///
+/// The recorded pid is the relay. It holds `<log_dir>/<id>.stdin`, copies FIFO
+/// bytes to the PTY master, and appends master output to the log. The real
+/// start command is a grandchild with the slave as its controlling terminal.
+/// macOS and Linux share this path; system `script` is not used.
+#[cfg(unix)]
+fn spawn_pty_relay(p: &Resolved, start_cmd: &[String], env: &[(String, String)]) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::IntoRawFd;
+
+    if start_cmd.is_empty() {
+        bail!("empty start command");
+    }
+    let log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&p.log_file)
+        .with_context(|| format!("open log {}", p.log_file.display()))?;
+    let log_fd = claim_owned_fd(log_file.into_raw_fd())?;
+    let _log_guard = CloseFd(log_fd);
+
+    let (raw_master, raw_slave) = open_pty_pair()?;
+    let master = match claim_owned_fd(raw_master) {
+        Ok(fd) => fd,
+        Err(err) => {
+            unsafe { libc::close(raw_slave) };
+            return Err(err);
+        }
+    };
+    let slave = match claim_owned_fd(raw_slave) {
+        Ok(fd) => fd,
+        Err(err) => {
+            unsafe { libc::close(master) };
+            return Err(err);
+        }
+    };
+    let _master_guard = CloseFd(master);
+    let _slave_guard = CloseFd(slave);
+    configure_pty_slave(slave)?;
+
+    let fifo_path = p.stdin_fifo_path();
+    let fifo_file = prepare_stdin_fifo(&fifo_path)?;
+    let fifo_fd = match claim_owned_fd(fifo_file.into_raw_fd()) {
+        Ok(fd) => fd,
+        Err(err) => {
+            let _ = std::fs::remove_file(&fifo_path);
+            return Err(err);
+        }
+    };
+    let _fifo_guard = CloseFd(fifo_fd);
+
+    let env_owned = build_relay_env(env, &p.env)?;
+    let path_env = env_bytes(&env_owned, "PATH");
+    let exe = resolve_program(&start_cmd[0], path_env, &p.root)?;
+    let argv_owned = start_cmd
+        .iter()
+        .map(|s| {
+            std::ffi::CString::new(s.as_str())
+                .with_context(|| format!("start command contains nul: {s}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let cwd = std::ffi::CString::new(p.root.as_os_str().as_bytes())
+        .with_context(|| format!("project root contains nul: {}", p.root.display()))?;
+    let fifo_c = std::ffi::CString::new(fifo_path.as_os_str().as_bytes())
+        .with_context(|| format!("fifo path contains nul: {}", fifo_path.display()))?;
+
+    let mut argv_ptrs: Vec<*const libc::c_char> = argv_owned.iter().map(|s| s.as_ptr()).collect();
+    argv_ptrs.push(std::ptr::null());
+    let mut env_ptrs: Vec<*const libc::c_char> = env_owned.iter().map(|s| s.as_ptr()).collect();
+    env_ptrs.push(std::ptr::null());
+
+    let relay_args = PtyRelayArgs {
+        master,
+        slave,
+        fifo: fifo_fd,
+        log_fd,
+        argv: argv_ptrs.as_ptr(),
+        envp: env_ptrs.as_ptr(),
+        exe: exe.as_ptr(),
+        cwd: cwd.as_ptr(),
+        fifo_path: fifo_c.as_ptr(),
+    };
+
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        let err = std::io::Error::last_os_error();
+        let _ = std::fs::remove_file(&fifo_path);
+        bail!("fork pty relay: {err}");
+    }
+    if pid == 0 {
+        // Keep the pointed-to allocations alive until exec/_exit. Dropping them
+        // before fork would leave the child with dangling argv/env pointers.
+        std::mem::forget(argv_owned);
+        std::mem::forget(argv_ptrs);
+        std::mem::forget(env_owned);
+        std::mem::forget(env_ptrs);
+        std::mem::forget(exe);
+        std::mem::forget(cwd);
+        std::mem::forget(fifo_c);
+        unsafe { pty_relay_entry(relay_args) }
+    }
+
+    let pid_u = u32::try_from(pid).unwrap_or(0);
+    if pid_u <= 1 {
+        let _ = std::fs::remove_file(&fifo_path);
+        bail!("fork pty relay returned pid {pid}");
+    }
+    if let Err(err) = std::fs::write(&p.pid_file, format!("{pid_u}\n")) {
+        signal_group(pid_u, "-KILL");
+        signal_pid(pid_u, "-KILL");
+        let _ = std::fs::remove_file(&fifo_path);
+        let _ = std::fs::remove_file(p.log_dir.join(format!("{}.answers.json", p.id)));
+        return Err(err).with_context(|| format!("write pid {}", p.pid_file.display()));
+    }
+    thread::spawn(move || reap_relay(pid));
+    eprintln!("  pid {pid_u}");
+    Ok(())
 }
 
 fn spawn_background(p: &Resolved, start_cmd: &[String], env: &[(String, String)]) -> Result<()> {
     if start_cmd.is_empty() {
         bail!("empty start command");
     }
+    #[cfg(unix)]
+    if p.pty {
+        return spawn_pty_relay(p, start_cmd, env);
+    }
+
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -2894,38 +3604,8 @@ fn spawn_background(p: &Resolved, start_cmd: &[String], env: &[(String, String)]
         .try_clone()
         .with_context(|| format!("clone log handle {}", p.log_file.display()))?;
 
-    #[cfg(unix)]
-    let mut cmd = if p.pty {
-        #[cfg(target_os = "macos")]
-        {
-            let mut c = Command::new("script");
-            c.arg("-q").arg("/dev/null").args(start_cmd);
-            c
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let escaped_cmd = start_cmd
-                .iter()
-                .map(|s| shell_escape(s))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let mut c = Command::new("script");
-            c.args(["-qfec", &escaped_cmd, "/dev/null"]);
-            c
-        }
-    } else {
-        let mut c = Command::new(&start_cmd[0]);
-        c.args(&start_cmd[1..]);
-        c
-    };
-
-    #[cfg(not(unix))]
-    let mut cmd = {
-        let mut c = Command::new(&start_cmd[0]);
-        c.args(&start_cmd[1..]);
-        c
-    };
-
+    let mut cmd = Command::new(&start_cmd[0]);
+    cmd.args(&start_cmd[1..]);
     cmd.stdout(log).stderr(log_err).current_dir(&p.root);
 
     #[cfg(unix)]
@@ -2951,8 +3631,9 @@ fn spawn_background(p: &Resolved, start_cmd: &[String], env: &[(String, String)]
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let spawn_name = if p.pty { "script" } else { &start_cmd[0] };
-    let mut child = cmd.spawn().with_context(|| format!("spawn {spawn_name}"))?;
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("spawn {}", start_cmd[0]))?;
     let pid = child.id();
     if let Err(err) = std::fs::write(&p.pid_file, format!("{pid}\n")) {
         signal_pid(pid, "-KILL");

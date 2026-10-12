@@ -66,6 +66,8 @@ Agent 驱动建议：`start <id> --timeout 60 --json` → 检查退出码和 `ok
 
 向运行中的交互脚本发送输入：`tongyun-dev input <id> [text] [--no-enter] [--key key] [--json]`，键位支持 `up` / `down` / `left` / `right` / `enter` / `tab` / `esc` / `ctrl-c`。项目必须在运行中且拥有标准输入管道（FIFO）。注意：Windows 暂不支持向进程发送输入；单次输入上限 4096 字节（超限报错）；日志回显默认只记录占位符（不落明文）；管道满返回「子进程没有读取输入（管道已满）」。
 
+Unix 上 `pty = true` 的后台进程不走系统 `script`。macOS 与 Linux 同一条路径：fork 常驻 openpty relay（pid 文件记 relay），启动命令的 stdin/stdout/stderr 在 PTY slave 上（`isatty` 为真），`input` 仍写入 FIFO，由 relay 转到 PTY master。
+
 ## 4. HTTP 控制台（:9099）
 
 本机 `tongyun-dev ui` 后：

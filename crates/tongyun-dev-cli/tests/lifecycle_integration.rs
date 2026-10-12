@@ -711,3 +711,183 @@ fn foreign_listener_blocks_restart_without_running_start_command() {
     drop(listener);
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn pty_stdin_fifo_and_env_lifecycle() {
+    let dir = temp_dir("stdin_fifo");
+    let port = free_port();
+    let cfg = dir.join("projects.toml");
+    let d = dir.to_string_lossy().replace('\\', "/");
+
+    let script = "read line; echo got_input=$line; echo CI_VAL=$CI; exec sleep 30";
+    fs::write(
+        &cfg,
+        format!(
+            r#"[projects.interactive]
+name = "Interactive Service"
+root = "{d}"
+start = ["sh", "-c", "{script}"]
+background = true
+port = {port}
+log_dir = "{d}/logs"
+env = {{ CI = "test_ci_value", CUSTOM = "123" }}
+"#
+        ),
+    )
+    .unwrap();
+
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    let _guard = CleanupGuard::new(&loaded, "interactive", dir.clone());
+
+    let st = loaded.start_detached("interactive").unwrap();
+    assert_eq!(st.state, tongyun_dev_core::LifeState::Starting);
+
+    // 1. Check that FIFO was created at logs/interactive.stdin
+    let fifo_path = dir.join("logs/interactive.stdin");
+    assert!(
+        fifo_path.exists(),
+        "FIFO {} should exist",
+        fifo_path.display()
+    );
+
+    // 2. Send input via send_input
+    loaded.send_input("interactive", "hello_dev\n").unwrap();
+
+    // 3. Wait for log to contain got_input=hello_dev, CI_VAL=test_ci_value, and echo › hello_dev
+    let log_path = dir.join("logs/interactive.out");
+    let start_t = std::time::Instant::now();
+    let mut log_content = String::new();
+    while start_t.elapsed() < Duration::from_secs(5) {
+        if let Ok(c) = fs::read_to_string(&log_path) {
+            log_content = c;
+            if log_content.contains("got_input=hello_dev")
+                && log_content.contains("CI_VAL=test_ci_value")
+            {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(
+        log_content.contains("got_input=hello_dev"),
+        "log: {log_content}"
+    );
+    assert!(
+        log_content.contains("CI_VAL=test_ci_value"),
+        "log: {log_content}"
+    );
+    assert!(log_content.contains("› hello_dev"), "log: {log_content}");
+
+    // 4. Stop project and verify cleanup
+    let stopped = loaded.stop("interactive").unwrap();
+    assert_eq!(stopped.state, tongyun_dev_core::LifeState::Stopped);
+    assert!(!fifo_path.exists(), "FIFO must be removed after stop");
+    assert!(
+        !dir.join("logs/interactive.pid").exists(),
+        "pid file must be removed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn http_post_input_endpoint_and_security() {
+    let dir = temp_dir("http_input");
+    let service_port = free_port();
+    let cfg = dir.join("projects.toml");
+    let d = dir.to_string_lossy().replace('\\', "/");
+
+    let script = "read line; echo http_got=$line; exec sleep 30";
+    fs::write(
+        &cfg,
+        format!(
+            r#"[projects.http_test]
+name = "HTTP Test"
+root = "{d}"
+start = ["sh", "-c", "{script}"]
+background = true
+port = {service_port}
+log_dir = "{d}/logs"
+"#
+        ),
+    )
+    .unwrap();
+
+    let ui_port = free_port();
+    let ui_listener = TcpListener::bind(("127.0.0.1", ui_port)).unwrap();
+    let cfg_clone = cfg.clone();
+    thread::spawn(move || {
+        let _ = tongyun_dev_cli::server::serve(ui_listener, cfg_clone, ui_port);
+    });
+
+    // 1. Before project is running: POST /api/projects/http_test/input should return 409
+    let post_req = |body: &str, origin: &str| -> String {
+        format!(
+            "POST /api/projects/http_test/input HTTP/1.1\r\n\
+             Host: 127.0.0.1:{ui_port}\r\n\
+             Origin: {origin}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {}",
+            body.len(),
+            body
+        )
+    };
+
+    let resp = http(
+        ui_port,
+        &post_req(r#"{"text":"ping"}"#, &format!("http://127.0.0.1:{ui_port}")),
+    );
+    assert!(
+        resp.starts_with("HTTP/1.1 409"),
+        "expected 409 when not running, got: {resp}"
+    );
+
+    // 2. Cross-origin request: rejected with 403
+    let evil_resp = http(
+        ui_port,
+        &post_req(r#"{"text":"ping"}"#, "http://evil.example"),
+    );
+    assert!(
+        evil_resp.starts_with("HTTP/1.1 403"),
+        "expected 403 on evil origin, got: {evil_resp}"
+    );
+
+    // 3. Start project
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    let _guard = CleanupGuard::new(&loaded, "http_test", dir.clone());
+    loaded.start_detached("http_test").unwrap();
+
+    // 4. While running, POST input succeeds
+    let ok_resp = http(
+        ui_port,
+        &post_req(
+            r#"{"text":"pong","enter":true}"#,
+            &format!("http://127.0.0.1:{ui_port}"),
+        ),
+    );
+    assert!(
+        ok_resp.starts_with("HTTP/1.1 200"),
+        "expected 200, got: {ok_resp}"
+    );
+
+    // Check log received input
+    let log_path = dir.join("logs/http_test.out");
+    let start_t = std::time::Instant::now();
+    let mut log_content = String::new();
+    while start_t.elapsed() < Duration::from_secs(5) {
+        if let Ok(c) = fs::read_to_string(&log_path) {
+            log_content = c;
+            if log_content.contains("http_got=pong") {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(log_content.contains("http_got=pong"), "log: {log_content}");
+    assert!(log_content.contains("› pong"), "log: {log_content}");
+
+    loaded.stop("http_test").unwrap();
+}

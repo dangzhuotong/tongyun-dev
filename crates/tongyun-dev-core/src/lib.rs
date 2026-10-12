@@ -115,6 +115,9 @@ struct Project {
     /// 端口环境变量名（缺省 "PORT"）
     #[serde(default)]
     pub port_env: Option<String>,
+    /// 额外环境变量（可选）
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 struct Vars {
@@ -154,9 +157,14 @@ struct Resolved {
     pub port_mode: String,
     pub port_arg: Option<String>,
     pub port_env: Option<String>,
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 impl Resolved {
+    pub fn stdin_fifo_path(&self) -> PathBuf {
+        self.log_dir.join(format!("{}.stdin", self.id))
+    }
+
     fn catalina_env(&self) -> Vec<(String, String)> {
         let Some(tomcat) = &self.tomcat else {
             return Vec::new();
@@ -228,6 +236,8 @@ pub struct ProjectRow {
     pub port_arg: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port_env: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -421,6 +431,7 @@ impl Loaded {
                 port_mode: resolved.port_mode,
                 port_arg: resolved.port_arg,
                 port_env: resolved.port_env,
+                env: resolved.env.clone(),
             });
         }
         let groups = self.groups();
@@ -819,6 +830,70 @@ impl Loaded {
         Ok(())
     }
 
+    /// 向运行中的项目标准输入管道写入数据。
+    pub fn send_input(&self, id: &str, data: &str) -> Result<()> {
+        let p = self.resolve(id)?;
+        #[cfg(not(unix))]
+        {
+            let _ = p;
+            let _ = data;
+            bail!("Windows 暂不支持");
+        }
+        #[cfg(unix)]
+        {
+            if tracked_pids(&p).is_empty() {
+                bail!("项目 `{id}` 未在运行");
+            }
+            let fifo_path = p.stdin_fifo_path();
+            if !fifo_path.exists() {
+                bail!("项目 `{id}` 输入管道不存在");
+            }
+            use std::ffi::CString;
+            use std::io::Write;
+            use std::os::unix::ffi::OsStrExt;
+            use std::os::unix::io::FromRawFd;
+
+            let c_path = CString::new(fifo_path.as_os_str().as_bytes())
+                .with_context(|| format!("convert path to cstring: {}", fifo_path.display()))?;
+
+            let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK) };
+            if fd < 0 {
+                let err = std::io::Error::last_os_error();
+                bail!("无法写入输入管道（打开失败）：{err}");
+            }
+            let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+            file.write_all(data.as_bytes())
+                .with_context(|| format!("向项目 `{id}` 写入输入失败"))?;
+
+            let echo = match data {
+                "\x1b[A" => "› [Up]",
+                "\x1b[B" => "› [Down]",
+                "\x1b[C" => "› [Right]",
+                "\x1b[D" => "› [Left]",
+                "\t" => "› [Tab]",
+                "\x1b" => "› [Esc]",
+                "\x03" => "› [Ctrl+C]",
+                "\n" | "\r" => "› [Enter]",
+                other => {
+                    let trimmed = other.trim();
+                    if trimmed.is_empty() {
+                        "›"
+                    } else {
+                        &format!("› {trimmed}")
+                    }
+                }
+            };
+            let echo_text = if echo.starts_with('›') {
+                echo.to_string()
+            } else {
+                format!("› {}", data.trim())
+            };
+            append_log_line(&p.log_file, &echo_text);
+
+            Ok(())
+        }
+    }
+
     fn resolve(&self, id: &str) -> Result<Resolved> {
         let project = self
             .config
@@ -838,6 +913,41 @@ pub fn load(explicit: Option<&Path>) -> Result<Loaded> {
 }
 
 pub const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../../../config/projects.template.toml");
+
+pub fn map_key(key: &str) -> Option<&'static str> {
+    match key.to_ascii_lowercase().as_str() {
+        "up" => Some("\x1b[A"),
+        "down" => Some("\x1b[B"),
+        "right" => Some("\x1b[C"),
+        "left" => Some("\x1b[D"),
+        "enter" => Some("\n"),
+        "tab" => Some("\t"),
+        "esc" | "escape" => Some("\x1b"),
+        "ctrl-c" | "ctrl_c" | "ctrlc" => Some("\x03"),
+        _ => None,
+    }
+}
+
+pub fn resolve_input_data(text: Option<&str>, enter: bool, key: Option<&str>) -> Result<String> {
+    let mut data = String::new();
+    let has_key = key.is_some();
+    if let Some(t) = text {
+        data.push_str(t);
+        if enter && !has_key {
+            data.push('\n');
+        }
+    } else if enter && !has_key {
+        data.push('\n');
+    }
+    if let Some(k) = key {
+        let mapped = map_key(k).ok_or_else(|| anyhow::anyhow!("未知按键: {k}"))?;
+        data.push_str(mapped);
+    }
+    if data.is_empty() {
+        bail!("empty input: specify text or key");
+    }
+    Ok(data)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ConfigInfo {
@@ -1339,6 +1449,7 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
         port_mode,
         port_arg,
         port_env,
+        env: p.env.clone(),
     })
 }
 
@@ -2360,6 +2471,9 @@ fn spawn_install(p: &Resolved, then_start: bool) -> Result<thread::JoinHandle<()
             cmd.env(k, v);
         }
     }
+    for (k, v) in &p.env {
+        cmd.env(k, v);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -2552,6 +2666,43 @@ pub fn assemble_start_cmd(
     start.to_vec()
 }
 
+#[cfg(unix)]
+fn prepare_stdin_fifo(fifo_path: &Path) -> Result<std::fs::File> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::FromRawFd;
+
+    if fifo_path.exists() || std::fs::symlink_metadata(fifo_path).is_ok() {
+        let _ = std::fs::remove_file(fifo_path);
+    }
+    if let Some(parent) = fifo_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let c_path = CString::new(fifo_path.as_os_str().as_bytes())
+        .with_context(|| format!("convert path to cstring: {}", fifo_path.display()))?;
+
+    let res = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+    if res != 0 {
+        let err = std::io::Error::last_os_error();
+        bail!("mkfifo failed for {}: {}", fifo_path.display(), err);
+    }
+
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR) };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        let _ = std::fs::remove_file(fifo_path);
+        bail!(
+            "open FIFO O_RDWR failed for {}: {}",
+            fifo_path.display(),
+            err
+        );
+    }
+
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    Ok(file)
+}
+
 fn spawn_background(p: &Resolved, start_cmd: &[String], env: &[(String, String)]) -> Result<()> {
     if start_cmd.is_empty() {
         bail!("empty start command");
@@ -2566,14 +2717,27 @@ fn spawn_background(p: &Resolved, start_cmd: &[String], env: &[(String, String)]
         .with_context(|| format!("clone log handle {}", p.log_file.display()))?;
     let mut cmd = Command::new(&start_cmd[0]);
     cmd.args(&start_cmd[1..])
-        .stdin(Stdio::null())
         .stdout(log)
         .stderr(log_err)
         .current_dir(&p.root);
+
+    #[cfg(unix)]
+    {
+        let fifo_file = prepare_stdin_fifo(&p.stdin_fifo_path())?;
+        cmd.stdin(Stdio::from(fifo_file));
+    }
+    #[cfg(not(unix))]
+    {
+        cmd.stdin(Stdio::null());
+    }
+
     for (k, v) in env {
         if !v.is_empty() {
             cmd.env(k, v);
         }
+    }
+    for (k, v) in &p.env {
+        cmd.env(k, v);
     }
     #[cfg(unix)]
     {
@@ -2586,6 +2750,8 @@ fn spawn_background(p: &Resolved, start_cmd: &[String], env: &[(String, String)]
     let pid = child.id();
     if let Err(err) = std::fs::write(&p.pid_file, format!("{pid}\n")) {
         signal_pid(pid, "-KILL");
+        #[cfg(unix)]
+        let _ = std::fs::remove_file(p.stdin_fifo_path());
         return Err(err).with_context(|| format!("write pid {}", p.pid_file.display()));
     }
     thread::spawn(move || {
@@ -2678,6 +2844,9 @@ fn cmd_start_detached(p: &Resolved) -> Result<()> {
     } else {
         let mut full_env = tc_env;
         full_env.extend(p.catalina_env());
+        for (k, v) in &p.env {
+            full_env.push((k.clone(), v.clone()));
+        }
         run_cmd(&start_cmd, Some(&p.root), &full_env)?;
     }
     Ok(())
@@ -2839,12 +3008,16 @@ fn cmd_stop(p: &Resolved) -> Result<()> {
     if stale_pid {
         let _ = std::fs::remove_file(&p.pid_file);
         let _ = std::fs::remove_file(start_marker_path(&p.pid_file));
+        #[cfg(unix)]
+        let _ = std::fs::remove_file(p.stdin_fifo_path());
     }
 
     if is_down(p) {
         eprintln!("{} already stopped", p.id);
         let _ = std::fs::remove_file(&p.pid_file);
         let _ = std::fs::remove_file(start_marker_path(&p.pid_file));
+        #[cfg(unix)]
+        let _ = std::fs::remove_file(p.stdin_fifo_path());
         return Ok(());
     }
 
@@ -2904,6 +3077,8 @@ fn cmd_stop(p: &Resolved) -> Result<()> {
     // 5. 结束后删除 pid 文件和启动标记
     let _ = std::fs::remove_file(&p.pid_file);
     let _ = std::fs::remove_file(start_marker_path(&p.pid_file));
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(p.stdin_fifo_path());
 
     Ok(())
 }
@@ -2996,6 +3171,9 @@ pub struct NewProject {
     /// 所属分组（可选）。
     #[serde(default)]
     pub group: Option<String>,
+    /// 额外环境变量（可选）。
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 fn non_empty(v: &Option<String>) -> Option<String> {
@@ -3111,6 +3289,7 @@ impl NewProject {
             port_mode,
             port_arg,
             port_env,
+            env: self.env.clone(),
         };
         Ok((id, project))
     }
@@ -3195,6 +3374,13 @@ fn project_table(p: &Project) -> toml_edit::Table {
         if !v.is_empty() {
             t[key] = value(v.as_str());
         }
+    }
+    if !p.env.is_empty() {
+        let mut inline = toml_edit::InlineTable::new();
+        for (k, v) in &p.env {
+            inline.insert(k, toml_edit::Value::from(v.as_str()));
+        }
+        t["env"] = toml_edit::Item::Value(toml_edit::Value::InlineTable(inline));
     }
     t
 }
@@ -3281,6 +3467,9 @@ pub struct ProjectEdit {
     pub port_arg: Option<String>,
     #[serde(default)]
     pub port_env: Option<String>,
+    /// 额外环境变量（可选）。
+    #[serde(default)]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -3311,6 +3500,8 @@ pub struct ProjectDetail {
     pub port_arg: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port_env: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
 }
@@ -3438,6 +3629,7 @@ impl Loaded {
             port_mode: r.port_mode,
             port_arg: r.port_arg,
             port_env: r.port_env,
+            env: r.env.clone(),
         })
     }
 
@@ -3579,6 +3771,7 @@ impl Loaded {
             port_mode: r.port_mode,
             port_arg: r.port_arg,
             port_env: r.port_env,
+            env: p.env.clone(),
             hints,
         })
     }
@@ -3794,6 +3987,18 @@ impl Loaded {
             }
         }
 
+        if let Some(ref env) = edit.env {
+            if env.is_empty() {
+                proj_table.remove("env");
+            } else {
+                let mut inline = toml_edit::InlineTable::new();
+                for (k, v) in env {
+                    inline.insert(k, toml_edit::Value::from(v.as_str()));
+                }
+                set_table_val(proj_table, "env", toml_edit::Value::InlineTable(inline));
+            }
+        }
+
         if let Some(ref grp) = group_to_ensure {
             let groups = doc
                 .entry("group")
@@ -3849,6 +4054,7 @@ impl Loaded {
             port_mode: r.port_mode,
             port_arg: r.port_arg,
             port_env: r.port_env,
+            env: r.env.clone(),
         })
     }
 
@@ -4689,6 +4895,7 @@ port = 3002
             port_mode: "none".to_string(),
             port_arg: None,
             port_env: None,
+            env: Default::default(),
         };
         let json_fs: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row_fs).unwrap()).unwrap();
@@ -4716,6 +4923,7 @@ port = 3002
             port_mode: "none".to_string(),
             port_arg: None,
             port_env: None,
+            env: Default::default(),
         };
         let json_none: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row_none).unwrap()).unwrap();
@@ -5603,6 +5811,56 @@ port = 9000
         assert_eq!(p_a2.group.as_deref(), Some("auto_grp"));
         let p_b2 = list2.projects.iter().find(|p| p.id == "proj_b").unwrap();
         assert_eq!(p_b2.group, None);
+    }
+
+    #[test]
+    fn test_11_env_read_write_inline_table_and_preserves_comments() {
+        let toml_content = r#"# project comment
+[projects.demo]
+name = "Demo"
+root = "@ROOT@/demo"
+start = ["echo", "start"]
+port = 3000
+env = { CI = "1", FOO = "bar" }
+"#;
+        let path = temp_config("t11_env", toml_content);
+        let mut loaded = load(Some(&path)).unwrap();
+
+        let detail = loaded.project_detail("demo").unwrap();
+        assert_eq!(detail.env.get("CI").map(String::as_str), Some("1"));
+        assert_eq!(detail.env.get("FOO").map(String::as_str), Some("bar"));
+
+        // Update env
+        let mut new_env = std::collections::BTreeMap::new();
+        new_env.insert("CI".into(), "true".into());
+        new_env.insert("NEW_VAR".into(), "hello".into());
+
+        let edit = ProjectEdit {
+            env: Some(new_env),
+            ..Default::default()
+        };
+        let updated = loaded.update_project("demo", edit).unwrap();
+        assert_eq!(updated.env.get("CI").map(String::as_str), Some("true"));
+        assert_eq!(
+            updated.env.get("NEW_VAR").map(String::as_str),
+            Some("hello")
+        );
+        assert!(!updated.env.contains_key("FOO"));
+
+        let file_text = std::fs::read_to_string(&path).unwrap();
+        assert!(file_text.contains("# project comment"));
+        assert!(file_text.contains("env = {"));
+
+        let reloaded = load(Some(&path)).unwrap();
+        let reloaded_detail = reloaded.project_detail("demo").unwrap();
+        assert_eq!(
+            reloaded_detail.env.get("CI").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            reloaded_detail.env.get("NEW_VAR").map(String::as_str),
+            Some("hello")
+        );
     }
 }
 

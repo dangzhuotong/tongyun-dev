@@ -386,6 +386,43 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
             }
         }
         "POST" => {
+            if let Some(id) = project_route(path, "input") {
+                #[derive(serde::Deserialize)]
+                struct InputBody {
+                    #[serde(default)]
+                    text: Option<String>,
+                    #[serde(default = "default_input_enter")]
+                    enter: bool,
+                    #[serde(default)]
+                    key: Option<String>,
+                }
+                fn default_input_enter() -> bool {
+                    true
+                }
+                let body: InputBody = match serde_json::from_slice(&req.body) {
+                    Ok(b) => b,
+                    Err(e) => return err_json(400, format!("bad payload: {e}")),
+                };
+                let data = match tongyun_dev_core::resolve_input_data(
+                    body.text.as_deref(),
+                    body.enter,
+                    body.key.as_deref(),
+                ) {
+                    Ok(d) => d,
+                    Err(e) => return err_json(400, format!("{e:#}")),
+                };
+                return match loaded.send_input(id, &data) {
+                    Ok(()) => json_body(200, json!({"ok": true})),
+                    Err(e) => {
+                        let msg = format!("{e:#}");
+                        if msg.contains("未在运行") || msg.contains("not running") {
+                            err_json(409, msg)
+                        } else {
+                            err_json(400, msg)
+                        }
+                    }
+                };
+            }
             let action = ["start", "stop", "restart", "install", "open", "open-dir"]
                 .into_iter()
                 .find_map(|a| project_route(path, a).map(|id| (a, id)));

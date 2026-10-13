@@ -3067,6 +3067,10 @@ fn open_pty_pair() -> Result<(std::os::unix::io::RawFd, std::os::unix::io::RawFd
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
+            // Apple takes `*mut winsize`; other Unix takes `*const`.
+            #[cfg(target_os = "macos")]
+            &mut win,
+            #[cfg(not(target_os = "macos"))]
             &win,
         )
     };
@@ -3365,7 +3369,15 @@ unsafe fn pty_relay_entry(args: PtyRelayArgs) -> ! {
         unblock_all_signals();
         reset_command_signals();
         let sid = libc::setsid();
-        let ctty = libc::ioctl(args.slave, libc::TIOCSCTTY, 0);
+        // macOS `TIOCSCTTY` is `c_uint`; `ioctl` request is `c_ulong`.
+        let ctty = libc::ioctl(
+            args.slave,
+            #[cfg(target_os = "macos")]
+            libc::TIOCSCTTY.into(),
+            #[cfg(not(target_os = "macos"))]
+            libc::TIOCSCTTY,
+            0,
+        );
         let pgid = libc::getpid();
         libc::ioctl(args.slave, libc::TIOCSPGRP, &pgid);
         if args.slave != 0 {

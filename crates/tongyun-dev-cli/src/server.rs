@@ -202,6 +202,38 @@ fn project_route<'a>(path: &'a str, action: &str) -> Option<&'a str> {
     (!id.is_empty() && !id.contains('/')).then_some(id)
 }
 
+fn group_route<'a>(path: &'a str, action: &str) -> Option<&'a str> {
+    let rest = path.strip_prefix("/api/groups/")?;
+    let key = if action.is_empty() {
+        rest
+    } else {
+        rest.strip_suffix(action)?.strip_suffix('/')?
+    };
+    (!key.is_empty() && !key.contains('/')).then_some(key)
+}
+
+fn url_decode(s: &str) -> String {
+    let mut out = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        if bytes[i] == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
 fn json_body(code: u16, v: Value) -> (u16, &'static str, Vec<u8>) {
     (
         code,
@@ -259,6 +291,7 @@ pub fn overview(loaded: &Loaded) -> Result<Vec<Value>> {
             m.insert("links".into(), json!(row.links));
             m.insert("default_profile".into(), json!(row.default_profile));
             m.insert("profiles".into(), json!(row.profiles));
+            m.insert("depends_on".into(), json!(row.depends_on));
             if let Some(err) = &row.resolve_error {
                 m.insert("resolve_error".into(), json!(err));
                 m.insert("configured".into(), json!(false));
@@ -512,6 +545,90 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                     }
                 };
             }
+            if let Some(raw_key) = group_route(path, "start") {
+                let key = url_decode(raw_key);
+                let out = match loaded.start_batch_detached(Some(&key), None) {
+                    Ok(out) => out,
+                    Err(e) => return err_json(500, format!("{e:#}")),
+                };
+                return json_body(200, json!({
+                    "ok": out.failed == 0,
+                    "group": key,
+                    "total": out.total,
+                    "succeeded": out.succeeded,
+                    "failed": out.failed,
+                    "results": out.results
+                }));
+            }
+            if let Some(raw_key) = group_route(path, "stop") {
+                let key = url_decode(raw_key);
+                let out = match loaded.stop_batch(Some(&key), None) {
+                    Ok(out) => out,
+                    Err(e) => return err_json(500, format!("{e:#}")),
+                };
+                return json_body(200, json!({
+                    "ok": out.failed == 0,
+                    "group": key,
+                    "total": out.total,
+                    "succeeded": out.succeeded,
+                    "failed": out.failed,
+                    "results": out.results
+                }));
+            }
+            if let Some(raw_key) = group_route(path, "restart") {
+                let key = url_decode(raw_key);
+                let out = match loaded.restart_batch_detached(Some(&key), None) {
+                    Ok(out) => out,
+                    Err(e) => return err_json(500, format!("{e:#}")),
+                };
+                return json_body(200, json!({
+                    "ok": out.failed == 0,
+                    "group": key,
+                    "total": out.total,
+                    "succeeded": out.succeeded,
+                    "failed": out.failed,
+                    "results": out.results
+                }));
+            }
+            if path == "/api/projects/start-all" {
+                let out = match loaded.start_batch_detached(None, None) {
+                    Ok(out) => out,
+                    Err(e) => return err_json(500, format!("{e:#}")),
+                };
+                return json_body(200, json!({
+                    "ok": out.failed == 0,
+                    "total": out.total,
+                    "succeeded": out.succeeded,
+                    "failed": out.failed,
+                    "results": out.results
+                }));
+            }
+            if path == "/api/projects/stop-all" {
+                let out = match loaded.stop_batch(None, None) {
+                    Ok(out) => out,
+                    Err(e) => return err_json(500, format!("{e:#}")),
+                };
+                return json_body(200, json!({
+                    "ok": out.failed == 0,
+                    "total": out.total,
+                    "succeeded": out.succeeded,
+                    "failed": out.failed,
+                    "results": out.results
+                }));
+            }
+            if path == "/api/projects/restart-all" {
+                let out = match loaded.restart_batch_detached(None, None) {
+                    Ok(out) => out,
+                    Err(e) => return err_json(500, format!("{e:#}")),
+                };
+                return json_body(200, json!({
+                    "ok": out.failed == 0,
+                    "total": out.total,
+                    "succeeded": out.succeeded,
+                    "failed": out.failed,
+                    "results": out.results
+                }));
+            }
             let action = [
                 "start", "stop", "restart", "install", "open", "open-all", "open-dir", "terminal",
             ]
@@ -764,11 +881,16 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
     .filter .n { font-size: var(--ty-font-size-xs); color: var(--ty-text-subtle); font-variant-numeric: tabular-nums; }
     .filter.on { background: var(--ty-matcha-tint); border-color: var(--ty-matcha-soft); color: var(--ty-matcha); font-weight: 600; }
     .filter.on .n { color: var(--ty-matcha); }
-    .summary { margin-left: auto; color: var(--ty-text-muted); font-size: var(--ty-font-size-sm); }
+    .toolbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+    .btn-stop-all { height: 26px; padding: 0 9px; font-size: var(--ty-font-size-xs); background: var(--ty-surface); border: 1px solid var(--ty-peach-soft); color: var(--ty-peach-text); border-radius: var(--ty-radius-sm); cursor: pointer; }
+    .btn-stop-all:hover { background: var(--ty-peach-tint); }
+    .summary { color: var(--ty-text-muted); font-size: var(--ty-font-size-sm); }
 
-    .group-heading { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 8px; padding: 14px 0 4px; font-weight: 600; font-size: 15px; color: var(--ty-text); border-bottom: 1px solid var(--ty-border); margin-top: 10px; }
+    .group-heading { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; padding: 14px 0 6px; font-weight: 600; font-size: 15px; color: var(--ty-text); border-bottom: 1px solid var(--ty-border); margin-top: 10px; }
     .group-heading:first-child { margin-top: 0; }
     .group-heading .count { font-size: var(--ty-font-size-xs); color: var(--ty-text-muted); font-weight: normal; }
+    .group-heading .group-actions { margin-left: auto; display: flex; gap: 6px; }
+    .group-heading .group-actions button { height: 24px; padding: 0 8px; font-size: var(--ty-font-size-xs); }
 
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
     .card {
@@ -944,7 +1066,11 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         <button class="search-clear" id="searchClear" style="display:none" aria-label="清空搜索" title="清空 (Esc)">×</button>
       </label>
       <div class="filters" id="filters" role="tablist" aria-label="按状态筛选"></div>
-      <span class="summary" id="summary"></span>
+      <div class="toolbar-right">
+        <span class="summary" id="summary"></span>
+        <button id="startAllBtn" class="btn-primary" style="display:none;padding:4px 10px;font-size:12px;" onclick="startAllProjects()" title="启动全部未运行的已配置项目">全部启动</button>
+        <button id="stopAllBtn" class="btn-stop-all" style="display:none;" onclick="stopAllProjects()" title="停止所有正在运行的服务">全部停止</button>
+      </div>
     </div>
 
     <div class="grid" id="projectGrid">
@@ -1009,9 +1135,24 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         <div class="form-group"><label><input id="editEnabled" type="checkbox" /> 启用项目</label></div>
         <div class="form-group"><label>停用原因</label><input id="editReason" /></div>
         <div class="form-group"><label><input id="editAutoInstall" type="checkbox" /> 启动前自动安装缺失依赖</label></div>
+        <div class="form-group"><label><input id="editPty" type="checkbox" /> 伪终端运行（交互脚本用）</label></div>
+        <div class="form-group">
+          <label>端口传递方式</label>
+          <select id="editPortMode">
+            <option value="none">none（不传参不设环境变量，仅探活）</option>
+            <option value="arg">arg（自动追加命令行参数）</option>
+            <option value="env">env（注入环境变量）</option>
+            <option value="config">config（自有配置，同 none）</option>
+          </select>
+        </div>
+        <div class="form-group"><label>端口参数名（port_mode=arg 时使用）</label><input id="editPortArg" placeholder="--port" /></div>
+        <div class="form-group"><label>端口环境变量名（port_mode=env 时使用）</label><input id="editPortEnv" placeholder="PORT" /></div>
+        <div class="form-group"><label>额外环境变量（每行 KEY=VALUE）</label><textarea id="editEnv" rows="3" placeholder="例如：&#10;CI=1&#10;APP_ENV=dev"></textarea></div>
+        <div class="form-group"><label>自动应答（每行 匹配文字 => 发送内容）</label><textarea id="editAutoAnswers" rows="3" placeholder="例如：&#10;Select environment => dev&#10;(y/N) => y"></textarea></div>
         <div class="form-group"><label>快捷网页链接（每行一个：标题 => URL 或直接写 URL）</label><textarea id="editLinks" rows="2" placeholder="例如：&#10;前端主页 => http://127.0.0.1:5173/&#10;管理后台 => http://127.0.0.1:5173/admin"></textarea></div>
         <div class="form-group"><label>默认启动环境</label><input id="editDefaultProfile" placeholder="例如：dev" /></div>
         <div class="form-group"><label>环境预设 (Profiles，每行：标识: 启动命令 或 标识: 标签 | 启动命令 [| 端口])</label><textarea id="editProfiles" rows="3" placeholder="例如：&#10;dev: 开发环境 | pnpm dev&#10;mock: Mock 模式 | pnpm dev:mock | 5174"></textarea></div>
+        <div class="form-group"><label>依赖服务（可选，多个项目 ID 用逗号或换行分隔）</label><input id="editDependsOn" placeholder="例如：demo_api, demo_db" /></div>
       </div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="closeAddModal()">取消</button>
@@ -1162,7 +1303,43 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       return data;
     }
 
-    const selectedProfiles = {};
+    function formatEnvLines(env) {
+      if (!env) return '';
+      return Object.entries(env).map(([k, v]) => `${k}=${v}`).join('\n');
+    }
+    function parseEnvLines(text) {
+      const env = {};
+      if (!text || !text.trim()) return env;
+      for (const raw of text.split('\n')) {
+        const line = raw.trim();
+        if (!line) continue;
+        const eq = line.indexOf('=');
+        if (eq === -1) throw new Error('环境变量格式必须为 KEY=VALUE：' + line);
+        const k = line.slice(0, eq).trim();
+        if (!k) throw new Error('环境变量键名不能为空：' + line);
+        env[k] = line.slice(eq + 1).trim();
+      }
+      return env;
+    }
+    function formatAutoAnswersLines(answers) {
+      if (!answers || !answers.length) return '';
+      return answers.map(a => `${a.expect} => ${a.send}`).join('\n');
+    }
+    function parseAutoAnswersLines(text) {
+      const answers = [];
+      if (!text || !text.trim()) return answers;
+      for (const raw of text.split('\n')) {
+        const line = raw.trim();
+        if (!line) continue;
+        const arrow = line.indexOf('=>');
+        if (arrow === -1) throw new Error('自动应答格式必须为 匹配文字 => 发送内容：' + line);
+        const expect = line.slice(0, arrow).trim();
+        if (!expect) throw new Error('自动应答匹配文字不能为空：' + line);
+        const send = line.slice(arrow + 2).trim();
+        answers.push({ expect, send, once: true, regex: false });
+      }
+      return answers;
+    }
 
     function formatLinksLines(links) {
       if (!links || !links.length) return '';
@@ -1325,7 +1502,16 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         `<button class="filter ${statusFilter === k ? 'on' : ''}" role="tab" aria-selected="${statusFilter === k}" onclick="setFilter('${k}')">${label} <span class="n">${counts[k]}</span></button>`
       ).join('');
       const running = projects.filter(p => p.enabled !== false && (p.state === 'ready' || p.state === 'port_open')).length;
+      const canStartAny = projects.some(p => p.enabled !== false && isConfigured(p) && (p.state === 'stopped' || p.state === 'failed'));
       document.getElementById('summary').textContent = `${projects.length} 个项目 · ${running} 个运行中`;
+      const stopAllBtn = document.getElementById('stopAllBtn');
+      if (stopAllBtn) {
+        stopAllBtn.style.display = running > 0 ? '' : 'none';
+      }
+      const startAllBtn = document.getElementById('startAllBtn');
+      if (startAllBtn) {
+        startAllBtn.style.display = canStartAny ? '' : 'none';
+      }
     }
     function setFilter(k) { statusFilter = k; renderProjects(lastProjects); }
     function clearFilters() {
@@ -1476,6 +1662,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
           </div>
           <div class="root" title="${escapeHtml(p.root)}">${ICON_FOLDER}<span>${highlight(p.root)}</span></div>
           ${chips ? `<div class="chips">${chips}</div>` : ''}
+          ${p.depends_on && p.depends_on.length > 0 ? `<div style="font-size:11px;color:var(--ty-text-muted);margin:3px 0 6px;">依赖：${escapeHtml(p.depends_on.join(', '))}</div>` : ''}
           <div class="card-actions">
             ${actionBtns}
             <button class="btn-outline" ${enabled && configured && !busy ? `onclick="restartProject('${p.id}')"` : 'disabled'}>重启</button>
@@ -1532,9 +1719,62 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         return a.label.localeCompare(b.label, 'zh-CN');
       });
       grid.innerHTML = groupList.map(g => {
-        const heading = `<div class="group-heading"><span>${escapeHtml(g.label)}</span><span class="count">${g.projects.length} 个项目</span></div>`;
+        let groupActionBtns = '';
+        if (g.key !== '__ungrouped__') {
+          groupActionBtns = `
+            <div class="group-actions">
+              <button class="btn-outline" onclick="startGroup('${escapeHtml(g.key)}')">启动本组</button>
+              <button class="btn-outline" onclick="stopGroup('${escapeHtml(g.key)}')">停止本组</button>
+            </div>
+          `;
+        }
+        const heading = `<div class="group-heading"><span>${escapeHtml(g.label)}</span><span class="count">${g.projects.length} 个项目</span>${groupActionBtns}</div>`;
         return heading + g.projects.map(renderProjectCard).join('');
       }).join('');
+    }
+
+    async function startGroup(key) {
+      if (!confirm(`确定启动分组【${key}】下的所有项目？`)) return;
+      try {
+        await postJson(`/api/groups/${encodeURIComponent(key)}/start`);
+      } catch (e) {
+        alert('启动分组失败：' + e.message);
+      } finally {
+        fetchProjects();
+      }
+    }
+
+    async function stopGroup(key) {
+      if (!confirm(`确定停止分组【${key}】下的所有项目？`)) return;
+      try {
+        await postJson(`/api/groups/${encodeURIComponent(key)}/stop`);
+      } catch (e) {
+        alert('停止分组失败：' + e.message);
+      } finally {
+        fetchProjects();
+      }
+    }
+
+    async function startAllProjects() {
+      if (!confirm('确定启动所有未运行的已配置项目？')) return;
+      try {
+        await postJson('/api/projects/start-all');
+      } catch (e) {
+        alert('全部启动失败：' + e.message);
+      } finally {
+        fetchProjects();
+      }
+    }
+
+    async function stopAllProjects() {
+      if (!confirm('确定停止所有正在运行的项目？')) return;
+      try {
+        await postJson('/api/projects/stop-all');
+      } catch (e) {
+        alert('停止全部失败：' + e.message);
+      } finally {
+        fetchProjects();
+      }
     }
 
     async function openProjectDir(id) {
@@ -1672,6 +1912,13 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       document.getElementById('editLinks').value = '';
       document.getElementById('editDefaultProfile').value = '';
       document.getElementById('editProfiles').value = '';
+      document.getElementById('editDependsOn').value = '';
+      document.getElementById('editPty').checked = false;
+      document.getElementById('editPortMode').value = 'none';
+      document.getElementById('editPortArg').value = '';
+      document.getElementById('editPortEnv').value = '';
+      document.getElementById('editEnv').value = '';
+      document.getElementById('editAutoAnswers').value = '';
       document.getElementById('addPort').value = '8080';
       renderGroupDatalist();
       document.getElementById('addModal').style.display = 'flex';
@@ -1687,9 +1934,16 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         for (const [key, field] of Object.entries({Health: 'health_url', LogDir: 'log_dir', Log: 'log_file', Timeout: 'start_timeout_secs', Grace: 'stop_grace_secs', Reason: 'reason'})) document.getElementById('edit' + key).value = editingProject[field] ?? '';
         document.getElementById('editEnabled').checked = editingProject.enabled;
         document.getElementById('editAutoInstall').checked = editingProject.auto_install;
+        document.getElementById('editPty').checked = Boolean(editingProject.pty);
+        document.getElementById('editPortMode').value = editingProject.port_mode || 'none';
+        document.getElementById('editPortArg').value = editingProject.port_arg || '';
+        document.getElementById('editPortEnv').value = editingProject.port_env || '';
+        document.getElementById('editEnv').value = formatEnvLines(editingProject.env);
+        document.getElementById('editAutoAnswers').value = formatAutoAnswersLines(editingProject.auto_answers);
         document.getElementById('editLinks').value = formatLinksLines(editingProject.links);
         document.getElementById('editDefaultProfile').value = editingProject.default_profile || '';
         document.getElementById('editProfiles').value = formatProfilesLines(editingProject.profiles);
+        document.getElementById('editDependsOn').value = (editingProject.depends_on || []).join(', ');
         const fields = {Id: 'id', Name: 'name', Group: 'group', Root: 'root', Start: 'start', Stop: 'stop', Port: 'port', Url: 'login_url', Node: 'node', Java: 'java'};
         for (const [key, field] of Object.entries(fields)) document.getElementById('add' + key).value = editingProject[field] ?? '';
         if (editingProject.group) {
@@ -1700,10 +1954,6 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         document.getElementById('addStop').disabled = !editingProject.stop_editable;
         document.getElementById('projectFormTitle').textContent = '项目设置';
       } catch (e) { alert('读取设置失败：' + e.message); }
-    }
-    function restartProject(id) {
-      const prof = getSelectedProfile(id);
-      return runAction(id, '重启中…', 'restart', '重启失败', prof ? { profile: prof } : undefined);
     }
     function closeAddModal() {
       document.getElementById('addModal').style.display = 'none';
@@ -1731,17 +1981,31 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
 
       let links = [];
       let profiles = {};
+      let env = {};
+      let autoAnswers = [];
+      let dependsOn = [];
       const linksText = document.getElementById('editLinks').value;
       const defaultProfile = document.getElementById('editDefaultProfile').value.trim();
       const profilesText = document.getElementById('editProfiles').value;
+      const rawDeps = document.getElementById('editDependsOn').value.trim();
+      if (rawDeps) {
+        dependsOn = rawDeps.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+      }
 
       try {
         links = parseLinksLines(linksText);
         profiles = parseProfilesLines(profilesText);
+        env = parseEnvLines(document.getElementById('editEnv').value);
+        autoAnswers = parseAutoAnswersLines(document.getElementById('editAutoAnswers').value);
       } catch (err) {
         alert(err.message);
         return;
       }
+
+      const pty = document.getElementById('editPty').checked;
+      const portMode = document.getElementById('editPortMode').value;
+      const portArg = document.getElementById('editPortArg').value.trim();
+      const portEnv = document.getElementById('editPortEnv').value.trim();
 
       if (defaultProfile && Object.keys(profiles).length > 0 && !profiles[defaultProfile]) {
         alert(`默认环境 "${defaultProfile}" 不在配置的环境列表 profiles 中`);
@@ -1783,6 +2047,12 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
           payload.group = group;
           payload.enabled = document.getElementById('editEnabled').checked;
           payload.auto_install = document.getElementById('editAutoInstall').checked;
+          payload.pty = pty;
+          payload.port_mode = portMode;
+          payload.port_arg = portMode === 'arg' ? (portArg || '--port') : null;
+          payload.port_env = portMode === 'env' ? (portEnv || 'PORT') : null;
+          payload.env = env;
+          payload.auto_answers = autoAnswers;
           payload.reason = document.getElementById('editReason').value.trim();
           payload.health_url = document.getElementById('editHealth').value.trim();
           payload.log_dir = document.getElementById('editLogDir').value.trim();
@@ -1802,12 +2072,20 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
           payload.links = links;
           payload.default_profile = defaultProfile || null;
           payload.profiles = profiles;
+          payload.depends_on = dependsOn;
           if (!editingProject.start_editable) delete payload.start;
           if (!editingProject.stop_editable) delete payload.stop;
         } else {
+          if (pty) payload.pty = true;
+          if (portMode && portMode !== 'none') payload.port_mode = portMode;
+          if (portArg) payload.port_arg = portArg;
+          if (portEnv) payload.port_env = portEnv;
+          if (Object.keys(env).length) payload.env = env;
+          if (autoAnswers.length) payload.auto_answers = autoAnswers;
           if (links.length) payload.links = links;
           if (defaultProfile) payload.default_profile = defaultProfile;
           if (Object.keys(profiles).length) payload.profiles = profiles;
+          if (dependsOn.length) payload.depends_on = dependsOn;
         }
         await postJson(editingProject ? `/api/projects/${editingProject.id}` : '/api/projects', {
           method: editingProject ? 'PATCH' : 'POST',
@@ -1912,6 +2190,10 @@ mod tests {
         assert!(UI_HTML.contains("openTerminal"));
         assert!(UI_HTML.contains("editLinks"));
         assert!(UI_HTML.contains("editProfiles"));
+        assert!(UI_HTML.contains("editPty"));
+        assert!(UI_HTML.contains("editPortMode"));
+        assert!(UI_HTML.contains("editEnv"));
+        assert!(UI_HTML.contains("editAutoAnswers"));
     }
 
     #[test]
@@ -1921,5 +2203,20 @@ mod tests {
         assert!(UI_HTML.contains("没有匹配的项目"));
         assert!(UI_HTML.contains("--ty-matcha"));
         assert!(!UI_HTML.contains("#0b0f19"));
+        assert!(UI_HTML.contains("startGroup"));
+        assert!(UI_HTML.contains("stopGroup"));
+        assert!(UI_HTML.contains("stopAllProjects"));
+        assert!(UI_HTML.contains("stopAllBtn"));
+        assert!(UI_HTML.contains("group-actions"));
+    }
+
+    #[test]
+    fn tests_group_route_and_url_decode() {
+        assert_eq!(group_route("/api/groups/demo/start", "start"), Some("demo"));
+        assert_eq!(group_route("/api/groups/demo/stop", "stop"), Some("demo"));
+        assert_eq!(group_route("/api/groups/demo/start", "stop"), None);
+        assert_eq!(group_route("/api/groups/demo", ""), Some("demo"));
+        assert_eq!(url_decode("hello%20world"), "hello world");
+        assert_eq!(url_decode("%E5%90%8E%E7%AB%AF"), "后端");
     }
 }

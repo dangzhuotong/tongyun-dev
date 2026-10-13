@@ -40,6 +40,7 @@ export type Project = {
   links?: WebLink[];
   default_profile?: string | null;
   profiles?: Record<string, ProfileConfig>;
+  depends_on?: string[];
   /** 这一条解析失败（例如 log_dir 展不开）。列表里的其他项目仍然显示。 */
   resolve_error?: string | null;
 };
@@ -57,6 +58,7 @@ export type GroupInfo = {
   key: string;
   label: string;
   order: number | null;
+  depends_on?: string[];
 };
 
 export type ProjectList = {
@@ -139,6 +141,7 @@ export type ProjectDetail = {
   links?: WebLink[];
   default_profile?: string | null;
   profiles?: Record<string, ProfileConfig>;
+  depends_on?: string[];
 };
 
 export type NewProjectReq = {
@@ -171,6 +174,7 @@ export type NewProjectReq = {
   links?: WebLink[];
   default_profile?: string | null;
   profiles?: Record<string, ProfileConfig>;
+  depends_on?: string[];
 };
 
 export type ProjectEditReq = {
@@ -200,6 +204,7 @@ export type ProjectEditReq = {
   links?: WebLink[];
   default_profile?: string | null;
   profiles?: Record<string, ProfileConfig>;
+  depends_on?: string[];
 };
 
 export type Confidence = "high" | "medium" | "low";
@@ -238,3 +243,19 @@ export type ImportReport = {
   added: ProjectRow[];
   skipped: { id: string; reason: string }[];
 };
+
+export type BatchItemResult = {
+  id: string;
+  success: boolean;
+  ok: boolean;
+  message: string;
+  elapsed_secs: number;
+};
+
+export type BatchOutput = {
+  total: number;
+  succeeded: number;
+  failed: number;
+  items: BatchItemResult[];
+};
+

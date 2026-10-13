@@ -1,8 +1,8 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tongyun_dev_core::{
-    ImportReport, LogTail, NewProject, ProjectDetail, ProjectEdit, ProjectList, ProjectRow,
-    ScanReport, StatusJson,
+    BatchOutput, ImportReport, LogTail, NewProject, ProjectDetail, ProjectEdit, ProjectList,
+    ProjectRow, ScanReport, StatusJson,
 };
 
 fn report(err: impl std::fmt::Display) -> String {
@@ -75,6 +75,48 @@ async fn restart_project(id: String, profile: Option<String>) -> Result<StatusJs
         let loaded = tongyun_dev_core::load(None).map_err(report)?;
         loaded
             .restart_detached_with_profile(&id, profile.as_deref())
+            .map_err(report)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn start_batch(
+    group: Option<String>,
+    ids: Option<Vec<String>>,
+) -> Result<BatchOutput, String> {
+    blocking(move || {
+        let loaded = tongyun_dev_core::load(None).map_err(report)?;
+        loaded
+            .start_batch_detached(group.as_deref(), ids.as_deref())
+            .map_err(report)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn stop_batch(
+    group: Option<String>,
+    ids: Option<Vec<String>>,
+) -> Result<BatchOutput, String> {
+    blocking(move || {
+        let loaded = tongyun_dev_core::load(None).map_err(report)?;
+        loaded
+            .stop_batch(group.as_deref(), ids.as_deref())
+            .map_err(report)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn restart_batch(
+    group: Option<String>,
+    ids: Option<Vec<String>>,
+) -> Result<BatchOutput, String> {
+    blocking(move || {
+        let loaded = tongyun_dev_core::load(None).map_err(report)?;
+        loaded
+            .restart_batch_detached(group.as_deref(), ids.as_deref())
             .map_err(report)
     })
     .await
@@ -389,7 +431,10 @@ pub fn run() {
             set_project_group,
             send_input,
             open_terminal,
-            open_pages
+            open_pages,
+            start_batch,
+            stop_batch,
+            restart_batch
         ])
         .build(tauri::generate_context!())
         .expect("error while building tongyun-dev")

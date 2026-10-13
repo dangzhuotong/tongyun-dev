@@ -33,10 +33,10 @@ cargo run -p tongyun-dev-cli -- remove demo_web
 - `tongyun-dev scan <dir> [--depth N] [--apply] [--json]`：扫描目录，识别项目并可选写入配置
 - `tongyun-dev list [--json] [--with-groups]`：列出所有已登记项目；`--json` 输出项目数组 `[...]`，搭配 `--with-groups` 输出 `{"projects":[...],"groups":[{key,label,order}]}`
 - `tongyun-dev status [id] [--json]`：查看项目状态（不带 id 为全部项目，返回当前生命周期、端口与 active_profile）
-- `tongyun-dev start <id> [--profile 名] [--open]`：启动项目（可选指定环境预设）并等待端口连通/探针就绪；`--open` 就绪后用浏览器打开
-- `tongyun-dev restart <id> [--profile 名] [--open]`：停止并使用指定或默认环境重新启动项目
+- `tongyun-dev start [<id>] [--all] [--group 组名] [--profile 名] [--open] [--json]`：启动项目（支持批量 `--all` 或 `--group`，自动按依赖拓扑顺序启动）并等待端口连通/探针就绪；`--open` 就绪后用浏览器打开
+- `tongyun-dev restart [<id>] [--all] [--group 组名] [--profile 名] [--open] [--json]`：停止并重新启动项目或分组（按依赖拓扑顺序）
 - `tongyun-dev terminal <id> [--profile 名]`：在系统原生终端窗口中打开并执行项目的启动命令或测试调试
-- `tongyun-dev stop <id>`：停止项目
+- `tongyun-dev stop [<id>] [--all] [--group 组名] [--json]`：停止项目（支持批量 `--all` 或 `--group`，自动按逆依赖拓扑顺序停止）
 - `tongyun-dev logs <id> [--follow] [--lines N]`：查看或跟随日志输出
 - `tongyun-dev open <id> [--dir] [--all]`：用浏览器打开项目页面，`--all` 打开所有配置链接，`--dir` 打开项目根目录
 - `tongyun-dev install <id>`：手动触发依赖安装（按锁文件选用 pnpm / yarn / npm）
@@ -201,6 +201,7 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 | `env` | 可选。额外环境变量键值对（例如 `env = { CI = "1", APP_ENV = "dev" }`），注入启动和依赖安装环境，用户显式配置的值优先 |
 | `pty` | 可选（缺省 `false`）。Unix 上是否用 openpty relay 在伪终端中运行后台进程（macOS 与 Linux 同一路径，不用系统 `script`）。Windows 忽略该字段 |
 | `auto_answers` | 可选。自动应答规则数组（例如 `[{ expect = "Select environment", send = "dev" }]`），启动时匹配日志输出并自动向标准输入发送内容 |
+| `depends_on` | 可选。服务依赖项目 ID 列表（例如 `["demo_db", "demo_redis"]`），启动单项或批量时拓扑排序先启动依赖项，批量停止时逆序停止；包含环路检测与依赖失败跳过 |
 | `log_dir` / `log_file` / `pid_file` | 可省略。未写项目级 `log_dir` 时用顶层 `log_dir`，再省略则日志与 PID 为 `~/.tongyun-dev/logs/<id>.out` 和 `.pid`。`log_dir` 可以是绝对路径、`~` / `$HOME`、`{{root}}` / `{{tomcat}}`，或相对项目根的路径（如 `logs`；相对路径不能含 `..`，`/` 和 `\` 都算分隔符）。某一项 `log_dir` 展不开时，列表仍返回其余项目，该项带 `resolve_error`，桌面主窗口不会停在「正在读取…」。`tongyun-dev status`（不带 id）同样逐项继续，并在有失败项时以非 0 退出 |
 
 ### 分组配置 `[group.<key>]`

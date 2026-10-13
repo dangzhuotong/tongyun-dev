@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ConfigInfo, LogTail, ProjectDetail, ProjectList, Status } from "./types";
+import type { BatchOutput, ConfigInfo, LogTail, ProjectDetail, ProjectList, Status } from "./types";
 import { LogPanel } from "./LogPanel";
 import { stateShortLabel } from "./logFormat";
 import { ProjectForm } from "./ProjectForm";
@@ -194,32 +194,36 @@ export function App() {
     loadProjects();
   }, [loadProjects]);
 
+  const refreshAllStatuses = useCallback(async () => {
+    try {
+      const list = await invoke<Status[]>("all_status");
+      setAllStatuses((prev) => {
+        const next = { ...prev };
+        for (const s of list) {
+          next[s.id] = s;
+        }
+        return next;
+      });
+    } catch {
+      // periodic status poll errors are ignored
+    }
+  }, []);
+
   // Periodic poll of all project statuses every 3 seconds
   useEffect(() => {
     let cancelled = false;
-    const fetchAll = async () => {
-      try {
-        const list = await invoke<Status[]>("all_status");
-        if (!cancelled) {
-          setAllStatuses((prev) => {
-            const next = { ...prev };
-            for (const s of list) {
-              next[s.id] = s;
-            }
-            return next;
-          });
-        }
-      } catch {
-        // periodic status poll errors are ignored
+    const poll = async () => {
+      if (!cancelled) {
+        await refreshAllStatuses();
       }
     };
-    fetchAll();
-    const timer = window.setInterval(fetchAll, 3000);
+    poll();
+    const timer = window.setInterval(poll, 3000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [refreshAllStatuses]);
 
   // Poll selected project status and log every 1 second
   useEffect(() => {
@@ -437,6 +441,60 @@ export function App() {
       setError(String(err));
     } finally {
       await refresh(selected).catch(() => undefined);
+      setBusy("");
+    }
+  }
+
+  async function handleStartBatch(groupKey?: string) {
+    if (busyRef.current) return;
+    setBusy("start");
+    setError("");
+    try {
+      const res = await invoke<BatchOutput>("start_batch", {
+        group: groupKey || undefined,
+        ids: undefined,
+      });
+      if (res.failed > 0) {
+        const failedMsgs = res.items
+          .filter((i) => !i.success && !i.ok)
+          .map((i) => `${i.id}: ${i.message}`)
+          .join("; ");
+        setError(`批量启动部分失败 (${res.succeeded}/${res.total}): ${failedMsgs}`);
+      }
+    } catch (err: unknown) {
+      setError(String(err));
+    } finally {
+      await refreshAllStatuses();
+      if (selected) {
+        await refresh(selected).catch(() => undefined);
+      }
+      setBusy("");
+    }
+  }
+
+  async function handleStopBatch(groupKey?: string) {
+    if (busyRef.current) return;
+    setBusy("stop");
+    setError("");
+    try {
+      const res = await invoke<BatchOutput>("stop_batch", {
+        group: groupKey || undefined,
+        ids: undefined,
+      });
+      if (res.failed > 0) {
+        const failedMsgs = res.items
+          .filter((i) => !i.success && !i.ok)
+          .map((i) => `${i.id}: ${i.message}`)
+          .join("; ");
+        setError(`批量停止部分失败 (${res.succeeded}/${res.total}): ${failedMsgs}`);
+      }
+    } catch (err: unknown) {
+      setError(String(err));
+    } finally {
+      await refreshAllStatuses();
+      if (selected) {
+        await refresh(selected).catch(() => undefined);
+      }
       setBusy("");
     }
   }
@@ -752,14 +810,34 @@ export function App() {
         {projects && !missingConfig && (
           <div className="sidebar-group-toolbar">
             <span className="sidebar-group-toolbar-title">项目列表</span>
-            <button
-              type="button"
-              className="btn btn-ghost btn-xs btn-new-group"
-              onClick={() => setCreateGroupOpen((prev) => !prev)}
-              title="新建分组"
-            >
-              <PlusIcon /> 新建分组
-            </button>
+            <div className="sidebar-group-toolbar-actions">
+              <button
+                type="button"
+                className="btn btn-ghost btn-xs"
+                onClick={() => handleStartBatch()}
+                disabled={busy !== ""}
+                title="启动全部项目（遵循服务依赖顺序）"
+              >
+                全启
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost btn-xs"
+                onClick={() => handleStopBatch()}
+                disabled={busy !== ""}
+                title="停止全部项目（逆依赖顺序）"
+              >
+                全停
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost btn-xs btn-new-group"
+                onClick={() => setCreateGroupOpen((prev) => !prev)}
+                title="新建分组"
+              >
+                <PlusIcon /> 新建分组
+              </button>
+            </div>
           </div>
         )}
 
@@ -872,6 +950,32 @@ export function App() {
                           运行中 {section.runningCount} / 共 {section.totalCount}
                         </span>
                       </button>
+                      <div className="group-header-actions">
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-xs"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleStartBatch(section.isUngrouped ? undefined : section.key);
+                          }}
+                          disabled={busy !== ""}
+                          title={`启动组内全部项目 (${section.label})`}
+                        >
+                          启动
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-xs"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleStopBatch(section.isUngrouped ? undefined : section.key);
+                          }}
+                          disabled={busy !== ""}
+                          title={`停止组内全部项目 (${section.label})`}
+                        >
+                          停止
+                        </button>
+                      </div>
                     </div>
                     {!collapsed &&
                       (section.visibleProjects.length === 0 ? (
@@ -1061,6 +1165,11 @@ export function App() {
                       {t}
                     </span>
                   ))}
+                  {current.depends_on && current.depends_on.length > 0 && (
+                    <span className="tool-tag depends-on-tag" title={`依赖服务：${current.depends_on.join(", ")}`}>
+                      依赖: {current.depends_on.join(", ")}
+                    </span>
+                  )}
                   <span className="path" title={status?.root ?? current.root}>
                     <FolderIcon />
                     {status?.root ?? current.root}

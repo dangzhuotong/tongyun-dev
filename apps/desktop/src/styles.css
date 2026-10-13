@@ -480,6 +480,12 @@ svg {
   letter-spacing: 0.02em;
 }
 
+.sidebar-group-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .btn-new-group {
   display: inline-flex;
   align-items: center;
@@ -550,6 +556,9 @@ svg {
 }
 
 .group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   padding: 2px 6px;
   margin: 0 6px;
   border-radius: var(--ty-radius-xs);
@@ -566,7 +575,8 @@ svg {
 .group-header-btn {
   display: flex;
   align-items: center;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   border: none;
   background: transparent;
   padding: 6px 6px;
@@ -582,6 +592,18 @@ svg {
 
 .group-header-btn:hover {
   background: var(--ty-surface-raised);
+}
+
+.group-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0.7;
+  transition: opacity 0.15s;
+}
+
+.group-header:hover .group-header-actions {
+  opacity: 1;
 }
 
 .group-chevron {
@@ -750,6 +772,12 @@ li[draggable]:active {
   color: var(--ty-text-muted);
   font-size: var(--ty-font-size-xs);
   font-weight: 500;
+}
+
+.depends-on-tag {
+  background: var(--ty-honey-tint);
+  color: var(--ty-honey);
+  border: 1px solid rgba(217, 119, 6, 0.2);
 }
 
 .project-item.active .tool-tag {

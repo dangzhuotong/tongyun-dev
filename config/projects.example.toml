@@ -40,6 +40,7 @@ port_mode = "arg"
 background = true
 node = "20"
 health_url = "http://127.0.0.1:5173/"
+depends_on = ["demo_api"]
 start = ["bash", "-c", "exec pnpm dev --host 127.0.0.1"]
 links = [
   { title = "前端主页", url = "http://127.0.0.1:5173/" },

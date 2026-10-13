@@ -51,6 +51,10 @@ pub struct GroupConfig {
     pub label: Option<String>,
     #[serde(default)]
     pub order: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -166,6 +170,9 @@ struct Project {
     /// 启动环境预设表（可选）。
     #[serde(default)]
     pub profiles: std::collections::BTreeMap<String, ProfileConfig>,
+    /// 依赖服务项目 ID 列表（可选）。
+    #[serde(default)]
+    pub depends_on: Vec<String>,
 }
 
 struct Vars {
@@ -209,6 +216,7 @@ struct Resolved {
     pub pty: bool,
     pub auto_answers: Vec<AutoAnswer>,
     pub links: Vec<WebLink>,
+    pub depends_on: Vec<String>,
 }
 
 impl Resolved {
@@ -300,6 +308,8 @@ pub struct ProjectRow {
     pub default_profile: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub profiles: std::collections::BTreeMap<String, ProfileConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
     /// Set when this row could not be resolved (for example a bad `log_dir`).
     /// The rest of the catalog still loads, so the main window can open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -311,6 +321,8 @@ pub struct GroupInfo {
     pub key: String,
     pub label: String,
     pub order: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -452,6 +464,26 @@ pub struct StatusJson {
     pub resolve_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct BatchItemResult {
+    pub id: String,
+    pub success: bool,
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<StatusJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct BatchOutput {
+    pub total: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub results: Vec<BatchItemResult>,
+}
+
 /// Status row for a project `list` could not resolve. Other projects are unaffected.
 pub fn unresolved_status(row: &ProjectRow, failure: impl Into<String>) -> StatusJson {
     StatusJson {
@@ -533,6 +565,7 @@ fn row_from_resolved(
         links: resolved.links.clone(),
         default_profile,
         profiles,
+        depends_on: resolved.depends_on.clone(),
         resolve_error: None,
     }
 }
@@ -579,6 +612,7 @@ fn unresolved_row(id: &str, raw: Option<&Project>, err: String) -> ProjectRow {
         links: raw.map(|p| p.links.clone()).unwrap_or_default(),
         default_profile: raw.and_then(|p| p.default_profile.clone()),
         profiles: raw.map(|p| p.profiles.clone()).unwrap_or_default(),
+        depends_on: raw.map(|p| p.depends_on.clone()).unwrap_or_default(),
         resolve_error: Some(err),
     }
 }
@@ -635,6 +669,7 @@ impl Loaded {
                     key: key.clone(),
                     label,
                     order: cfg.order,
+                    depends_on: cfg.depends_on.clone(),
                 },
             );
         }
@@ -647,6 +682,7 @@ impl Loaded {
                         key: k.to_string(),
                         label: k.to_string(),
                         order: None,
+                        depends_on: Vec::new(),
                     },
                 );
             }
@@ -664,6 +700,178 @@ impl Loaded {
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => a.label.cmp(&b.label).then_with(|| a.key.cmp(&b.key)),
         });
+        list
+    }
+
+    /// Return project IDs that belong to the specified group (either via project.group or group.members).
+    pub fn projects_in_group(&self, group_key: &str) -> Vec<String> {
+        let key_trim = group_key.trim();
+        let mut ids = Vec::new();
+        if let Some(cfg) = self.config.group.get(key_trim) {
+            for m in &cfg.members {
+                if self.config.projects.contains_key(m) && !ids.contains(m) {
+                    ids.push(m.clone());
+                }
+            }
+        }
+        for (id, p) in &self.config.projects {
+            if p.group.trim() == key_trim && !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+        ids
+    }
+
+    /// Return group keys sorted by dependency order (dependencies first), then by order and label.
+    pub fn group_start_order(&self) -> Vec<String> {
+        let groups = self.groups();
+        let mut in_degrees: HashMap<String, usize> = HashMap::new();
+        let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+
+        for g in &groups {
+            in_degrees.entry(g.key.clone()).or_insert(0);
+            adj.entry(g.key.clone()).or_default();
+        }
+
+        for (key, cfg) in &self.config.group {
+            for dep in &cfg.depends_on {
+                if adj.contains_key(dep) && adj.contains_key(key) {
+                    adj.get_mut(dep).unwrap().push(key.clone());
+                    *in_degrees.get_mut(key).unwrap() += 1;
+                }
+            }
+        }
+
+        let mut ready: Vec<GroupInfo> = groups
+            .iter()
+            .filter(|g| in_degrees.get(&g.key).copied().unwrap_or(0) == 0)
+            .cloned()
+            .collect();
+
+        let mut order = Vec::new();
+        while !ready.is_empty() {
+            ready.sort_by(|a, b| match (a.order, b.order) {
+                (Some(oa), Some(ob)) => {
+                    if oa != ob {
+                        oa.cmp(&ob)
+                    } else {
+                        a.label.cmp(&b.label).then_with(|| a.key.cmp(&b.key))
+                    }
+                }
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a.label.cmp(&b.label).then_with(|| a.key.cmp(&b.key)),
+            });
+            let next = ready.remove(0);
+            order.push(next.key.clone());
+            if let Some(neighbors) = adj.get(&next.key) {
+                for n in neighbors {
+                    if let Some(deg) = in_degrees.get_mut(n) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            if let Some(info) = groups.iter().find(|g| &g.key == n) {
+                                ready.push(info.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for g in &groups {
+            if !order.contains(&g.key) {
+                order.push(g.key.clone());
+            }
+        }
+        order
+    }
+
+    /// Sort project IDs for startup according to project dependency ordering, group dependency ordering and group order.
+    pub fn sorted_projects_for_start<'a>(&self, ids: &[&'a str]) -> Vec<String> {
+        let group_order = self.group_start_order();
+        let mut group_rank: HashMap<&str, usize> = HashMap::new();
+        for (idx, g) in group_order.iter().enumerate() {
+            group_rank.insert(g.as_str(), idx);
+        }
+
+        let mut in_degrees: HashMap<&'a str, usize> = HashMap::new();
+        let mut adj: HashMap<&'a str, Vec<&'a str>> = HashMap::new();
+
+        for &id in ids {
+            in_degrees.insert(id, 0);
+            adj.insert(id, Vec::new());
+        }
+
+        // 1. Direct project dependencies: dep -> id (dep starts before id)
+        for &id in ids {
+            if let Some(p) = self.config.projects.get(id) {
+                for dep in &p.depends_on {
+                    if let Some(&dep_in_ids) = ids.iter().find(|&&i| i == dep.as_str()) {
+                        if let Some(neighbors) = adj.get_mut(dep_in_ids) {
+                            if !neighbors.contains(&id) {
+                                neighbors.push(id);
+                                if let Some(deg) = in_degrees.get_mut(id) {
+                                    *deg += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Ready queue with in_degree == 0
+        let mut ready: Vec<&'a str> = ids
+            .iter()
+            .copied()
+            .filter(|&id| in_degrees.get(id).copied().unwrap_or(0) == 0)
+            .collect();
+
+        let mut order = Vec::new();
+        while !ready.is_empty() {
+            ready.sort_by(|&a, &b| {
+                let pa = self.config.projects.get(a);
+                let pb = self.config.projects.get(b);
+                let ga = pa.map(|p| p.group.trim()).unwrap_or("");
+                let gb = pb.map(|p| p.group.trim()).unwrap_or("");
+                let ra = group_rank.get(ga).copied().unwrap_or(usize::MAX);
+                let rb = group_rank.get(gb).copied().unwrap_or(usize::MAX);
+                if ra != rb {
+                    ra.cmp(&rb)
+                } else {
+                    let na = pa.map(|p| p.name.as_str()).unwrap_or(a);
+                    let nb = pb.map(|p| p.name.as_str()).unwrap_or(b);
+                    na.cmp(nb).then_with(|| a.cmp(b))
+                }
+            });
+            let next = ready.remove(0);
+            order.push(next.to_string());
+            if let Some(neighbors) = adj.get(next) {
+                for &n in neighbors {
+                    if let Some(deg) = in_degrees.get_mut(n) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            ready.push(n);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback for cycles or any disconnected
+        for &id in ids {
+            if !order.contains(&id.to_string()) {
+                order.push(id.to_string());
+            }
+        }
+
+        order
+    }
+
+    /// Sort project IDs for shutdown in reverse of startup dependency ordering.
+    pub fn sorted_projects_for_stop<'a>(&self, ids: &[&'a str]) -> Vec<String> {
+        let mut list = self.sorted_projects_for_start(ids);
+        list.reverse();
         list
     }
 }
@@ -793,7 +1001,7 @@ impl Loaded {
 
         let filtered_lines: Vec<&str> = new_text
             .lines()
-            .filter(|line| !line.starts_with("› "))
+            .filter(|line| !line.starts_with("› ["))
             .collect();
         if filtered_lines.is_empty() {
             if let Ok(json) = serde_json::to_string(&state) {
@@ -907,6 +1115,24 @@ impl Loaded {
             };
             bail!("project `{}` is disabled: {why}", project.id);
         }
+
+        if !project.depends_on.is_empty() {
+            for dep_id in &project.depends_on {
+                let dep_proj = self
+                    .config
+                    .projects
+                    .get(dep_id)
+                    .with_context(|| format!("项目 `{id}` 的依赖项 `{dep_id}` 不存在"))?;
+                if !dep_proj.enabled {
+                    bail!("项目 `{id}` 的依赖项 `{dep_id}` 已停用，无法启动");
+                }
+                let st = self.status(dep_id)?;
+                if !matches!(st.state, LifeState::Ready | LifeState::PortOpen) {
+                    let _ = self.start_detached_with_profile(dep_id, None)?;
+                }
+            }
+        }
+
         // Do not reinstall dependencies or replace markers for an existing process.
         if !tracked_pids(&project).is_empty() {
             return self.status(id);
@@ -985,9 +1211,52 @@ impl Loaded {
         profile_name: Option<&str>,
         timeout: Option<Duration>,
     ) -> Result<StatusJson> {
+        let mut visited = Vec::new();
+        self.start_with_profile_internal(id, profile_name, timeout, &mut visited)
+    }
+
+    fn start_with_profile_internal(
+        &self,
+        id: &str,
+        profile_name: Option<&str>,
+        timeout: Option<Duration>,
+        visited: &mut Vec<String>,
+    ) -> Result<StatusJson> {
+        if visited.iter().any(|v| v == id) {
+            visited.push(id.to_string());
+            bail!("检测到循环依赖: {}", visited.join(" -> "));
+        }
+        visited.push(id.to_string());
+
+        let p = self
+            .config
+            .projects
+            .get(id)
+            .with_context(|| format!("unknown project id `{id}`; try `tongyun-dev list`"))?;
+
+        if !p.depends_on.is_empty() {
+            for dep_id in &p.depends_on {
+                let dep_proj = self
+                    .config
+                    .projects
+                    .get(dep_id)
+                    .with_context(|| format!("项目 `{id}` 的依赖项 `{dep_id}` 不存在"))?;
+                if !dep_proj.enabled {
+                    bail!("项目 `{id}` 的依赖项 `{dep_id}` 已停用，无法启动");
+                }
+                let st = self.status(dep_id)?;
+                if !matches!(st.state, LifeState::Ready | LifeState::PortOpen) {
+                    self.start_with_profile_internal(dep_id, None, timeout, visited)
+                        .with_context(|| format!("启动项目 `{id}` 的依赖项 `{dep_id}` 失败"))?;
+                }
+            }
+        }
+
         let initial = self.start_detached_with_profile(id, profile_name)?;
         let budget = timeout.unwrap_or_else(|| Duration::from_secs(initial.timeout_secs));
-        self.finish_start(id, initial, budget)
+        let res = self.finish_start(id, initial, budget);
+        visited.pop();
+        res
     }
 
     fn finish_start(&self, id: &str, initial: StatusJson, budget: Duration) -> Result<StatusJson> {
@@ -1102,6 +1371,244 @@ impl Loaded {
         cmd_stop(&project)?;
         let peers = self.peer_pids(&project.id);
         Ok(status_of(&project, &peers))
+    }
+
+    /// 批量启动项目（阻塞等待就绪）
+    pub fn start_batch(
+        &self,
+        group: Option<&str>,
+        ids: Option<&[String]>,
+        timeout: Option<Duration>,
+    ) -> Result<BatchOutput> {
+        let candidate_ids: Vec<String> = if let Some(ids) = ids {
+            ids.iter()
+                .filter(|id| self.config.projects.contains_key(*id))
+                .cloned()
+                .collect()
+        } else if let Some(g) = group {
+            self.projects_in_group(g)
+        } else {
+            self.config.projects.keys().cloned().collect()
+        };
+
+        let mut to_run = Vec::new();
+        for id in &candidate_ids {
+            if let Ok(resolved) = self.resolve(id) {
+                let configured = resolved.port > 0
+                    && (!resolved.active_start().is_empty() || resolved.tomcat.is_some());
+                if resolved.enabled && configured {
+                    to_run.push(id.as_str());
+                }
+            }
+        }
+
+        let sorted = self.sorted_projects_for_start(&to_run);
+        let mut results = Vec::new();
+        let mut failed_ids = std::collections::HashSet::new();
+        let mut succeeded = 0;
+        let mut failed = 0;
+
+        for id in &sorted {
+            let p = match self.config.projects.get(id) {
+                Some(p) => p,
+                None => continue,
+            };
+            let has_failed_dep = p.depends_on.iter().any(|d| failed_ids.contains(d));
+            if has_failed_dep {
+                failed += 1;
+                failed_ids.insert(id.clone());
+                results.push(BatchItemResult {
+                    id: id.clone(),
+                    success: false,
+                    ok: false,
+                    status: self.status(id).ok(),
+                    error: Some("依赖服务启动失败，已跳过".to_string()),
+                });
+                continue;
+            }
+
+            match self.start_with_profile(id, None, timeout) {
+                Ok(st) => {
+                    succeeded += 1;
+                    results.push(BatchItemResult {
+                        id: id.clone(),
+                        success: true,
+                        ok: true,
+                        status: Some(st),
+                        error: None,
+                    });
+                }
+                Err(err) => {
+                    failed += 1;
+                    failed_ids.insert(id.clone());
+                    results.push(BatchItemResult {
+                        id: id.clone(),
+                        success: false,
+                        ok: false,
+                        status: self.status(id).ok(),
+                        error: Some(format!("{err:#}")),
+                    });
+                }
+            }
+        }
+
+        Ok(BatchOutput {
+            total: sorted.len(),
+            succeeded,
+            failed,
+            results,
+        })
+    }
+
+    /// 批量启动项目（后台脱离运行，立刻返回，供 GUI/网页端调用）
+    pub fn start_batch_detached(
+        &self,
+        group: Option<&str>,
+        ids: Option<&[String]>,
+    ) -> Result<BatchOutput> {
+        let candidate_ids: Vec<String> = if let Some(ids) = ids {
+            ids.iter()
+                .filter(|id| self.config.projects.contains_key(*id))
+                .cloned()
+                .collect()
+        } else if let Some(g) = group {
+            self.projects_in_group(g)
+        } else {
+            self.config.projects.keys().cloned().collect()
+        };
+
+        let mut to_run = Vec::new();
+        for id in &candidate_ids {
+            if let Ok(resolved) = self.resolve(id) {
+                let configured = resolved.port > 0
+                    && (!resolved.active_start().is_empty() || resolved.tomcat.is_some());
+                if resolved.enabled && configured {
+                    to_run.push(id.as_str());
+                }
+            }
+        }
+
+        let sorted = self.sorted_projects_for_start(&to_run);
+        let mut results = Vec::new();
+        let mut succeeded = 0;
+        let mut failed = 0;
+
+        for id in &sorted {
+            match self.start_detached_with_profile(id, None) {
+                Ok(st) => {
+                    succeeded += 1;
+                    results.push(BatchItemResult {
+                        id: id.clone(),
+                        success: true,
+                        ok: true,
+                        status: Some(st),
+                        error: None,
+                    });
+                }
+                Err(err) => {
+                    failed += 1;
+                    results.push(BatchItemResult {
+                        id: id.clone(),
+                        success: false,
+                        ok: false,
+                        status: self.status(id).ok(),
+                        error: Some(format!("{err:#}")),
+                    });
+                }
+            }
+        }
+
+        Ok(BatchOutput {
+            total: sorted.len(),
+            succeeded,
+            failed,
+            results,
+        })
+    }
+
+    /// 批量停止项目（按依赖逆序停止）
+    pub fn stop_batch(
+        &self,
+        group: Option<&str>,
+        ids: Option<&[String]>,
+    ) -> Result<BatchOutput> {
+        let candidate_ids: Vec<String> = if let Some(ids) = ids {
+            ids.iter()
+                .filter(|id| self.config.projects.contains_key(*id))
+                .cloned()
+                .collect()
+        } else if let Some(g) = group {
+            self.projects_in_group(g)
+        } else {
+            self.config.projects.keys().cloned().collect()
+        };
+
+        let mut to_run = Vec::new();
+        for id in &candidate_ids {
+            if let Ok(resolved) = self.resolve(id) {
+                if resolved.enabled {
+                    to_run.push(id.as_str());
+                }
+            }
+        }
+
+        let sorted = self.sorted_projects_for_stop(&to_run);
+        let mut results = Vec::new();
+        let mut succeeded = 0;
+        let mut failed = 0;
+
+        for id in &sorted {
+            match self.stop(id) {
+                Ok(st) => {
+                    succeeded += 1;
+                    results.push(BatchItemResult {
+                        id: id.clone(),
+                        success: true,
+                        ok: true,
+                        status: Some(st),
+                        error: None,
+                    });
+                }
+                Err(err) => {
+                    failed += 1;
+                    results.push(BatchItemResult {
+                        id: id.clone(),
+                        success: false,
+                        ok: false,
+                        status: self.status(id).ok(),
+                        error: Some(format!("{err:#}")),
+                    });
+                }
+            }
+        }
+
+        Ok(BatchOutput {
+            total: sorted.len(),
+            succeeded,
+            failed,
+            results,
+        })
+    }
+
+    /// 批量重启项目（先逆序全部停止，再正序启动）
+    pub fn restart_batch(
+        &self,
+        group: Option<&str>,
+        ids: Option<&[String]>,
+        timeout: Option<Duration>,
+    ) -> Result<BatchOutput> {
+        let _ = self.stop_batch(group, ids)?;
+        self.start_batch(group, ids, timeout)
+    }
+
+    /// 批量重启项目（后台脱离模式）
+    pub fn restart_batch_detached(
+        &self,
+        group: Option<&str>,
+        ids: Option<&[String]>,
+    ) -> Result<BatchOutput> {
+        let _ = self.stop_batch(group, ids)?;
+        self.start_batch_detached(group, ids)
     }
 
     /// 后台装前端依赖（按锁文件选 pnpm / yarn / npm），日志追加到项目日志，立刻返回（状态 installing）。
@@ -1903,6 +2410,7 @@ fn resolve_project_with_log_default(
         pty: p.pty,
         auto_answers: p.auto_answers.clone(),
         links: p.links.clone(),
+        depends_on: p.depends_on.clone(),
     })
 }
 
@@ -2004,7 +2512,94 @@ fn process_alive(pid: u32) -> bool {
 }
 
 #[cfg(windows)]
-fn ps_field(pid: u32, _field: &str) -> Option<String> {
+fn win_proc_info(target_pid: u32) -> (Option<String>, Option<u32>) {
+    use std::ffi::c_void;
+
+    type HANDLE = *mut c_void;
+    type BOOL = i32;
+    type DWORD = u32;
+
+    const INVALID_HANDLE_VALUE: HANDLE = -1isize as *mut c_void;
+    const TH32CS_SNAPPROCESS: DWORD = 0x00000002;
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct PROCESSENTRY32W {
+        dwSize: DWORD,
+        cntUsage: DWORD,
+        th32ProcessID: DWORD,
+        th32DefaultHeapID: usize,
+        th32ModuleID: DWORD,
+        cntThreads: DWORD,
+        th32ParentProcessID: DWORD,
+        pcPriClassBase: i32,
+        dwFlags: DWORD,
+        szExeFile: [u16; 260],
+    }
+
+    extern "system" {
+        fn CreateToolhelp32Snapshot(dwFlags: DWORD, th32ProcessID: DWORD) -> HANDLE;
+        fn Process32FirstW(hSnapshot: HANDLE, lppe: *mut PROCESSENTRY32W) -> BOOL;
+        fn Process32NextW(hSnapshot: HANDLE, lppe: *mut PROCESSENTRY32W) -> BOOL;
+        fn CloseHandle(hObject: HANDLE) -> BOOL;
+    }
+
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return (None, None);
+        }
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as DWORD,
+            cntUsage: 0,
+            th32ProcessID: 0,
+            th32DefaultHeapID: 0,
+            th32ModuleID: 0,
+            cntThreads: 0,
+            th32ParentProcessID: 0,
+            pcPriClassBase: 0,
+            dwFlags: 0,
+            szExeFile: [0; 260],
+        };
+        let mut found_name = None;
+        let mut found_parent = None;
+        if Process32FirstW(snapshot, &mut entry) != 0 {
+            loop {
+                if entry.th32ProcessID == target_pid {
+                    let len = entry
+                        .szExeFile
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(entry.szExeFile.len());
+                    let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+                    let trimmed = name.trim();
+                    if !trimmed.is_empty() {
+                        found_name = Some(trimmed.to_string());
+                    }
+                    if entry.th32ParentProcessID > 0 {
+                        found_parent = Some(entry.th32ParentProcessID);
+                    }
+                    break;
+                }
+                if Process32NextW(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snapshot);
+        (found_name, found_parent)
+    }
+}
+
+#[cfg(windows)]
+fn ps_field(pid: u32, field: &str) -> Option<String> {
+    let (name, parent) = win_proc_info(pid);
+    if field.starts_with("ppid") {
+        return parent.map(|p| p.to_string());
+    }
+    if let Some(n) = name {
+        return Some(n);
+    }
     let out = Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .stdin(Stdio::null())
@@ -2083,6 +2678,49 @@ fn is_server_process(pid: u32) -> bool {
     looks_like_server(&comm, &args)
 }
 
+#[cfg(windows)]
+fn listener_pids(port: u16) -> Vec<u32> {
+    if port == 0 {
+        return Vec::new();
+    }
+    let out = Command::new("netstat")
+        .args(["-ano"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut pids = Vec::new();
+    let port_suffix = format!(":{port}");
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 5
+            && parts[0].eq_ignore_ascii_case("TCP")
+            && parts[3].eq_ignore_ascii_case("LISTENING")
+        {
+            let local_addr = parts[1];
+            if local_addr.ends_with(&port_suffix) {
+                let local_port_str = local_addr.rsplit(':').next().unwrap_or("");
+                if let Ok(p) = local_port_str.parse::<u16>() {
+                    if p == port {
+                        if let Ok(pid) = parts[4].parse::<u32>() {
+                            if pid > 0 && !pids.contains(&pid) {
+                                pids.push(pid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pids.sort_unstable();
+    pids
+}
+
+#[cfg(not(windows))]
 fn listener_pids(port: u16) -> Vec<u32> {
     if port == 0 {
         return Vec::new();
@@ -2093,20 +2731,51 @@ fn listener_pids(port: u16) -> Vec<u32> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output();
-    let Ok(out) = out else {
-        return Vec::new();
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut pids = Vec::new();
-    for line in text.lines() {
-        if let Ok(pid) = line.trim().parse::<u32>() {
-            if pid > 1 && !pids.contains(&pid) {
-                pids.push(pid);
+    if let Ok(out) = out {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let mut pids = Vec::new();
+            for line in text.lines() {
+                if let Ok(pid) = line.trim().parse::<u32>() {
+                    if pid > 1 && !pids.contains(&pid) {
+                        pids.push(pid);
+                    }
+                }
+            }
+            if !pids.is_empty() {
+                pids.sort_unstable();
+                return pids;
             }
         }
     }
-    pids.sort_unstable();
-    pids
+    // Fallback to ss on Linux if lsof is absent or empty
+    let out_ss = Command::new("ss")
+        .args(["-H", "-t", "-l", "-n", "-p", &format!("sport = :{port}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+    if let Ok(out_ss) = out_ss {
+        let text = String::from_utf8_lossy(&out_ss.stdout);
+        let mut pids = Vec::new();
+        for line in text.lines() {
+            let mut rest = line;
+            while let Some(idx) = rest.find("pid=") {
+                rest = &rest[idx + 4..];
+                let pid_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    if pid > 1 && !pids.contains(&pid) {
+                        pids.push(pid);
+                    }
+                }
+            }
+        }
+        if !pids.is_empty() {
+            pids.sort_unstable();
+            return pids;
+        }
+    }
+    Vec::new()
 }
 
 fn server_pids(p: &Resolved) -> Vec<u32> {
@@ -2353,6 +3022,25 @@ pub fn write_start_marker(pid_file: &Path, marker: &StartMarker) -> Result<()> {
     Ok(())
 }
 
+fn legacy_pid_paths(p: &Resolved) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let root_logs = p.root.join("logs").join(format!("{}.pid", p.id));
+    if root_logs != p.pid_file {
+        candidates.push(root_logs);
+    }
+    if let Some(home) = current_home() {
+        let cfg_logs = home
+            .join(".config")
+            .join("tongyun-dev")
+            .join("logs")
+            .join(format!("{}.pid", p.id));
+        if cfg_logs != p.pid_file && !candidates.contains(&cfg_logs) {
+            candidates.push(cfg_logs);
+        }
+    }
+    candidates
+}
+
 fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
     let own = tracked_pids(p);
     let open = port_open(p.port);
@@ -2361,7 +3049,7 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
         .into_iter()
         .next()
         .or_else(|| read_pid(&p.pid_file).filter(|&pid| process_alive(pid)));
-    let process_alive = pid.is_some();
+    let is_alive = pid.is_some();
     let probe = if open && !port_conflict {
         login_probe(&p.login_url)
     } else {
@@ -2383,7 +3071,7 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
     let now = current_time_secs();
 
     let (mut state, mut failure) = derive_state(StateInput {
-        process_alive,
+        process_alive: is_alive,
         port_open: open,
         port_conflict,
         has_probe,
@@ -2398,7 +3086,7 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
     if let Some(h) = diagnose_start_command(&p.root, &p.start) {
         hints.push(h);
     }
-    let has_unknown_port_err = !process_alive && check_log_unknown_port_error(&p.log_file);
+    let has_unknown_port_err = !is_alive && check_log_unknown_port_error(&p.log_file);
     if has_unknown_port_err
         && (state == LifeState::Failed || state == LifeState::Starting || marker.is_some())
     {
@@ -2417,7 +3105,24 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
         }
     }
 
-    if state == LifeState::Stopped && !process_alive {
+    if !is_alive {
+        for legacy_path in legacy_pid_paths(p) {
+            if let Some(lpid) = read_pid(&legacy_path) {
+                if process_alive(lpid) {
+                    let hint = format!(
+                        "检测到旧版 PID 文件 ({}) 包含存活进程 PID {}。可使用 stop 停止，或设置 log_dir 沿用旧路径",
+                        path_to_string(&legacy_path),
+                        lpid
+                    );
+                    if !hints.contains(&hint) {
+                        hints.push(hint);
+                    }
+                }
+            }
+        }
+    }
+
+    if state == LifeState::Stopped && !is_alive {
         let _ = std::fs::remove_file(start_marker_path(&p.pid_file));
         let _ = std::fs::remove_file(profile_marker_path(&p.pid_file));
     }
@@ -4252,7 +4957,7 @@ fn terminate_server(pid: u32) -> Result<()> {
 fn listener_hint(port: u16) -> String {
     let pids = listener_pids(port);
     if pids.is_empty() {
-        return format!("port {port} is open; lsof found no listener");
+        return format!("port {port} is open; no listener found");
     }
     let parts: Vec<String> = pids
         .into_iter()
@@ -4344,10 +5049,26 @@ fn cmd_stop(p: &Resolved) -> Result<()> {
     }
 
     // 本项目自己的进程树根（发信号之前先记下，信号之后父进程可能已经没了）
-    let roots: Vec<u32> = pid_in_file
+    let mut roots: Vec<u32> = pid_in_file
         .filter(|&pid| process_alive(pid))
         .into_iter()
         .collect();
+
+    let mut legacy_to_clean = Vec::new();
+    if roots.is_empty() {
+        for lpath in legacy_pid_paths(p) {
+            if let Some(lpid) = read_pid(&lpath) {
+                if process_alive(lpid) {
+                    if !roots.contains(&lpid) {
+                        roots.push(lpid);
+                    }
+                    legacy_to_clean.push(lpath);
+                } else if lpath.is_file() {
+                    let _ = std::fs::remove_file(&lpath);
+                }
+            }
+        }
+    }
 
     #[cfg(unix)]
     let mut all_descendants = Vec::new();
@@ -4356,8 +5077,8 @@ fn cmd_stop(p: &Resolved) -> Result<()> {
         all_descendants.extend(descendant_pids(r));
     }
 
-    // 2. 然后对 pid 文件里的进程按进程组发 TERM，宽限期后仍在则对进程组 KILL
-    if let Some(pid) = pid_in_file {
+    // 2. 然后对 pid 文件（或旧版存活根）里的进程按进程组发 TERM，宽限期后仍在则对进程组 KILL
+    for &pid in &roots {
         if process_alive(pid) {
             let _ = terminate_pid_with_grace(pid, true, grace_secs);
         }
@@ -4391,9 +5112,12 @@ fn cmd_stop(p: &Resolved) -> Result<()> {
         bail!("{} 未完全停止：{}", p.id, listener_hint(p.port));
     }
 
-    // 5. 结束后删除 pid 文件和启动标记
+    // 5. 结束后删除 pid 文件和启动标记，清理旧版 PID 文件
     let _ = std::fs::remove_file(&p.pid_file);
     let _ = std::fs::remove_file(start_marker_path(&p.pid_file));
+    for lpath in legacy_to_clean {
+        let _ = std::fs::remove_file(lpath);
+    }
     #[cfg(unix)]
     {
         let _ = std::fs::remove_file(p.stdin_fifo_path());
@@ -4512,6 +5236,9 @@ pub struct NewProject {
     /// 启动环境预设表（可选）。
     #[serde(default)]
     pub profiles: std::collections::BTreeMap<String, ProfileConfig>,
+    /// 依赖服务项目 ID 列表（可选）。
+    #[serde(default)]
+    pub depends_on: Vec<String>,
 }
 
 fn non_empty(v: &Option<String>) -> Option<String> {
@@ -4658,6 +5385,7 @@ impl NewProject {
             links: self.links,
             default_profile: non_empty(&self.default_profile),
             profiles: self.profiles,
+            depends_on: self.depends_on,
         };
         Ok((id, project))
     }
@@ -4771,6 +5499,13 @@ fn project_table(p: &Project) -> toml_edit::Table {
     }
     if !p.profiles.is_empty() {
         t["profiles"] = toml_edit::Item::Table(profiles_to_toml_table(&p.profiles));
+    }
+    if !p.depends_on.is_empty() {
+        let mut arr = toml_edit::Array::new();
+        for d in &p.depends_on {
+            arr.push(d.as_str());
+        }
+        t["depends_on"] = toml_edit::Item::Value(toml_edit::Value::Array(arr));
     }
     t
 }
@@ -4944,6 +5679,9 @@ pub struct ProjectEdit {
     /// 启动环境预设表（可选）。
     #[serde(default)]
     pub profiles: Option<std::collections::BTreeMap<String, ProfileConfig>>,
+    /// 依赖服务项目 ID 列表（可选）。
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -4989,6 +5727,8 @@ pub struct ProjectDetail {
     pub default_profile: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub profiles: std::collections::BTreeMap<String, ProfileConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
 }
 
 #[allow(clippy::if_same_then_else)]
@@ -5265,7 +6005,53 @@ impl Loaded {
             links: p.links.clone(),
             default_profile: p.default_profile.clone(),
             profiles: p.profiles.clone(),
+            depends_on: p.depends_on.clone(),
         })
+    }
+
+    /// Check for dependency cycles in project depends_on configurations.
+    pub fn check_depends_on_cycle(&self, target_id: &str, candidate_deps: &[String]) -> Result<()> {
+        let mut visited = std::collections::HashSet::new();
+        let mut stack = Vec::new();
+
+        fn dfs(
+            loaded: &Loaded,
+            current: &str,
+            target_id: &str,
+            candidate_deps: &[String],
+            visited: &mut std::collections::HashSet<String>,
+            stack: &mut Vec<String>,
+        ) -> Result<()> {
+            stack.push(current.to_string());
+            visited.insert(current.to_string());
+
+            let deps: Vec<String> = if current == target_id {
+                candidate_deps
+                    .iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            } else if let Some(p) = loaded.config.projects.get(current) {
+                p.depends_on.clone()
+            } else {
+                Vec::new()
+            };
+
+            for dep in deps {
+                if stack.contains(&dep) {
+                    stack.push(dep.clone());
+                    bail!("检测到循环依赖: {}", stack.join(" -> "));
+                }
+                if !visited.contains(&dep) {
+                    dfs(loaded, &dep, target_id, candidate_deps, visited, stack)?;
+                }
+            }
+
+            stack.pop();
+            Ok(())
+        }
+
+        dfs(self, target_id, target_id, candidate_deps, &mut visited, &mut stack)
     }
 
     /// Validate project edit data before modifying any config file or groups.
@@ -5322,6 +6108,22 @@ impl Loaded {
             if !trimmed.is_empty() && !effective_profiles.contains_key(trimmed) {
                 bail!("default_profile `{trimmed}` does not exist in profiles");
             }
+        }
+
+        if let Some(ref deps) = edit.depends_on {
+            for dep in deps {
+                let dep_trim = dep.trim();
+                if dep_trim.is_empty() {
+                    continue;
+                }
+                if dep_trim == id {
+                    bail!("项目 `{id}` 不能将自身作为依赖项");
+                }
+                if !self.config.projects.contains_key(dep_trim) {
+                    bail!("依赖的项目 `{dep_trim}` 不存在");
+                }
+            }
+            self.check_depends_on_cycle(id, deps)?;
         }
 
         let mut test_project = existing.clone();
@@ -5650,6 +6452,25 @@ impl Loaded {
             }
         }
 
+        if let Some(ref depends_on) = edit.depends_on {
+            if depends_on.is_empty() {
+                proj_table.remove("depends_on");
+            } else {
+                let mut arr = toml_edit::Array::new();
+                for d in depends_on {
+                    let trimmed = d.trim();
+                    if !trimmed.is_empty() {
+                        arr.push(trimmed);
+                    }
+                }
+                set_table_val(
+                    proj_table,
+                    "depends_on",
+                    toml_edit::Value::Array(arr),
+                );
+            }
+        }
+
         if let Some(ref grp) = group_to_ensure {
             let groups = doc
                 .entry("group")
@@ -5727,12 +6548,15 @@ impl Loaded {
             GroupConfig {
                 label: label.map(|s| s.to_string()),
                 order: None,
+                members: Vec::new(),
+                depends_on: Vec::new(),
             },
         );
         Ok(GroupInfo {
             key: key.to_string(),
             label: label.unwrap_or(key).to_string(),
             order: None,
+            depends_on: Vec::new(),
         })
     }
 
@@ -5770,6 +6594,7 @@ impl Loaded {
             key: key.to_string(),
             label: label.to_string(),
             order: entry.order,
+            depends_on: entry.depends_on.clone(),
         })
     }
 
@@ -6932,6 +7757,7 @@ port = 3002
             links: Vec::new(),
             default_profile: None,
             profiles: Default::default(),
+            depends_on: Vec::new(),
             resolve_error: None,
         };
         let json_fs: serde_json::Value =
@@ -6966,6 +7792,7 @@ port = 3002
             links: Vec::new(),
             default_profile: None,
             profiles: Default::default(),
+            depends_on: Vec::new(),
             resolve_error: None,
         };
         let json_none: serde_json::Value =
@@ -8215,6 +9042,180 @@ port = 3001
         assert_eq!(st_no_prof.port, 3000);
         assert_eq!(st_no_prof.active_profile, None);
         let _ = std::fs::remove_file(&pid_file);
+    }
+
+    #[test]
+    fn test_17_listener_pids_detects_local_tcp_socket() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let pids = listener_pids(port);
+        assert!(
+            pids.contains(&std::process::id()),
+            "listener_pids({port}) = {:?} must contain current pid {}",
+            pids,
+            std::process::id()
+        );
+    }
+
+    #[test]
+    fn test_18_legacy_pid_migration_hints() {
+        let dir = std::env::temp_dir().join(format!("tongyun_dev_legacy_{}", current_time_secs()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("projects.toml");
+        let toml = format!(
+            r#"
+[projects.app]
+name = "App"
+root = "{}"
+port = 39999
+start = ["echo", "hi"]
+"#,
+            dir.display().to_string().replace('\\', "/")
+        );
+        std::fs::write(&path, toml).unwrap();
+
+        // Write legacy PID file in <root>/logs/app.pid
+        let legacy_logs = dir.join("logs");
+        let _ = std::fs::create_dir_all(&legacy_logs);
+        let legacy_pid = legacy_logs.join("app.pid");
+        let my_pid = std::process::id();
+        std::fs::write(&legacy_pid, my_pid.to_string()).unwrap();
+
+        let loaded = load(Some(&path)).unwrap();
+        let st = loaded.status("app").unwrap();
+        assert!(
+            st.hints.iter().any(|h| h.contains("旧版 PID 文件") && h.contains(&my_pid.to_string())),
+            "hints {:?} should mention legacy pid file migration",
+            st.hints
+        );
+
+        let _ = std::fs::remove_file(&legacy_pid);
+    }
+
+    #[test]
+    fn test_19_depends_on_topological_sorting_and_cycles() {
+        let dir = std::env::temp_dir().join(format!("tongyun_dev_dep_{}", current_time_secs()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("projects.toml");
+        let toml = r#"
+[projects.api]
+name = "API"
+root = "/tmp"
+port = 8080
+start = ["echo", "api"]
+
+[projects.web]
+name = "Web"
+root = "/tmp"
+port = 3000
+start = ["echo", "web"]
+depends_on = ["api"]
+
+[projects.admin]
+name = "Admin"
+root = "/tmp"
+port = 3001
+start = ["echo", "admin"]
+depends_on = ["web"]
+"#;
+        std::fs::write(&path, toml).unwrap();
+        let mut loaded = load(Some(&path)).unwrap();
+
+        // 1. Verify sorted_projects_for_start orders api before web, web before admin
+        let all_ids = ["admin", "web", "api"];
+        let start_order = loaded.sorted_projects_for_start(&all_ids);
+        assert_eq!(start_order, vec!["api", "web", "admin"]);
+
+        // 2. Verify sorted_projects_for_stop reverses it: admin, web, api
+        let stop_order = loaded.sorted_projects_for_stop(&all_ids);
+        assert_eq!(stop_order, vec!["admin", "web", "api"]);
+
+        // 3. Cycle detection when updating: api depends_on admin (forming admin -> web -> api -> admin cycle)
+        let cycle_edit = loaded.update_project(
+            "api",
+            ProjectEdit {
+                depends_on: Some(vec!["admin".to_string()]),
+                ..Default::default()
+            },
+        );
+        assert!(cycle_edit.is_err());
+        assert!(cycle_edit.unwrap_err().to_string().contains("检测到循环依赖"));
+
+        // 4. Self dependency error
+        let self_dep = loaded.update_project(
+            "api",
+            ProjectEdit {
+                depends_on: Some(vec!["api".to_string()]),
+                ..Default::default()
+            },
+        );
+        assert!(self_dep.is_err());
+        assert!(self_dep.unwrap_err().to_string().contains("不能将自身作为依赖项"));
+
+        // 5. Non-existent dependency error
+        let non_exist = loaded.update_project(
+            "api",
+            ProjectEdit {
+                depends_on: Some(vec!["ghost".to_string()]),
+                ..Default::default()
+            },
+        );
+        assert!(non_exist.is_err());
+        assert!(non_exist.unwrap_err().to_string().contains("依赖的项目 `ghost` 不存在"));
+    }
+
+    #[test]
+    fn test_20_batch_start_and_stop_detached() {
+        let dir = std::env::temp_dir().join(format!("tongyun_dev_batch_{}", current_time_secs()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("projects.toml");
+        let toml = format!(
+            r#"
+[group.demo]
+label = "Demo"
+
+[projects.api]
+name = "API"
+group = "demo"
+root = "{}"
+port = 8080
+start = ["echo", "api"]
+
+[projects.web]
+name = "Web"
+group = "demo"
+root = "{}"
+port = 3000
+start = ["echo", "web"]
+depends_on = ["api"]
+
+[projects.disabled_app]
+name = "Disabled"
+group = "demo"
+root = "{}"
+port = 9000
+enabled = false
+reason = "test disabled"
+start = ["echo", "disabled"]
+"#,
+            dir.display().to_string().replace('\\', "/"),
+            dir.display().to_string().replace('\\', "/"),
+            dir.display().to_string().replace('\\', "/")
+        );
+        std::fs::write(&path, toml).unwrap();
+        let loaded = load(Some(&path)).unwrap();
+
+        // 1. Batch start detached for group "demo": only enabled projects (api, web) run
+        let batch_res = loaded.start_batch_detached(Some("demo"), None).unwrap();
+        assert_eq!(batch_res.total, 2);
+        assert_eq!(batch_res.results[0].id, "api");
+        assert_eq!(batch_res.results[1].id, "web");
+
+        // 2. Batch stop: web stops before api
+        let stop_res = loaded.stop_batch(Some("demo"), None).unwrap();
+        assert_eq!(stop_res.total, 2);
+        assert_eq!(stop_res.results[0].id, "web");
+        assert_eq!(stop_res.results[1].id, "api");
     }
 }
 

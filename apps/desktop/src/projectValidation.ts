@@ -28,6 +28,7 @@ export interface ProjectFormData {
   links_text?: string;
   default_profile?: string;
   profiles_text?: string;
+  depends_on_text?: string;
 }
 
 /**
@@ -245,6 +246,38 @@ export function formatProfilesLines(profiles?: Record<string, ProfileConfig> | n
     .join("\n");
 }
 
+/**
+ * 解析以逗号或换行分隔的依赖项目 ID 列表。
+ */
+export function parseDependsOn(text: string): {
+  depends_on: string[];
+  error?: string;
+} {
+  const trimmed = text ? text.trim() : "";
+  if (!trimmed) return { depends_on: [] };
+  const items = trimmed
+    .split(/[,\n]/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  for (const item of items) {
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(item)) {
+      return {
+        depends_on: [],
+        error: `依赖项目 ID "${item}" 格式不合法（只能包含字母、数字、下划线和连字符）`,
+      };
+    }
+  }
+  return { depends_on: Array.from(new Set(items)) };
+}
+
+/**
+ * 将依赖项目 ID 数组格式化为逗号分隔字符串。
+ */
+export function formatDependsOn(depends_on?: string[] | null): string {
+  if (!depends_on || depends_on.length === 0) return "";
+  return depends_on.join(", ");
+}
+
 export function validateProjectForm(
   data: Partial<ProjectFormData>,
   isEditing = false
@@ -337,6 +370,13 @@ export function validateProjectForm(
     }
   }
 
+  if (data.depends_on_text !== undefined) {
+    const { error: depError } = parseDependsOn(data.depends_on_text);
+    if (depError) {
+      errors.depends_on_text = depError;
+    }
+  }
+
   return errors;
 }
 
@@ -368,6 +408,7 @@ export interface EditBaseline {
   links?: WebLink[];
   default_profile?: string | null;
   profiles?: Record<string, ProfileConfig>;
+  depends_on?: string[];
 }
 
 /**
@@ -500,6 +541,15 @@ export function buildEditRequest(
     const baseProfiles = base.profiles ?? {};
     if (JSON.stringify(parsedProfiles) !== JSON.stringify(baseProfiles)) {
       out.profiles = parsedProfiles;
+    }
+  }
+
+  // depends_on
+  if (form.depends_on_text !== undefined) {
+    const { depends_on: parsedDeps } = parseDependsOn(form.depends_on_text);
+    const baseDeps = base.depends_on ?? [];
+    if (JSON.stringify(parsedDeps) !== JSON.stringify(baseDeps)) {
+      out.depends_on = parsedDeps;
     }
   }
 

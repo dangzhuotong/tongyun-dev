@@ -5,10 +5,12 @@ import {
   formatEnvLines,
   formatLinksLines,
   formatProfilesLines,
+  formatDependsOn,
   parseAutoAnswersLines,
   parseEnvLines,
   parseLinksLines,
   parseProfilesLines,
+  parseDependsOn,
   validateProjectForm,
   type EditBaseline,
   type ProjectFormData,
@@ -713,6 +715,101 @@ describe("Link protocol and default_profile validation", () => {
       profiles_text: "dev: pnpm dev\nprod: pnpm start",
     });
     expect(okProfile.default_profile).toBeUndefined();
+  });
+});
+
+describe("parseDependsOn & formatDependsOn", () => {
+  it("parses comma and newline separated depends_on strings and trims/deduplicates", () => {
+    const raw = "demo_db, demo_redis\n demo_mq, demo_db ";
+    const { depends_on, error } = parseDependsOn(raw);
+    expect(error).toBeUndefined();
+    expect(depends_on).toEqual(["demo_db", "demo_redis", "demo_mq"]);
+  });
+
+  it("handles empty or whitespace strings", () => {
+    expect(parseDependsOn("").depends_on).toEqual([]);
+    expect(parseDependsOn("   ").depends_on).toEqual([]);
+  });
+
+  it("reports error on invalid project ID characters", () => {
+    const { error } = parseDependsOn("valid_id, bad id with space!");
+    expect(error).toBeDefined();
+    expect(error).toContain("格式不合法");
+  });
+
+  it("formats depends_on array to comma-separated string", () => {
+    expect(formatDependsOn(["demo_db", "demo_redis"])).toBe("demo_db, demo_redis");
+    expect(formatDependsOn([])).toBe("");
+    expect(formatDependsOn(null)).toBe("");
+  });
+
+  it("validates depends_on_text in validateProjectForm", () => {
+    const valid = validateProjectForm({
+      id: "demo",
+      root: "/demo",
+      start: "start",
+      port: 8080,
+      enabled: true,
+      reason: "",
+      depends_on_text: "demo_db, demo_redis",
+    });
+    expect(valid.depends_on_text).toBeUndefined();
+
+    const invalid = validateProjectForm({
+      id: "demo",
+      root: "/demo",
+      start: "start",
+      port: 8080,
+      enabled: true,
+      reason: "",
+      depends_on_text: "demo_db, invalid*char",
+    });
+    expect(invalid.depends_on_text).toBeDefined();
+  });
+
+  it("buildEditRequest handles depends_on changes correctly", () => {
+    const base: EditBaseline = {
+      name: "demo",
+      root: "/demo",
+      start: "start",
+      start_editable: true,
+      stop: "",
+      stop_editable: true,
+      port: 8080,
+      login_url: "",
+      health_url: "",
+      log_file: "",
+      enabled: true,
+      reason: "",
+      depends_on: ["demo_db"],
+    };
+    const form: ProjectFormData = {
+      id: "demo",
+      name: "demo",
+      root: "/demo",
+      start: "start",
+      stop: "",
+      port: 8080,
+      login_url: "",
+      health_url: "",
+      log_file: "",
+      node: "",
+      java: "",
+      enabled: true,
+      reason: "",
+      start_timeout_secs: "",
+      depends_on_text: "demo_db, demo_redis",
+    };
+    const req = buildEditRequest(base, form);
+    expect(req.depends_on).toEqual(["demo_db", "demo_redis"]);
+
+    // No changes
+    const noChangeReq = buildEditRequest(base, { ...form, depends_on_text: "demo_db" });
+    expect(noChangeReq.depends_on).toBeUndefined();
+
+    // Clear dependencies
+    const clearReq = buildEditRequest(base, { ...form, depends_on_text: "" });
+    expect(clearReq.depends_on).toEqual([]);
   });
 });
 

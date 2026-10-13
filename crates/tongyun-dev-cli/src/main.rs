@@ -36,12 +36,20 @@ enum Cmd {
     },
     /// Start a project and wait until the login page / port responds
     Start {
-        id: String,
+        /// Project id to start (optional when using --all or --group)
+        #[arg(conflicts_with = "all", conflicts_with = "group")]
+        id: Option<String>,
+        /// Start all registered projects
+        #[arg(long, conflicts_with = "group")]
+        all: bool,
+        /// Start all projects in the specified group
+        #[arg(long)]
+        group: Option<String>,
         /// Profile name to launch with (e.g. dev, prod)
         #[arg(long)]
         profile: Option<String>,
         /// Open the project page in the browser after starting
-        #[arg(long, conflicts_with = "json")]
+        #[arg(long, conflicts_with = "json", conflicts_with = "all", conflicts_with = "group")]
         open: bool,
         #[arg(long)]
         json: bool,
@@ -51,11 +59,19 @@ enum Cmd {
     },
     /// Stop, start again and wait for readiness
     Restart {
-        id: String,
+        /// Project id to restart (optional when using --all or --group)
+        #[arg(conflicts_with = "all", conflicts_with = "group")]
+        id: Option<String>,
+        /// Restart all registered projects
+        #[arg(long, conflicts_with = "group")]
+        all: bool,
+        /// Restart all projects in the specified group
+        #[arg(long)]
+        group: Option<String>,
         /// Profile name to launch with (e.g. dev, prod)
         #[arg(long)]
         profile: Option<String>,
-        #[arg(long, conflicts_with = "json")]
+        #[arg(long, conflicts_with = "json", conflicts_with = "all", conflicts_with = "group")]
         open: bool,
         #[arg(long)]
         json: bool,
@@ -65,7 +81,15 @@ enum Cmd {
     },
     /// Stop a project and wait until its port is free
     Stop {
-        id: String,
+        /// Project id to stop (optional when using --all or --group)
+        #[arg(conflicts_with = "all", conflicts_with = "group")]
+        id: Option<String>,
+        /// Stop all registered projects
+        #[arg(long, conflicts_with = "group")]
+        all: bool,
+        /// Stop all projects in the specified group
+        #[arg(long)]
+        group: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -187,6 +211,15 @@ enum Cmd {
         /// Auto answer rules ("MATCH=>SEND", repeatable)
         #[arg(long = "auto-answer", value_parser = parse_auto_answer_pair)]
         auto_answers: Vec<tongyun_dev_core::AutoAnswer>,
+        /// Shortcut web link ("TITLE=URL" or "URL", repeatable)
+        #[arg(long = "link", value_parser = parse_web_link_pair)]
+        links: Vec<tongyun_dev_core::WebLink>,
+        /// Default profile to run with
+        #[arg(long)]
+        default_profile: Option<String>,
+        /// Dependent project IDs (repeatable)
+        #[arg(long = "depends-on")]
+        depends_on: Vec<String>,
     },
     /// Edit an existing registered project in your config file
     Edit {
@@ -207,6 +240,24 @@ enum Cmd {
         /// Clear all auto answer rules
         #[arg(long)]
         clear_auto_answers: bool,
+        /// Shortcut web link ("TITLE=URL" or "URL", repeatable)
+        #[arg(long = "link", value_parser = parse_web_link_pair)]
+        links: Vec<tongyun_dev_core::WebLink>,
+        /// Clear all shortcut web links
+        #[arg(long)]
+        clear_links: bool,
+        /// Default profile to run with
+        #[arg(long)]
+        default_profile: Option<String>,
+        /// Clear default profile setting
+        #[arg(long)]
+        clear_default_profile: bool,
+        /// Dependent project IDs (repeatable)
+        #[arg(long = "depends-on")]
+        depends_on: Vec<String>,
+        /// Clear all dependent project IDs
+        #[arg(long)]
+        clear_depends_on: bool,
     },
     /// Send input to a running interactive process
     Input {
@@ -300,12 +351,42 @@ fn parse_auto_answer_pair(s: &str) -> Result<tongyun_dev_core::AutoAnswer, Strin
     })
 }
 
+fn parse_web_link_pair(s: &str) -> Result<tongyun_dev_core::WebLink, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("web link cannot be empty".to_string());
+    }
+    if s.starts_with("http://") || s.starts_with("https://") {
+        return Ok(tongyun_dev_core::WebLink {
+            title: s.to_string(),
+            url: s.to_string(),
+        });
+    }
+    if let Some((title, url)) = s.split_once('=') {
+        let title = title.trim();
+        let url = url.trim();
+        if url.is_empty() {
+            return Err(format!("link url cannot be empty in `{s}`"));
+        }
+        let title = if title.is_empty() { url } else { title };
+        Ok(tongyun_dev_core::WebLink {
+            title: title.to_string(),
+            url: url.to_string(),
+        })
+    } else {
+        Ok(tongyun_dev_core::WebLink {
+            title: s.to_string(),
+            url: s.to_string(),
+        })
+    }
+}
+
 // Existing list/status JSON keeps its original shape. Operations use a stable envelope.
 fn machine_operation(cmd: &Cmd) -> Option<(&str, &str)> {
     match cmd {
-        Cmd::Start { id, json: true, .. } => Some(("start", id)),
-        Cmd::Restart { id, json: true, .. } => Some(("restart", id)),
-        Cmd::Stop { id, json: true } => Some(("stop", id)),
+        Cmd::Start { id: Some(id), json: true, .. } => Some(("start", id)),
+        Cmd::Restart { id: Some(id), json: true, .. } => Some(("restart", id)),
+        Cmd::Stop { id: Some(id), json: true, .. } => Some(("stop", id)),
         Cmd::Install { id, json: true } => Some(("install", id)),
         Cmd::Wait { id, json: true, .. } => Some(("wait", id)),
         Cmd::Logs { id, json: true, .. } => Some(("logs", id)),
@@ -374,6 +455,224 @@ fn run_machine_operation(config: Option<&std::path::Path>, cmd: &Cmd) -> Result<
         }))?
     );
     result
+}
+
+fn run_batch_start_restart(
+    loaded: &Loaded,
+    action: &str,
+    all: bool,
+    group: Option<&str>,
+    profile: Option<&str>,
+    timeout: Option<u64>,
+    json: bool,
+) -> Result<()> {
+    let target_label = if all {
+        "all".to_string()
+    } else {
+        format!("group:{}", group.unwrap_or_default())
+    };
+
+    let target_ids: Vec<String> = if all {
+        loaded.list()?.projects.into_iter().map(|p| p.id).collect()
+    } else if let Some(g) = group {
+        let members = loaded.projects_in_group(g);
+        if members.is_empty() {
+            anyhow::bail!("分组 `{g}` 为空或不存在");
+        }
+        members
+    } else {
+        vec![]
+    };
+
+    let target_refs: Vec<&str> = target_ids.iter().map(|s| s.as_str()).collect();
+    let ordered_ids = loaded.sorted_projects_for_start(&target_refs);
+    let total = ordered_ids.len();
+    if total == 0 {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "ok": true, "action": action, "target": target_label, "total": 0, "results": [], "error": null
+                }))?
+            );
+        } else {
+            println!("没有需要执行的项目");
+        }
+        return Ok(());
+    }
+
+    let mut results = Vec::with_capacity(total);
+    let mut any_err = false;
+
+    for (idx, id) in ordered_ids.iter().enumerate() {
+        if !json {
+            println!(
+                "[{}/{}] {} `{id}` ...",
+                idx + 1,
+                total,
+                if action == "start" { "启动" } else { "重启" }
+            );
+        }
+        let res = if action == "restart" {
+            loaded.restart_with_profile(id, profile, timeout.map(Duration::from_secs))
+        } else {
+            loaded.start_with_profile(id, profile, timeout.map(Duration::from_secs))
+        };
+        match res {
+            Ok(st) => {
+                if !json {
+                    print_status(&st, false)?;
+                }
+                results.push(serde_json::json!({
+                    "id": id,
+                    "ok": true,
+                    "status": st,
+                    "error": null,
+                }));
+            }
+            Err(e) => {
+                any_err = true;
+                let err_msg = format!("{e:#}");
+                if !json {
+                    eprintln!("  失败: {err_msg}");
+                    if let Ok(st) = loaded.status(id) {
+                        let _ = print_status(&st, false);
+                    }
+                }
+                results.push(serde_json::json!({
+                    "id": id,
+                    "ok": false,
+                    "status": loaded.status(id).ok(),
+                    "error": err_msg,
+                }));
+            }
+        }
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "ok": !any_err,
+                "action": action,
+                "target": target_label,
+                "total": total,
+                "results": results,
+                "error": if any_err { Some("部分项目执行失败") } else { None }
+            }))?
+        );
+    } else {
+        if any_err {
+            anyhow::bail!("{total} 个项目中存在执行失败项");
+        }
+        println!("已完成全部 {total} 个项目的 {action} 操作");
+    }
+
+    if any_err {
+        anyhow::bail!("批量 {action} 中部分项目失败");
+    }
+    Ok(())
+}
+
+fn run_batch_stop(
+    loaded: &Loaded,
+    all: bool,
+    group: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let target_label = if all {
+        "all".to_string()
+    } else {
+        format!("group:{}", group.unwrap_or_default())
+    };
+
+    let target_ids: Vec<String> = if all {
+        loaded.list()?.projects.into_iter().map(|p| p.id).collect()
+    } else if let Some(g) = group {
+        let members = loaded.projects_in_group(g);
+        if members.is_empty() {
+            anyhow::bail!("分组 `{g}` 为空或不存在");
+        }
+        members
+    } else {
+        vec![]
+    };
+
+    let target_refs: Vec<&str> = target_ids.iter().map(|s| s.as_str()).collect();
+    let ordered_ids = loaded.sorted_projects_for_stop(&target_refs);
+    let total = ordered_ids.len();
+    if total == 0 {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "ok": true, "action": "stop", "target": target_label, "total": 0, "results": [], "error": null
+                }))?
+            );
+        } else {
+            println!("没有需要停止的项目");
+        }
+        return Ok(());
+    }
+
+    let mut results = Vec::with_capacity(total);
+    let mut any_err = false;
+
+    for (idx, id) in ordered_ids.iter().enumerate() {
+        if !json {
+            println!("[{}/{}] 停止 `{id}` ...", idx + 1, total);
+        }
+        match loaded.stop(id) {
+            Ok(st) => {
+                if !json {
+                    print_status(&st, false)?;
+                }
+                results.push(serde_json::json!({
+                    "id": id,
+                    "ok": true,
+                    "status": st,
+                    "error": null,
+                }));
+            }
+            Err(e) => {
+                any_err = true;
+                let err_msg = format!("{e:#}");
+                if !json {
+                    eprintln!("  失败: {err_msg}");
+                }
+                results.push(serde_json::json!({
+                    "id": id,
+                    "ok": false,
+                    "status": loaded.status(id).ok(),
+                    "error": err_msg,
+                }));
+            }
+        }
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "ok": !any_err,
+                "action": "stop",
+                "target": target_label,
+                "total": total,
+                "results": results,
+                "error": if any_err { Some("部分项目停止失败") } else { None }
+            }))?
+        );
+    } else {
+        if any_err {
+            anyhow::bail!("{total} 个项目中存在停止失败项");
+        }
+        println!("已完成全部 {total} 个项目的停止操作");
+    }
+
+    if any_err {
+        anyhow::bail!("批量停止中部分项目失败");
+    }
+    Ok(())
 }
 
 fn print_status(st: &StatusJson, json: bool) -> Result<()> {
@@ -453,44 +752,72 @@ fn main() -> Result<()> {
         Cmd::List { json, with_groups } => print_list(&loaded, json, with_groups)?,
         Cmd::Start {
             ref id,
+            all,
+            ref group,
             ref profile,
             open,
             timeout,
-            ..
-        }
-        | Cmd::Restart {
-            ref id,
-            ref profile,
-            open,
-            timeout,
-            ..
+            json,
         } => {
-            match if matches!(cmd, Cmd::Restart { .. }) {
-                loaded.restart_with_profile(
-                    id,
-                    profile.as_deref(),
-                    timeout.map(Duration::from_secs),
-                )
-            } else {
-                loaded.start_with_profile(id, profile.as_deref(), timeout.map(Duration::from_secs))
-            } {
-                Ok(st) => {
-                    print_status(&st, false)?;
-                    if open {
-                        if let Err(e) = loaded
-                            .page_url(id)
-                            .and_then(|u| tongyun_dev_core::open_url(&u))
-                        {
-                            eprintln!("could not open page: {e:#}");
+            if let Some(id) = id {
+                match loaded.start_with_profile(id, profile.as_deref(), timeout.map(Duration::from_secs)) {
+                    Ok(st) => {
+                        print_status(&st, false)?;
+                        if open {
+                            if let Err(e) = loaded
+                                .page_url(id)
+                                .and_then(|u| tongyun_dev_core::open_url(&u))
+                            {
+                                eprintln!("could not open page: {e:#}");
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    if let Ok(st) = loaded.status(id) {
-                        print_status(&st, false)?;
+                    Err(e) => {
+                        if let Ok(st) = loaded.status(id) {
+                            print_status(&st, false)?;
+                        }
+                        return Err(e);
                     }
-                    return Err(e);
                 }
+            } else if all || group.is_some() {
+                run_batch_start_restart(&loaded, "start", all, group.as_deref(), profile.as_deref(), timeout, json)?;
+            } else {
+                anyhow::bail!("请指定项目 ID，或使用 --all / --group <组名>");
+            }
+        }
+        Cmd::Restart {
+            ref id,
+            all,
+            ref group,
+            ref profile,
+            open,
+            timeout,
+            json,
+        } => {
+            if let Some(id) = id {
+                match loaded.restart_with_profile(id, profile.as_deref(), timeout.map(Duration::from_secs)) {
+                    Ok(st) => {
+                        print_status(&st, false)?;
+                        if open {
+                            if let Err(e) = loaded
+                                .page_url(id)
+                                .and_then(|u| tongyun_dev_core::open_url(&u))
+                            {
+                                eprintln!("could not open page: {e:#}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if let Ok(st) = loaded.status(id) {
+                            print_status(&st, false)?;
+                        }
+                        return Err(e);
+                    }
+                }
+            } else if all || group.is_some() {
+                run_batch_start_restart(&loaded, "restart", all, group.as_deref(), profile.as_deref(), timeout, json)?;
+            } else {
+                anyhow::bail!("请指定项目 ID，或使用 --all / --group <组名>");
             }
         }
         Cmd::Install { id, .. } => {
@@ -517,9 +844,20 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Stop { id, .. } => {
-            loaded.stop(&id)?;
-            print_status(&loaded.status(&id)?, false)?;
+        Cmd::Stop {
+            ref id,
+            all,
+            ref group,
+            json,
+        } => {
+            if let Some(id) = id {
+                loaded.stop(id)?;
+                print_status(&loaded.status(id)?, false)?;
+            } else if all || group.is_some() {
+                run_batch_stop(&loaded, all, group.as_deref(), json)?;
+            } else {
+                anyhow::bail!("请指定项目 ID，或使用 --all / --group <组名>");
+            }
         }
         Cmd::Wait { id, timeout, .. } => {
             print_status(
@@ -613,6 +951,9 @@ fn main() -> Result<()> {
             env,
             pty,
             auto_answers,
+            links,
+            default_profile,
+            depends_on,
         } => {
             let row = loaded.add_project(NewProject {
                 id,
@@ -639,6 +980,9 @@ fn main() -> Result<()> {
                 env: env.into_iter().collect(),
                 pty,
                 auto_answers,
+                links,
+                default_profile,
+                depends_on,
                 ..Default::default()
             })?;
             println!(
@@ -655,6 +999,12 @@ fn main() -> Result<()> {
             no_pty,
             auto_answers,
             clear_auto_answers,
+            links,
+            clear_links,
+            default_profile,
+            clear_default_profile,
+            depends_on,
+            clear_depends_on,
         } => {
             let mut edit = tongyun_dev_core::ProjectEdit::default();
             if !env.is_empty() {
@@ -669,6 +1019,21 @@ fn main() -> Result<()> {
                 edit.auto_answers = Some(Vec::new());
             } else if !auto_answers.is_empty() {
                 edit.auto_answers = Some(auto_answers);
+            }
+            if clear_links {
+                edit.links = Some(Vec::new());
+            } else if !links.is_empty() {
+                edit.links = Some(links);
+            }
+            if clear_default_profile {
+                edit.default_profile = Some(String::new());
+            } else if let Some(dp) = default_profile {
+                edit.default_profile = Some(dp);
+            }
+            if clear_depends_on {
+                edit.depends_on = Some(Vec::new());
+            } else if !depends_on.is_empty() {
+                edit.depends_on = Some(depends_on);
             }
             let row = loaded.update_project(&id, edit)?;
             println!("已更新项目 `{}`，写入 {}", row.id, loaded.path().display());
@@ -925,7 +1290,7 @@ mod tests {
         ));
 
         let cli = Cli::try_parse_from(["tongyun-dev", "start", "my_api", "--open"]).unwrap();
-        assert!(matches!(cli.cmd, Some(Cmd::Start { ref id, open: true, .. }) if id == "my_api"));
+        assert!(matches!(cli.cmd, Some(Cmd::Start { ref id, open: true, .. }) if id.as_deref() == Some("my_api")));
 
         let cli = Cli::try_parse_from(["tongyun-dev", "status", "my_api", "--json"]).unwrap();
         assert!(
@@ -1213,7 +1578,7 @@ mod tests {
         let cli = Cli::try_parse_from(["tongyun-dev", "start", "web", "--profile", "dev"]).unwrap();
         match cli.cmd {
             Some(Cmd::Start { id, profile, .. }) => {
-                assert_eq!(id, "web");
+                assert_eq!(id.as_deref(), Some("web"));
                 assert_eq!(profile.as_deref(), Some("dev"));
             }
             other => panic!("unexpected {other:?}"),
@@ -1223,7 +1588,7 @@ mod tests {
         let cli = Cli::try_parse_from(["tongyun-dev", "restart", "web", "--profile", "mock"]).unwrap();
         match cli.cmd {
             Some(Cmd::Restart { id, profile, .. }) => {
-                assert_eq!(id, "web");
+                assert_eq!(id.as_deref(), Some("web"));
                 assert_eq!(profile.as_deref(), Some("mock"));
             }
             other => panic!("unexpected {other:?}"),
@@ -1249,6 +1614,139 @@ mod tests {
             Some(Cmd::Terminal { id, profile }) => {
                 assert_eq!(id, "web");
                 assert_eq!(profile.as_deref(), Some("dev"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_batch_start_stop_restart_arguments() {
+        // start --all
+        let cli = Cli::try_parse_from(["tongyun-dev", "start", "--all"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Start { id, all, group, .. }) => {
+                assert_eq!(id, None);
+                assert!(all);
+                assert_eq!(group, None);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // start --group
+        let cli = Cli::try_parse_from(["tongyun-dev", "start", "--group", "backend"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Start { id, all, group, .. }) => {
+                assert_eq!(id, None);
+                assert!(!all);
+                assert_eq!(group.as_deref(), Some("backend"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // restart --all
+        let cli = Cli::try_parse_from(["tongyun-dev", "restart", "--all"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Restart { id, all, group, .. }) => {
+                assert_eq!(id, None);
+                assert!(all);
+                assert_eq!(group, None);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // stop --group
+        let cli = Cli::try_parse_from(["tongyun-dev", "stop", "--group", "backend", "--json"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Stop { id, all, group, json }) => {
+                assert_eq!(id, None);
+                assert!(!all);
+                assert_eq!(group.as_deref(), Some("backend"));
+                assert!(json);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // conflict: id and --all
+        assert!(Cli::try_parse_from(["tongyun-dev", "start", "web", "--all"]).is_err());
+
+        // conflict: --all and --group
+        assert!(Cli::try_parse_from(["tongyun-dev", "stop", "--all", "--group", "backend"]).is_err());
+    }
+
+    #[test]
+    fn parses_add_and_edit_links_profiles_depends_on() {
+        let add_cli = Cli::try_parse_from([
+            "tongyun-dev",
+            "add",
+            "demo_web",
+            "--root",
+            "~/code/demo_web",
+            "--start",
+            "npm run dev",
+            "--link",
+            "Docs=http://localhost:3000/docs",
+            "--link",
+            "http://localhost:3000/api",
+            "--default-profile",
+            "dev",
+            "--depends-on",
+            "demo_api",
+            "--depends-on",
+            "demo_db",
+        ])
+        .unwrap();
+
+        match add_cli.cmd {
+            Some(Cmd::Add {
+                id,
+                links,
+                default_profile,
+                depends_on,
+                ..
+            }) => {
+                assert_eq!(id, "demo_web");
+                assert_eq!(links.len(), 2);
+                assert_eq!(links[0].title, "Docs");
+                assert_eq!(links[0].url, "http://localhost:3000/docs");
+                assert_eq!(links[1].title, "http://localhost:3000/api");
+                assert_eq!(links[1].url, "http://localhost:3000/api");
+                assert_eq!(default_profile.as_deref(), Some("dev"));
+                assert_eq!(depends_on, vec!["demo_api", "demo_db"]);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let edit_cli = Cli::try_parse_from([
+            "tongyun-dev",
+            "edit",
+            "demo_web",
+            "--link",
+            "http://localhost:3000",
+            "--default-profile",
+            "mock",
+            "--depends-on",
+            "demo_svc",
+        ])
+        .unwrap();
+
+        match edit_cli.cmd {
+            Some(Cmd::Edit {
+                id,
+                links,
+                clear_links,
+                default_profile,
+                clear_default_profile,
+                depends_on,
+                clear_depends_on,
+                ..
+            }) => {
+                assert_eq!(id, "demo_web");
+                assert_eq!(links.len(), 1);
+                assert!(!clear_links);
+                assert_eq!(default_profile.as_deref(), Some("mock"));
+                assert!(!clear_default_profile);
+                assert_eq!(depends_on, vec!["demo_svc"]);
+                assert!(!clear_depends_on);
             }
             other => panic!("unexpected {other:?}"),
         }

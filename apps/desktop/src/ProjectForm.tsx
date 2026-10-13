@@ -7,10 +7,12 @@ import {
   formatEnvLines,
   formatLinksLines,
   formatProfilesLines,
+  formatDependsOn,
   parseAutoAnswersLines,
   parseEnvLines,
   parseLinksLines,
   parseProfilesLines,
+  parseDependsOn,
   validateProjectForm,
   type ProjectFormData,
 } from "./projectValidation";
@@ -69,6 +71,7 @@ export function ProjectForm({
     links_text: formatLinksLines(initialDetail?.links),
     default_profile: initialDetail?.default_profile ?? "",
     profiles_text: formatProfilesLines(initialDetail?.profiles),
+    depends_on_text: formatDependsOn(initialDetail?.depends_on),
   }));
 
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -213,6 +216,10 @@ export function ProjectForm({
           profiles: (() => {
             const { profiles: parsed } = parseProfilesLines(form.profiles_text ?? "");
             return Object.keys(parsed).length > 0 ? parsed : undefined;
+          })(),
+          depends_on: (() => {
+            const { depends_on: parsed } = parseDependsOn(form.depends_on_text ?? "");
+            return parsed.length > 0 ? parsed : undefined;
           })(),
         };
         await invoke<ProjectRow>("add_project", { req: createReq });
@@ -636,6 +643,23 @@ export function ProjectForm({
               placeholder="留空则使用默认启动命令，或填写上面的环境标识（如 dev）"
               onChange={(e) => handleChange("default_profile", e.target.value)}
             />
+          </div>
+
+          {/* 依赖服务 */}
+          <div className="form-group">
+            <label htmlFor="field-depends-on">依赖服务 (depends_on)</label>
+            <input
+              id="field-depends-on"
+              type="text"
+              value={form.depends_on_text ?? ""}
+              placeholder="依赖的项目 ID，多个用逗号隔开，如 demo_db, demo_redis"
+              onChange={(e) => handleChange("depends_on_text", e.target.value)}
+              className={errors.depends_on_text ? "invalid" : ""}
+            />
+            {errors.depends_on_text && (
+              <span className="field-error">{errors.depends_on_text}</span>
+            )}
+            <span className="field-hint">启动此项目前会自动先启动所依赖的项目</span>
           </div>
 
           {!form.enabled && (

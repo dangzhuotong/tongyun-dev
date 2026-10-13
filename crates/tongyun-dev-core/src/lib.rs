@@ -1650,9 +1650,11 @@ fn default_under_log(id: &str, suffix: &str) -> String {
 ///
 /// Empty uses `~/.tongyun-dev/logs`. `{{root}}` and `{{tomcat}}` are replaced
 /// with the already-expanded paths. A relative value is placed under the
-/// project root (`logs` → `<root>/logs`). A relative value that contains `..`
-/// is rejected so it cannot leave the project root. Absolute paths are kept
-/// as written. One project's log_dir cannot fail the whole catalog.
+/// project root (`logs` → `<root>/logs`). A relative value that contains a `..`
+/// segment is rejected so it cannot leave the project root. `\` is treated as
+/// a separator here, the same way `path_to_string` rewrites it to `/`, so
+/// `..\x` cannot slip past the check. Absolute paths are kept as written.
+/// One project's log_dir cannot fail the whole catalog.
 fn resolve_log_dir(
     raw: &str,
     root: &Path,
@@ -1681,13 +1683,13 @@ fn resolve_log_dir(
     if path.is_absolute() || is_windows_absolute(&expanded) || expanded.starts_with('/') {
         return Ok(path);
     }
-    if path
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
+    // `path_to_string` rewrites `\` to `/` after this returns. Check that form
+    // so a relative `..\x` cannot become `../x` outside the project root.
+    let normalized = expanded.replace('\\', "/");
+    if normalized.split('/').any(|seg| seg == "..") {
         bail!("relative log_dir cannot contain `..` (got `{expanded}`)");
     }
-    Ok(root.join(path))
+    Ok(root.join(normalized))
 }
 
 fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolved> {
@@ -6416,24 +6418,44 @@ log_dir = "{{not_a_var}}/logs"
         let err = resolve_project("bad", bad.projects.get("bad").unwrap(), Some(home)).unwrap_err();
         assert!(err.to_string().contains("unresolved template"), "{err}");
 
-        let escaped: FileConfig = toml::from_str(
-            r#"
+        for raw in ["../../escaped", r"..\x", r"a\..\..\x"] {
+            let escaped: FileConfig = toml::from_str(&format!(
+                r#"
 [projects.escaped]
 name = "escaped"
 root = "/tmp/demo-esc"
 start = ["true"]
 port = 9
-log_dir = "../../escaped"
+log_dir = '{raw}'
+"#
+            ))
+            .unwrap();
+            let err = resolve_project(
+                "escaped",
+                escaped.projects.get("escaped").unwrap(),
+                Some(home),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains(".."),
+                "log_dir `{raw}` should be rejected, got {err}"
+            );
+        }
+
+        let nested: FileConfig = toml::from_str(
+            r#"
+[projects.nested]
+name = "nested"
+root = "/tmp/demo-nested"
+start = ["true"]
+port = 9
+log_dir = 'logs\sub'
 "#,
         )
         .unwrap();
-        let err = resolve_project(
-            "escaped",
-            escaped.projects.get("escaped").unwrap(),
-            Some(home),
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains(".."), "{err}");
+        let nested =
+            resolve_project("nested", nested.projects.get("nested").unwrap(), Some(home)).unwrap();
+        assert_eq!(nested.log_dir, PathBuf::from("/tmp/demo-nested/logs/sub"));
 
         let absolute: FileConfig = toml::from_str(
             r#"

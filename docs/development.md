@@ -194,7 +194,7 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 | `env` | 可选。额外环境变量键值对（例如 `env = { CI = "1", APP_ENV = "dev" }`），注入启动和依赖安装环境，用户显式配置的值优先 |
 | `pty` | 可选（缺省 `false`）。Unix 上是否用 openpty relay 在伪终端中运行后台进程（macOS 与 Linux 同一路径，不用系统 `script`）。Windows 忽略该字段 |
 | `auto_answers` | 可选。自动应答规则数组（例如 `[{ expect = "Select environment", send = "dev" }]`），启动时匹配日志输出并自动向标准输入发送内容 |
-| `log_dir` / `log_file` / `pid_file` | 可省略。默认日志与 PID 路径为 `~/.tongyun-dev/logs/<id>.out` 和 `.pid`。`log_dir` 可以是绝对路径、`~` / `$HOME`、`{{root}}` / `{{tomcat}}`，或相对项目根的路径（如 `logs`；相对路径不能含 `..`）。某一项 `log_dir` 展不开时，列表仍返回其余项目，该项带 `resolve_error`，桌面主窗口不会停在「正在读取…」。`tongyun-dev status`（不带 id）同样逐项继续，并在有失败项时以非 0 退出 |
+| `log_dir` / `log_file` / `pid_file` | 可省略。默认日志与 PID 路径为 `~/.tongyun-dev/logs/<id>.out` 和 `.pid`。`log_dir` 可以是绝对路径、`~` / `$HOME`、`{{root}}` / `{{tomcat}}`，或相对项目根的路径（如 `logs`；相对路径不能含 `..`，`/` 和 `\` 都算分隔符）。某一项 `log_dir` 展不开时，列表仍返回其余项目，该项带 `resolve_error`，桌面主窗口不会停在「正在读取…」。`tongyun-dev status`（不带 id）同样逐项继续，并在有失败项时以非 0 退出 |
 
 ### 分组配置 `[group.<key>]`
 

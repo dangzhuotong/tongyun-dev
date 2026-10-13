@@ -513,7 +513,7 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                 };
             }
             let action = [
-                "start", "stop", "restart", "install", "open", "open-dir", "terminal",
+                "start", "stop", "restart", "install", "open", "open-all", "open-dir", "terminal",
             ]
             .into_iter()
             .find_map(|a| project_route(path, a).map(|id| (a, id)));
@@ -524,6 +524,8 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
             struct ActionBody {
                 #[serde(default)]
                 profile: Option<String>,
+                #[serde(default)]
+                url: Option<String>,
             }
             let body_action: ActionBody = serde_json::from_slice(&req.body).unwrap_or_default();
             let res: Result<Value> = match action {
@@ -538,9 +540,18 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                     .open_in_terminal(id, body_action.profile.as_deref())
                     .map(|_| json!({"terminal": true})),
                 "install" => loaded.install_deps(id).map(|st| json!({"status": st})),
-                "open" => loaded
-                    .page_url(id)
-                    .and_then(|u| tongyun_dev_core::open_url(&u).map(|_| json!({"url": u}))),
+                "open" => match body_action.url.as_deref() {
+                    Some(u) => tongyun_dev_core::open_url(u).map(|_| json!({"url": u})),
+                    None => loaded
+                        .page_url(id)
+                        .and_then(|url| tongyun_dev_core::open_url(&url).map(|_| json!({"url": url}))),
+                },
+                "open-all" => loaded.page_urls(id).and_then(|urls| {
+                    for link in &urls {
+                        tongyun_dev_core::open_url(&link.url)?;
+                    }
+                    Ok(json!({"opened": urls.len()}))
+                }),
                 _ => loaded
                     .root_dir(id)
                     .and_then(|p| tongyun_dev_core::open_path(&p).map(|_| json!({"path": p}))),
@@ -866,6 +877,45 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
     .chip.conf-high { background: var(--ty-matcha-tint); color: var(--ty-matcha); }
     .chip.conf-medium { background: var(--ty-sky-tint); color: var(--ty-sky); }
     .chip.conf-low { background: var(--ty-honey-tint); color: var(--ty-honey); }
+    .tag-profile {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: var(--ty-font-size-xs); font-weight: 600;
+      padding: 1px 7px; border-radius: var(--ty-radius-pill);
+      background: var(--ty-matcha-tint); color: var(--ty-matcha);
+      border: 1px solid var(--ty-matcha-soft);
+    }
+    .profile-select-bar { display: flex; align-items: center; gap: 6px; font-size: var(--ty-font-size-sm); color: var(--ty-text-muted); margin-top: 2px; }
+    .profile-select {
+      height: 26px; padding: 0 6px; border-radius: var(--ty-radius-sm);
+      border: 1px solid var(--ty-border); background: var(--ty-surface-raised);
+      font-size: var(--ty-font-size-sm); color: var(--ty-text); outline: none;
+    }
+    .profile-select:focus { border-color: var(--ty-matcha); box-shadow: var(--ty-focus-ring); }
+    .split-btn { display: inline-flex; position: relative; }
+    .split-btn > .btn-outline { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+    .split-btn > .split-toggle {
+      border-top-left-radius: 0; border-bottom-left-radius: 0;
+      padding: 0 6px; margin-left: -1px; min-width: 22px;
+    }
+    .split-menu {
+      display: none; position: absolute; bottom: 100%; right: 0; margin-bottom: 4px;
+      background: var(--ty-surface); border: 1px solid var(--ty-border-strong);
+      border-radius: var(--ty-radius-sm); box-shadow: var(--ty-shadow-pop);
+      min-width: 140px; z-index: 100; flex-direction: column; padding: 4px 0;
+    }
+    .split-menu.show { display: flex; }
+    .split-menu button {
+      justify-content: flex-start; height: 28px; padding: 0 10px; border-radius: 0;
+      font-size: var(--ty-font-size-sm); text-align: left; width: 100%;
+    }
+    .split-menu button:hover { background: var(--ty-surface-raised); }
+    .split-menu-sep { height: 1px; background: var(--ty-border); margin: 4px 0; }
+    .form-group textarea {
+      width: 100%; padding: 6px 10px; border-radius: var(--ty-radius-sm);
+      border: 1px solid var(--ty-border); background: var(--ty-surface-sunken); outline: none;
+      font-family: var(--ty-font-mono); font-size: 12px; line-height: 1.5; resize: vertical;
+    }
+    .form-group textarea:focus { border-color: var(--ty-matcha); background: var(--ty-surface); box-shadow: var(--ty-focus-ring); }
     @media (max-width: 720px) { .scan-fields { grid-template-columns: 1fr 1fr; } }
   </style>
 </head>
@@ -959,6 +1009,9 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         <div class="form-group"><label><input id="editEnabled" type="checkbox" /> 启用项目</label></div>
         <div class="form-group"><label>停用原因</label><input id="editReason" /></div>
         <div class="form-group"><label><input id="editAutoInstall" type="checkbox" /> 启动前自动安装缺失依赖</label></div>
+        <div class="form-group"><label>快捷网页链接（每行一个：标题 => URL 或直接写 URL）</label><textarea id="editLinks" rows="2" placeholder="例如：&#10;前端主页 => http://127.0.0.1:5173/&#10;管理后台 => http://127.0.0.1:5173/admin"></textarea></div>
+        <div class="form-group"><label>默认启动环境</label><input id="editDefaultProfile" placeholder="例如：dev" /></div>
+        <div class="form-group"><label>环境预设 (Profiles，每行：标识: 启动命令 或 标识: 标签 | 启动命令 [| 端口])</label><textarea id="editProfiles" rows="3" placeholder="例如：&#10;dev: 开发环境 | pnpm dev&#10;mock: Mock 模式 | pnpm dev:mock | 5174"></textarea></div>
       </div>
       <div class="modal-actions">
         <button class="btn-secondary" onclick="closeAddModal()">取消</button>
@@ -1109,11 +1162,97 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       return data;
     }
 
-    async function runAction(id, label, path, failText) {
+    const selectedProfiles = {};
+
+    function formatLinksLines(links) {
+      if (!links || !links.length) return '';
+      return links.map(l => (l.title && l.title !== l.url ? `${l.title} => ${l.url}` : l.url)).join('\n');
+    }
+    function parseLinksLines(text) {
+      const links = [];
+      if (!text || !text.trim()) return links;
+      for (const raw of text.split('\n')) {
+        const line = raw.trim();
+        if (!line) continue;
+        if (line.includes('=>')) {
+          const idx = line.indexOf('=>');
+          const title = line.slice(0, idx).trim();
+          const url = line.slice(idx + 2).trim();
+          if (url) links.push({ title: title || url, url });
+        } else {
+          links.push({ title: line, url: line });
+        }
+      }
+      return links;
+    }
+    function formatProfilesLines(profiles) {
+      if (!profiles) return '';
+      return Object.entries(profiles).map(([k, p]) => {
+        if (p.label && p.port) return `${k}: ${p.label} | ${p.start || ''} | ${p.port}`;
+        if (p.label) return `${k}: ${p.label} | ${p.start || ''}`;
+        if (p.port) return `${k}: ${p.start || ''} | ${p.port}`;
+        return `${k}: ${p.start || ''}`;
+      }).join('\n');
+    }
+    function parseProfilesLines(text) {
+      const profiles = {};
+      if (!text || !text.trim()) return profiles;
+      for (const raw of text.split('\n')) {
+        const line = raw.trim();
+        if (!line) continue;
+        const colon = line.indexOf(':');
+        if (colon === -1) continue;
+        const key = line.slice(0, colon).trim();
+        if (!key) continue;
+        const rest = line.slice(colon + 1).trim();
+        const parts = rest.split('|').map(s => s.trim());
+        if (parts.length === 1) {
+          profiles[key] = { start: parts[0] || null };
+        } else if (parts.length === 2) {
+          const num = Number(parts[1]);
+          if (!isNaN(num) && num > 0 && num <= 65535) {
+            profiles[key] = { start: parts[0] || null, port: num };
+          } else {
+            profiles[key] = { label: parts[0] || '', start: parts[1] || null };
+          }
+        } else if (parts.length >= 3) {
+          const num = Number(parts[2]);
+          const port = (!isNaN(num) && num > 0 && num <= 65535) ? num : null;
+          profiles[key] = { label: parts[0] || '', start: parts[1] || null, port };
+        }
+      }
+      return profiles;
+    }
+
+    function onProfileChange(id, value) {
+      selectedProfiles[id] = value;
+    }
+
+    function getSelectedProfile(id) {
+      const p = lastProjects.find(x => x.id === id);
+      if (selectedProfiles[id] !== undefined) return selectedProfiles[id] || null;
+      return (p && (p.active_profile || p.default_profile)) || null;
+    }
+
+    function toggleSplitMenu(e, id) {
+      e.stopPropagation();
+      const menu = document.getElementById(`splitMenu_${id}`);
+      if (!menu) return;
+      const wasShow = menu.classList.contains('show');
+      closeAllSplitMenus();
+      if (!wasShow) menu.classList.add('show');
+    }
+
+    function closeAllSplitMenus() {
+      document.querySelectorAll('.split-menu.show').forEach(m => m.classList.remove('show'));
+    }
+
+    async function runAction(id, label, path, failText, body) {
       busyIds[id] = label;
       renderProjects(lastProjects);
       try {
-        await postJson(`/api/projects/${id}/${path}`);
+        const opts = body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {};
+        await postJson(`/api/projects/${id}/${path}`, opts);
       } catch (e) {
         alert(failText + '：' + e.message);
       } finally {
@@ -1273,6 +1412,41 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       const portCls = !configured || !p.port ? 'val-warn' : portOpen ? 'val-ok' : 'val-down';
       const probeText = !configured ? '—' : code ? (probeOk ? `正常 ${code}` : `异常 ${code}`) : (isRunning ? '未就绪' : '未响应');
 
+      const hasProfiles = p.profiles && Object.keys(p.profiles).length > 0;
+      let profileBar = '';
+      if (hasProfiles) {
+        const curProf = getSelectedProfile(p.id) || '';
+        const opts = [
+          `<option value="">默认配置${p.default_profile ? ' (' + escapeHtml(p.default_profile) + ')' : ''}</option>`
+        ];
+        for (const [k, prof] of Object.entries(p.profiles)) {
+          const label = prof.label ? `${k} (${prof.label})` : k;
+          const sel = curProf === k ? 'selected' : '';
+          opts.push(`<option value="${escapeHtml(k)}" ${sel}>${escapeHtml(label)}</option>`);
+        }
+        profileBar = `<div class="profile-select-bar"><span class="profile-label">环境</span><select class="profile-select" onchange="onProfileChange('${p.id}', this.value)">${opts.join('')}</select></div>`;
+      }
+
+      let webBtn = '';
+      if (p.links && p.links.length > 1) {
+        const menuItems = p.links.map(l =>
+          `<div class="split-item" onclick="openProjectLink('${p.id}', '${escapeHtml(l.url)}')">${escapeHtml(l.title || l.url)}</div>`
+        ).join('');
+        webBtn = `
+          <div class="split-btn">
+            <button class="btn-outline" ${canOpenPage ? `onclick="openProjectInBrowser('${p.id}')"` : 'disabled'} title="打开主网页">网页</button>
+            <button class="btn-outline btn-arrow" ${canOpenPage ? `onclick="toggleSplitMenu(event, '${p.id}')"` : 'disabled'} title="更多网页链接">▾</button>
+            <div id="splitMenu_${p.id}" class="split-menu">
+              ${menuItems}
+              <div class="split-divider"></div>
+              <div class="split-item" onclick="openAllProjectLinks('${p.id}')">全部打开</div>
+            </div>
+          </div>
+        `;
+      } else {
+        webBtn = `<button class="btn-outline" ${canOpenPage ? `onclick="openProjectInBrowser('${p.id}')"` : 'disabled'} title="在系统浏览器打开登录/访问页面">网页</button>`;
+      }
+
       return `
         <div class="card ${enabled ? '' : 'disabled'}">
           <div class="card-head">
@@ -1280,9 +1454,12 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
               <h3>${highlight(p.name)}</h3>
               <code>${highlight(p.id)}</code>
             </div>
-            <div class="badge ${badgeClass}" title="${stateText}">
-              <span class="dot"></span>
-              <span>${stateText}</span>
+            <div style="display:flex;align-items:center;gap:6px;">
+              ${p.active_profile ? `<span class="tag-profile" title="当前运行环境：${escapeHtml(p.active_profile)}">⚡ ${escapeHtml(p.active_profile)}</span>` : ''}
+              <div class="badge ${badgeClass}" title="${stateText}">
+                <span class="dot"></span>
+                <span>${stateText}</span>
+              </div>
             </div>
           </div>
           ${!enabled ? `<div class="reason">停用原因：${escapeHtml(p.reason)}</div>` : ''}
@@ -1291,6 +1468,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
           ${conflict}
           ${configured && enabled && state === 'failed' && p.failure ? `<div class="fail">${escapeHtml(p.failure)}</div>` : ''}
           ${state === 'failed' && p.pid ? `<div class="note">进程 PID ${p.pid} 仍在，停止可清理，重启可重新尝试。</div>` : ''}
+          ${profileBar}
           <div class="meta-list">
             <div class="meta-item"><span class="meta-label">端口</span><span class="meta-val ${portCls}">${portText}</span></div>
             <div class="meta-item"><span class="meta-label">进程</span><span class="meta-val ${p.pid ? '' : 'val-down'}">${p.pid ? 'PID ' + p.pid : '未运行'}</span></div>
@@ -1301,8 +1479,9 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
           <div class="card-actions">
             ${actionBtns}
             <button class="btn-outline" ${enabled && configured && !busy ? `onclick="restartProject('${p.id}')"` : 'disabled'}>重启</button>
+            <button class="btn-outline" onclick="openTerminal('${p.id}')" title="在系统终端打开">终端</button>
             <button class="btn-outline" onclick="editProject('${p.id}')">设置</button>
-            <button class="btn-outline" ${canOpenPage ? `onclick="openProjectInBrowser('${p.id}')"` : 'disabled'} title="在系统浏览器打开登录/访问页面">网页</button>
+            ${webBtn}
             <button class="btn-outline" onclick="openProjectDir('${p.id}')" title="在系统文件管理器中打开源码目录">目录</button>
             <button class="btn-outline" data-id="${escapeHtml(p.id)}" data-name="${escapeHtml(p.name)}" onclick="openLogModal(this.dataset.id, this.dataset.name)">日志</button>
             <button class="btn-danger-text" onclick="deleteProject('${p.id}')" title="从配置里删除这个项目" aria-label="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg></button>
@@ -1367,7 +1546,8 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
     }
 
     function startProject(id) {
-      return runAction(id, '启动中…', 'start', '启动失败');
+      const prof = getSelectedProfile(id);
+      return runAction(id, '启动中…', 'start', '启动失败', prof ? { profile: prof } : undefined);
     }
 
     function installDeps(id) {
@@ -1378,11 +1558,49 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       return runAction(id, '停止中…', 'stop', '停止失败');
     }
 
+    function restartProject(id) {
+      const prof = getSelectedProfile(id);
+      return runAction(id, '重启中…', 'restart', '重启失败', prof ? { profile: prof } : undefined);
+    }
+
+    async function openTerminal(id) {
+      const prof = getSelectedProfile(id);
+      try {
+        await postJson(`/api/projects/${id}/terminal`, {
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(prof ? { profile: prof } : {})
+        });
+      } catch (e) {
+        alert('打开终端失败：' + e.message);
+      }
+    }
+
     async function openProjectInBrowser(id) {
       try {
         await postJson(`/api/projects/${id}/open`);
       } catch (e) {
         alert('打开页面失败：' + e.message);
+      }
+    }
+
+    async function openProjectLink(id, url) {
+      try {
+        await postJson(`/api/projects/${id}/open`, {
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url })
+        });
+        closeAllSplitMenus();
+      } catch (e) {
+        alert('打开页面失败：' + e.message);
+      }
+    }
+
+    async function openAllProjectLinks(id) {
+      try {
+        await postJson(`/api/projects/${id}/open-all`);
+        closeAllSplitMenus();
+      } catch (e) {
+        alert('全部打开失败：' + e.message);
       }
     }
 
@@ -1451,6 +1669,9 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         const input = document.getElementById('add' + key);
         input.value = ''; input.disabled = false;
       }
+      document.getElementById('editLinks').value = '';
+      document.getElementById('editDefaultProfile').value = '';
+      document.getElementById('editProfiles').value = '';
       document.getElementById('addPort').value = '8080';
       renderGroupDatalist();
       document.getElementById('addModal').style.display = 'flex';
@@ -1466,6 +1687,9 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         for (const [key, field] of Object.entries({Health: 'health_url', LogDir: 'log_dir', Log: 'log_file', Timeout: 'start_timeout_secs', Grace: 'stop_grace_secs', Reason: 'reason'})) document.getElementById('edit' + key).value = editingProject[field] ?? '';
         document.getElementById('editEnabled').checked = editingProject.enabled;
         document.getElementById('editAutoInstall').checked = editingProject.auto_install;
+        document.getElementById('editLinks').value = formatLinksLines(editingProject.links);
+        document.getElementById('editDefaultProfile').value = editingProject.default_profile || '';
+        document.getElementById('editProfiles').value = formatProfilesLines(editingProject.profiles);
         const fields = {Id: 'id', Name: 'name', Group: 'group', Root: 'root', Start: 'start', Stop: 'stop', Port: 'port', Url: 'login_url', Node: 'node', Java: 'java'};
         for (const [key, field] of Object.entries(fields)) document.getElementById('add' + key).value = editingProject[field] ?? '';
         if (editingProject.group) {
@@ -1478,7 +1702,8 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       } catch (e) { alert('读取设置失败：' + e.message); }
     }
     function restartProject(id) {
-      return runAction(id, '重启中…', 'restart', '重启失败');
+      const prof = getSelectedProfile(id);
+      return runAction(id, '重启中…', 'restart', '重启失败', prof ? { profile: prof } : undefined);
     }
     function closeAddModal() {
       document.getElementById('addModal').style.display = 'none';
@@ -1503,6 +1728,25 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
 
       const minimumPort = editingProject && !document.getElementById('editEnabled').checked ? 0 : 1;
       if (!Number.isInteger(port) || port < minimumPort || port > 65535) { alert('启用项目的端口须为 1–65535 的整数'); return; }
+
+      let links = [];
+      let profiles = {};
+      const linksText = document.getElementById('editLinks').value;
+      const defaultProfile = document.getElementById('editDefaultProfile').value.trim();
+      const profilesText = document.getElementById('editProfiles').value;
+
+      try {
+        links = parseLinksLines(linksText);
+        profiles = parseProfilesLines(profilesText);
+      } catch (err) {
+        alert(err.message);
+        return;
+      }
+
+      if (defaultProfile && Object.keys(profiles).length > 0 && !profiles[defaultProfile]) {
+        alert(`默认环境 "${defaultProfile}" 不在配置的环境列表 profiles 中`);
+        return;
+      }
 
       const save = document.getElementById('projectSave');
       if (save.disabled) return;
@@ -1555,8 +1799,15 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
           payload.login_url = url;
           payload.node = node;
           payload.java = java;
+          payload.links = links;
+          payload.default_profile = defaultProfile || null;
+          payload.profiles = profiles;
           if (!editingProject.start_editable) delete payload.start;
           if (!editingProject.stop_editable) delete payload.stop;
+        } else {
+          if (links.length) payload.links = links;
+          if (defaultProfile) payload.default_profile = defaultProfile;
+          if (Object.keys(profiles).length) payload.profiles = profiles;
         }
         await postJson(editingProject ? `/api/projects/${editingProject.id}` : '/api/projects', {
           method: editingProject ? 'PATCH' : 'POST',
@@ -1613,10 +1864,16 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       const input = document.getElementById('searchInput');
       input.addEventListener('input', () => { query = input.value; syncSearchUi(); renderProjects(lastProjects); });
       input.addEventListener('keydown', e => {
-        if (e.key === 'Escape') { e.preventDefault(); if (query) { input.value = ''; query = ''; syncSearchUi(); renderProjects(lastProjects); } else { input.blur(); } }
+        if (e.key === 'Escape') {
+          closeAllSplitMenus();
+          e.preventDefault();
+          if (query) { input.value = ''; query = ''; syncSearchUi(); renderProjects(lastProjects); } else { input.blur(); }
+        }
       });
       document.getElementById('searchClear').addEventListener('click', e => { e.preventDefault(); input.value = ''; query = ''; syncSearchUi(); renderProjects(lastProjects); input.focus(); });
+      document.addEventListener('click', closeAllSplitMenus);
       document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { closeAllSplitMenus(); }
         const t = e.target;
         const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
         const modalOpen = [...document.querySelectorAll('.modal-backdrop')].some(m => m.style.display === 'flex');
@@ -1645,6 +1902,16 @@ mod tests {
         assert!(UI_HTML.contains("启动中"));
         assert!(UI_HTML.contains("就绪"));
         assert!(UI_HTML.contains("已停止"));
+    }
+
+    #[test]
+    fn home_html_contains_profiles_links_and_terminal_controls() {
+        assert!(UI_HTML.contains("tag-profile"));
+        assert!(UI_HTML.contains("profile-select-bar"));
+        assert!(UI_HTML.contains("split-menu"));
+        assert!(UI_HTML.contains("openTerminal"));
+        assert!(UI_HTML.contains("editLinks"));
+        assert!(UI_HTML.contains("editProfiles"));
     }
 
     #[test]

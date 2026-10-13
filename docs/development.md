@@ -32,11 +32,13 @@ cargo run -p tongyun-dev-cli -- remove demo_web
 常用 CLI 命令格式：
 - `tongyun-dev scan <dir> [--depth N] [--apply] [--json]`：扫描目录，识别项目并可选写入配置
 - `tongyun-dev list [--json] [--with-groups]`：列出所有已登记项目；`--json` 输出项目数组 `[...]`，搭配 `--with-groups` 输出 `{"projects":[...],"groups":[{key,label,order}]}`
-- `tongyun-dev status [id] [--json]`：查看项目状态（不带 id 为全部项目）
-- `tongyun-dev start <id> [--open]`：启动项目并等待端口连通/探针就绪；`--open` 就绪后用浏览器打开
+- `tongyun-dev status [id] [--json]`：查看项目状态（不带 id 为全部项目，返回当前生命周期、端口与 active_profile）
+- `tongyun-dev start <id> [--profile 名] [--open]`：启动项目（可选指定环境预设）并等待端口连通/探针就绪；`--open` 就绪后用浏览器打开
+- `tongyun-dev restart <id> [--profile 名] [--open]`：停止并使用指定或默认环境重新启动项目
+- `tongyun-dev terminal <id> [--profile 名]`：在系统原生终端窗口中打开并执行项目的启动命令或测试调试
 - `tongyun-dev stop <id>`：停止项目
 - `tongyun-dev logs <id> [--follow] [--lines N]`：查看或跟随日志输出
-- `tongyun-dev open <id> [--dir]`：用浏览器打开项目页面，或 `--dir` 打开项目根目录
+- `tongyun-dev open <id> [--dir] [--all]`：用浏览器打开项目页面，`--all` 打开所有配置链接，`--dir` 打开项目根目录
 - `tongyun-dev install <id>`：手动触发依赖安装（按锁文件选用 pnpm / yarn / npm）
 - `tongyun-dev input <id> [text] [--no-enter] [--key up|down|left|right|enter|tab|esc|ctrl-c]`：向运行中的交互脚本发送输入或按键
 - `tongyun-dev add <id> ...` / `tongyun-dev remove <id>`：添加或移除项目登记
@@ -193,6 +195,9 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 | `start_timeout_secs` | 可选（如 `30`）。启动就绪等待超时秒数，优先级高于环境变量 `TONGYUN_DEV_START_TIMEOUT` 与默认 180 秒 |
 | `stop_grace_secs` | 可选（如 `5`）。停止等待 TERM 宽限秒数，超时后发送 KILL，默认 8 秒 |
 | `group` | 可选。所属分组 key（引用顶层 `[group.<key>]`；未定义也作为同名组展示）。在 `--json` 中输出为 `group` 字段（未设置时为 `null`） |
+| `links` | 可选。快捷网页链接列表（如 `[{ title = "后台", url = "http://127.0.0.1:8080/admin" }]`），在 CLI（`open --all`）、控制台和桌面端展示为多链接菜单 |
+| `default_profile` | 可选。默认环境预设标识（如 `"dev"`、`"mock"`），不传 `--profile` 时的默认启动环境 |
+| `profiles` | 可选。环境预设配置表（`[projects.<id>.profiles.<name>]`，支持自定义 `label`、`start` 命令与 `port` 端口重写） |
 | `env` | 可选。额外环境变量键值对（例如 `env = { CI = "1", APP_ENV = "dev" }`），注入启动和依赖安装环境，用户显式配置的值优先 |
 | `pty` | 可选（缺省 `false`）。Unix 上是否用 openpty relay 在伪终端中运行后台进程（macOS 与 Linux 同一路径，不用系统 `script`）。Windows 忽略该字段 |
 | `auto_answers` | 可选。自动应答规则数组（例如 `[{ expect = "Select environment", send = "dev" }]`），启动时匹配日志输出并自动向标准输入发送内容 |
@@ -214,15 +219,16 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 用于验证核心功能的通用验收清单（可用示例项目或你自己的一个项目进行验证）：
 
 1. [ ] **扫描目录添加项目**：执行 `tongyun-dev scan ~/code` 或在界面中点击「扫描目录…」，能正确识别出 Spring Boot、Vite 前端等项目类型、端口与推荐工具链版本；带 `--apply` 保存时，已注册过的目录（相同 root）会被跳过且不覆盖已有配置。
-2. [ ] **状态查询与 JSON 输出**：执行 `tongyun-dev status demo_api --json`（或你自己的一个项目），能返回标准 JSON，包含 `state`、`running`、`pid`、`port`、`log_path` 与探针状态；未启动时 `state = "stopped"`，`running = false`。
+2. [ ] **状态查询与 JSON 输出**：执行 `tongyun-dev status demo_api --json`（或你自己的一个项目），能返回标准 JSON，包含 `state`、`running`、`pid`、`port`、`log_path`、`active_profile` 与探针状态；未启动时 `state = "stopped"`，`running = false`。
 3. [ ] **分阶段启停与就绪探针**：执行 `tongyun-dev start demo_api --open`，经历 `starting` -> `port_open` 直到就绪探针（或端口连通）成功变为 `ready`，并自动打开浏览器；执行 `tongyun-dev stop demo_api` 后进程退出且端口释放，状态回归 `stopped`。
 4. [ ] **端口冲突检测**：端口被非本项目的外部程序占用时，`status --json` 能正确标记 `port_conflict = true`，并在 `port_holder` 中显示占用程序的 PID 与进程名，不误判为本项目就绪。
 5. [ ] **日志查看与跟随**：执行 `tongyun-dev logs demo_api` 能正确输出日志内容；带 `--follow` 参数能在文件生成及追加内容时持续跟随输出。
-6. [ ] **网页控制台与桌面 App 表现一致**：启动 `tongyun-dev`（默认 `http://127.0.0.1:9099`）与桌面应用，卡片/列表中的项目状态、启停操作及日志展示完全一致；停用项（`enabled = false`）置灰且展示禁用原因。
-7. [ ] **快捷打开页面与目录**：执行 `tongyun-dev open demo_api` 能在浏览器中打开对应服务页面；执行 `tongyun-dev open demo_api --dir` 能在系统文件管理器中打开项目根目录。
-8. [ ] **Java / Node 版本切换与缺失报错**：配置了 `java = "17"` 或 `node = "20"` 的项目，启动前能自动注入对应工具链环境；若本机未安装声明的版本，启动时给出明确可读的错误提示，而不是使用错误版本运行。
-9. [ ] **项目增删与配置保留**：通过 CLI（`tongyun-dev add` / `remove`）或界面操作增删项目，配置正确写入 `~/.config/tongyun-dev/projects.toml`，且原有文件注释与结构不受影响。
-10. [ ] **安全与敏感信息隔离**：全程终端与日志中不打印数据库密码、Token 等敏感信息；项目配置文件只存在于本地，不进入 Git 仓库。
+6. [ ] **网页控制台与桌面 App 表现一致**：启动 `tongyun-dev`（默认 `http://127.0.0.1:9099`）与桌面应用，卡片/列表中的项目状态、启停操作、环境下拉、多链接菜单及日志展示完全一致；停用项（`enabled = false`）置灰且展示禁用原因。
+7. [ ] **快捷打开页面、目录与终端**：执行 `tongyun-dev open demo_api` 能在浏览器中打开对应服务页面；执行 `tongyun-dev open demo_api --all` 能批量打开项目所有配置链接；执行 `tongyun-dev open demo_api --dir` 能在文件管理器打开源码目录；执行 `tongyun-dev terminal demo_api` 能拉起系统原生终端窗口。
+8. [ ] **多环境预设与状态响应**：配置了 `profiles` 的项目，执行 `tongyun-dev start demo_api --profile mock` 时能按预设的自定义命令与端口启动，并在 status 与界面中高亮标记 `active_profile`；端口覆盖时自动适配探针与页面打开 URL。
+9. [ ] **Java / Node 版本切换与缺失报错**：配置了 `java = "17"` 或 `node = "20"` 的项目，启动前能自动注入对应工具链环境；若本机未安装声明的版本，启动时给出明确可读的错误提示，而不是使用错误版本运行。
+10. [ ] **项目增删与配置保留**：通过 CLI（`tongyun-dev add` / `remove`）或界面操作增删项目，配置正确写入 `~/.config/tongyun-dev/projects.toml`，且原有文件注释与结构不受影响。
+11. [ ] **安全与敏感信息隔离**：全程终端与日志中不打印数据库密码、Token 等敏感信息；项目配置文件只存在于本地，不进入 Git 仓库。
 
 ## 重启与网页项目设置
 

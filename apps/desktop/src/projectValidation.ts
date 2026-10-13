@@ -134,20 +134,28 @@ export function parseLinksLines(text: string): {
     const raw = lines[i];
     const line = raw.trim();
     if (!line) continue;
+    let title = "";
+    let url = "";
     if (line.includes("=>")) {
       const arrowIdx = line.indexOf("=>");
-      const title = line.slice(0, arrowIdx).trim();
-      const url = line.slice(arrowIdx + 2).trim();
+      title = line.slice(0, arrowIdx).trim();
+      url = line.slice(arrowIdx + 2).trim();
       if (!url) {
         return {
           links: [],
           error: `第 ${i + 1} 行网页链接 URL 不能为空：${line}`,
         };
       }
-      links.push({ title: title || url, url });
     } else {
-      links.push({ title: line, url: line });
+      url = line;
     }
+    if (!url.startsWith("http://") && !url.startsWith("https://")) {
+      return {
+        links: [],
+        error: `第 ${i + 1} 行网页链接 URL 必须以 http:// 或 https:// 开头：${url}`,
+      };
+    }
+    links.push({ title: title || url, url });
   }
   return { links };
 }
@@ -314,6 +322,18 @@ export function validateProjectForm(
     const { error: profilesError } = parseProfilesLines(data.profiles_text);
     if (profilesError) {
       errors.profiles_text = profilesError;
+    }
+  }
+
+  if (data.default_profile !== undefined && data.default_profile.trim() !== "") {
+    const def = data.default_profile.trim();
+    if (!/^[a-zA-Z0-9_-]+$/.test(def)) {
+      errors.default_profile = "默认环境标识只能包含字母、数字、下划线和连字符";
+    } else if (data.profiles_text !== undefined) {
+      const { profiles } = parseProfilesLines(data.profiles_text);
+      if (Object.keys(profiles).length > 0 && !profiles[def]) {
+        errors.default_profile = `默认环境 "${def}" 不在配置的环境列表 profiles 中`;
+      }
     }
   }
 

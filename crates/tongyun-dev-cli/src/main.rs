@@ -1206,4 +1206,51 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
     }
+
+    #[test]
+    fn parses_profile_open_all_and_terminal_arguments() {
+        // start with profile
+        let cli = Cli::try_parse_from(["tongyun-dev", "start", "web", "--profile", "dev"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Start { id, profile, .. }) => {
+                assert_eq!(id, "web");
+                assert_eq!(profile.as_deref(), Some("dev"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // restart with profile
+        let cli = Cli::try_parse_from(["tongyun-dev", "restart", "web", "--profile", "mock"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Restart { id, profile, .. }) => {
+                assert_eq!(id, "web");
+                assert_eq!(profile.as_deref(), Some("mock"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // open --all
+        let cli = Cli::try_parse_from(["tongyun-dev", "open", "web", "--all"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Open { id, dir, all }) => {
+                assert_eq!(id, "web");
+                assert!(!dir);
+                assert!(all);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // open --dir and --all conflict
+        assert!(Cli::try_parse_from(["tongyun-dev", "open", "web", "--dir", "--all"]).is_err());
+
+        // terminal with profile
+        let cli = Cli::try_parse_from(["tongyun-dev", "terminal", "web", "--profile", "dev"]).unwrap();
+        match cli.cmd {
+            Some(Cmd::Terminal { id, profile }) => {
+                assert_eq!(id, "web");
+                assert_eq!(profile.as_deref(), Some("dev"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
 }

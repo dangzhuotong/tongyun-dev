@@ -27,13 +27,14 @@ tongyun-dev ui [--port 9099]   # 网页控制台，默认 http://127.0.0.1:9099
 | 命令 | 作用 | Agent 注意 |
 | --- | --- | --- |
 | `list [--json] [--with-groups]` | 已登记项目 | 先 list 再 start；搭配 `--with-groups` 返回带 groups 对象 |
-| `status [id] [--json]` | 单项目或全部生命周期 | **解析 `--json`** |
-| `start <id> [--timeout N] [--json] [--open]` | 启到端口通/探针成功；`--open` 就绪后开页 | 可能先 `installing` |
-| `restart <id> [--timeout N] [--json] [--open]` | 停止成功后重新启动并等待就绪 | 停止失败不会继续启动 |
+| `status [id] [--json]` | 单项目或全部生命周期 | **解析 `--json`**（含 active_profile、端口、探针等） |
+| `start <id> [--profile 名] [--timeout N] [--json] [--open]` | 启到端口通/探针成功；`--open` 就绪后开页 | 支持指定环境预设；可能先 `installing` |
+| `restart <id> [--profile 名] [--timeout N] [--json] [--open]` | 停止成功后以指定环境重新启动并等待就绪 | 停止失败不会继续启动 |
+| `terminal <id> [--profile 名]` | 拉起系统原生终端执行启动命令或调试 | 跨平台打开终端窗口 |
 | `stop <id> [--json]` | 停进程组 | 失败也要读 status |
 | `logs <id> [--follow] [--lines N] [--json]` | 读日志 | 大日志用 lines |
 | `wait <id> --timeout N [--json]` | 观察已有服务直到就绪 | 不启动、不停止；超时返回非零 |
-| `open <id> [--dir]` | 开页面或目录 | |
+| `open <id> [--dir] [--all]` | 开页面或目录；`--all` 打开所有配置链接 | |
 | `install <id> [--json]` | 装前端依赖 | |
 | `input <id> [text] [--no-enter] [--key key]` | 向运行中交互脚本发送输入或按键 | 支持 `--json` |
 | `scan <dir> [--depth N] [--apply] [--json]` | 扫描识别项目；`--apply` 写入配置 | 先无 apply 预览 |
@@ -50,9 +51,10 @@ tongyun-dev ui [--port 9099]   # 网页控制台，默认 http://127.0.0.1:9099
 | --- | --- |
 | `running` | 仅 `ready` / `port_open` 为 true；进程是否存活看 `pid` |
 | `state` | `stopped` / `installing` / `starting` / `port_open` / `ready` / `failed` |
+| `active_profile` | 当前运行（或启动中）的环境预设标识；未指定或无配置时为 null |
 | `elapsed_secs` | 进入当前态时长 |
 | `failure` | 失败原因（失败时） |
-| `pid` / `port` | 进程与端口 |
+| `pid` / `port` | 进程与端口（支持多环境端口重写反映） |
 | `login_probe` | 登录/健康探针（含 `http_code`、`ok` 等） |
 | `log_path` | 日志路径 |
 | `port_conflict` / `port_holder` | 端口冲突信息 |
@@ -75,11 +77,11 @@ Unix 上 `pty = true` 的后台进程不走系统 `script`。macOS 与 Linux 同
 | 方法 | 路径 | 作用 |
 | --- | --- | --- |
 | GET | `/api/projects` | 概览 |
-| GET | `/api/projects/{id}` | 项目设置详情 |
+| GET | `/api/projects/{id}` | 项目设置详情（含 links、profiles、default_profile） |
 | PATCH | `/api/projects/{id}` | 部分更新项目设置 |
 | GET | `/api/projects/{id}/logs` | 日志 |
 | POST | `/api/projects/{id}/input` | 发送输入/按键（非运行中/管道满返回 409，超限返回 400，Windows 暂不支持） |
-| POST | `/api/projects/{id}/start\|stop\|restart\|install\|open\|open-dir` | 动作 |
+| POST | `/api/projects/{id}/start\|stop\|restart\|install\|open\|open-all\|open-dir\|terminal` | 动作（start/restart/terminal 可带 `{profile}`，open 可带 `{url}`） |
 | POST | `/api/projects` | 新增登记 |
 | DELETE | `/api/projects/{id}` | 删登记 |
 | POST | `/api/scan` | 扫描预览 |

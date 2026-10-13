@@ -846,7 +846,24 @@ impl Loaded {
 
 impl Loaded {
     pub fn status(&self, id: &str) -> Result<StatusJson> {
-        let project = self.resolve(id)?;
+        let base = self.resolve(id)?;
+        let active_prof = {
+            let pid = read_pid(&base.pid_file);
+            let alive = pid.is_some_and(process_alive);
+            if alive || read_start_marker(&base.pid_file).is_some() || install_in_progress(&base.pid_file) {
+                std::fs::read_to_string(profile_marker_path(&base.pid_file))
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            } else {
+                None
+            }
+        };
+        let project = if let Some(ref prof) = active_prof {
+            self.resolve_with_profile(id, Some(prof)).unwrap_or(base)
+        } else {
+            base
+        };
         let _ = self.check_auto_answers(&project);
         let peers = self.peer_pids(&project.id);
         Ok(status_of(&project, &peers))
@@ -1908,13 +1925,21 @@ fn resolve_project_with_profile(
             }
             if let Some(port) = prof.port {
                 if port > 0 {
+                    let old_port_str = format!(":{}", project.port);
+                    let new_port_str = format!(":{}", port);
+                    if !project.login_url.is_empty() {
+                        project.login_url = project.login_url.replace(&old_port_str, &new_port_str);
+                    }
+                    if !project.health_url.is_empty() {
+                        project.health_url = project.health_url.replace(&old_port_str, &new_port_str);
+                    }
                     project.port = port;
                 }
             }
             for (k, v) in &prof.env {
                 project.env.insert(k.clone(), v.clone());
             }
-        } else if profile_name.is_some() {
+        } else {
             bail!("unknown profile `{name}` for project `{id}`");
         }
     }
@@ -2416,7 +2441,7 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
     };
     let running = matches!(state, LifeState::PortOpen | LifeState::Ready);
 
-    let active_profile = if process_alive {
+    let active_profile = if state != LifeState::Stopped {
         std::fs::read_to_string(profile_marker_path(&p.pid_file))
             .ok()
             .map(|s| s.trim().to_string())
@@ -4570,6 +4595,31 @@ impl NewProject {
         if !enabled && reason.is_empty() {
             bail!("disabled project `{id}` needs a reason");
         }
+        for (idx, link) in self.links.iter().enumerate() {
+            let u = link.url.trim();
+            if u.is_empty() {
+                bail!("links[{}]: url cannot be empty", idx);
+            }
+            if !(u.starts_with("http://") || u.starts_with("https://")) {
+                bail!("links[{}]: url `{u}` must start with http:// or https://", idx);
+            }
+        }
+        for (key, prof) in &self.profiles {
+            if key.trim().is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                bail!("profile key `{key}` may only contain letters, digits, `_`, `-`");
+            }
+            if let Some(p) = prof.port {
+                if p == 0 {
+                    bail!("profile `{key}`: port cannot be 0");
+                }
+            }
+        }
+        if let Some(ref dp) = self.default_profile {
+            let trimmed = dp.trim();
+            if !trimmed.is_empty() && !self.profiles.contains_key(trimmed) {
+                bail!("default_profile `{trimmed}` does not exist in profiles");
+            }
+        }
         let group = non_empty(&self.group).unwrap_or_default();
         let project = Project {
             name,
@@ -5243,6 +5293,37 @@ impl Loaded {
             }
         }
 
+        if let Some(ref links) = edit.links {
+            for (idx, link) in links.iter().enumerate() {
+                let u = link.url.trim();
+                if u.is_empty() {
+                    bail!("links[{}]: url cannot be empty", idx);
+                }
+                if !(u.starts_with("http://") || u.starts_with("https://")) {
+                    bail!("links[{}]: url `{u}` must start with http:// or https://", idx);
+                }
+            }
+        }
+
+        let effective_profiles = edit.profiles.as_ref().unwrap_or(&existing.profiles);
+        for (key, prof) in effective_profiles {
+            if key.trim().is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                bail!("profile key `{key}` may only contain letters, digits, `_`, `-`");
+            }
+            if let Some(p) = prof.port {
+                if p == 0 {
+                    bail!("profile `{key}`: port cannot be 0");
+                }
+            }
+        }
+
+        if let Some(ref dp) = edit.default_profile {
+            let trimmed = dp.trim();
+            if !trimmed.is_empty() && !effective_profiles.contains_key(trimmed) {
+                bail!("default_profile `{trimmed}` does not exist in profiles");
+            }
+        }
+
         let mut test_project = existing.clone();
         if let Some(ref name) = edit.name {
             test_project.name = name.trim().to_string();
@@ -5282,6 +5363,7 @@ impl Loaded {
 
     /// Update an existing project in the config file. Preserves other keys, key order, comments and multiline strings.
     pub fn update_project(&mut self, id: &str, edit: ProjectEdit) -> Result<ProjectRow> {
+        self.validate_update_project(id, &edit)?;
         let existing = self
             .config
             .projects
@@ -5804,13 +5886,23 @@ pub fn open_terminal_command(dir: &Path, cmd_str: &str, title: &str) -> Result<(
     if !dir.is_dir() {
         bail!("directory does not exist: {}", dir.display());
     }
+    let cmd_trimmed = cmd_str.trim();
+    if cmd_trimmed.is_empty() {
+        bail!("command string cannot be empty");
+    }
     let dir_str = path_to_string(dir);
 
     #[cfg(target_os = "windows")]
     {
+        let safe_title = title.replace(['"', '&', '|', '<', '>', '^'], "");
+        let window_title = if safe_title.trim().is_empty() {
+            "tongyun-dev"
+        } else {
+            safe_title.trim()
+        };
         let mut c = Command::new("cmd");
-        let shell_cmd = format!("cd /d \"{}\" && {}", dir_str, cmd_str);
-        c.args(["/C", "start", title, "cmd.exe", "/K", &shell_cmd]);
+        let full_cmd = format!("title {window_title} && cd /d \"{dir_str}\" && {cmd_trimmed}");
+        c.args(["/C", "start", "", "cmd.exe", "/K", &full_cmd]);
         c.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -5821,9 +5913,11 @@ pub fn open_terminal_command(dir: &Path, cmd_str: &str, title: &str) -> Result<(
 
     #[cfg(target_os = "macos")]
     {
+        let escaped_dir = dir_str.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped_cmd = cmd_trimmed.replace('\\', "\\\\").replace('"', "\\\"");
         let script = format!(
-            "tell application \"Terminal\" to do script \"cd {:?}; {}\"",
-            dir_str, cmd_str
+            "tell application \"Terminal\" to do script \"cd \\\"{}\\\"; {}\"",
+            escaped_dir, escaped_cmd
         );
         let mut c = Command::new("osascript");
         c.args([
@@ -5842,11 +5936,16 @@ pub fn open_terminal_command(dir: &Path, cmd_str: &str, title: &str) -> Result<(
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let terms = ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"];
-        for term in terms {
+        let terms = [
+            ("x-terminal-emulator", vec!["-e", "bash", "-c", cmd_trimmed]),
+            ("gnome-terminal", vec!["--", "bash", "-c", cmd_trimmed]),
+            ("konsole", vec!["-e", "bash", "-c", cmd_trimmed]),
+            ("xterm", vec!["-e", "bash", "-c", cmd_trimmed]),
+        ];
+        for (term, args) in terms {
             if let Ok(mut c) = Command::new(term)
                 .current_dir(dir)
-                .args(["-e", cmd_str])
+                .args(&args)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -5855,10 +5954,7 @@ pub fn open_terminal_command(dir: &Path, cmd_str: &str, title: &str) -> Result<(
                 return Ok(());
             }
         }
-        bail!(
-            "no supported terminal emulator found (tried: {})",
-            terms.join(", ")
-        );
+        bail!("no supported terminal emulator found (tried: x-terminal-emulator, gnome-terminal, konsole, xterm)");
     }
 }
 
@@ -7994,6 +8090,131 @@ USE_MOCK = "true"
             reloaded_detail.profiles.get("prod").unwrap().port,
             Some(4000)
         );
+    }
+
+    #[test]
+    fn test_14_validation_of_links_and_profiles() {
+        let dir = std::env::temp_dir().join(format!("tongyun_dev_val_{}", current_time_secs()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("projects.toml");
+        let toml = r#"
+[projects.app]
+name = "App"
+root = "/tmp"
+port = 3000
+start = ["bash", "-c", "exec pnpm dev"]
+"#;
+        std::fs::write(&path, toml).unwrap();
+        let mut loaded = load(Some(&path)).unwrap();
+
+        // Invalid link URL
+        let bad_link = loaded.update_project(
+            "app",
+            ProjectEdit {
+                links: Some(vec![WebLink {
+                    title: "Bad".to_string(),
+                    url: "ftp://example.com".to_string(),
+                }]),
+                ..Default::default()
+            },
+        );
+        assert!(bad_link.is_err());
+        assert!(bad_link.unwrap_err().to_string().contains("must start with http:// or https://"));
+
+        // Invalid profile key
+        let mut bad_profiles = std::collections::BTreeMap::new();
+        bad_profiles.insert(
+            "bad key!".to_string(),
+            ProfileConfig {
+                label: "Bad".to_string(),
+                start: Some("pnpm dev".to_string()),
+                port: Some(3001),
+                env: Default::default(),
+            },
+        );
+        let bad_prof = loaded.update_project(
+            "app",
+            ProjectEdit {
+                profiles: Some(bad_profiles),
+                ..Default::default()
+            },
+        );
+        assert!(bad_prof.is_err());
+        assert!(bad_prof.unwrap_err().to_string().contains("profile key `bad key!` may only contain"));
+
+        // default_profile not in profiles
+        let bad_dp = loaded.update_project(
+            "app",
+            ProjectEdit {
+                default_profile: Some("nonexistent".to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(bad_dp.is_err());
+        assert!(bad_dp.unwrap_err().to_string().contains("default_profile `nonexistent` does not exist in profiles"));
+    }
+
+    #[test]
+    fn test_15_open_terminal_command_validations() {
+        let missing_dir = Path::new("/definitely/nonexistent/terminal/dir");
+        let err = open_terminal_command(missing_dir, "echo hi", "test").unwrap_err();
+        assert!(err.to_string().contains("directory does not exist"));
+
+        let temp_dir = std::env::temp_dir();
+        let err2 = open_terminal_command(&temp_dir, "   ", "test").unwrap_err();
+        assert!(err2.to_string().contains("command string cannot be empty"));
+    }
+
+    #[test]
+    fn test_16_status_reflects_active_profile_and_custom_port() {
+        let dir = std::env::temp_dir().join(format!("tongyun_dev_actprof_{}", current_time_secs()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("projects.toml");
+        let toml = format!(
+            r#"
+[projects.app]
+name = "App"
+root = "{}"
+port = 3000
+log_dir = "{}/logs"
+start = ["echo", "hi"]
+health_url = "http://127.0.0.1:3000/health"
+
+[projects.app.profiles.mock]
+label = "Mock"
+start = "echo mock"
+port = 3001
+"#,
+            dir.display().to_string().replace('\\', "/"),
+            dir.display().to_string().replace('\\', "/")
+        );
+        std::fs::write(&path, toml).unwrap();
+        let loaded = load(Some(&path)).unwrap();
+
+        // 1. Stopped status: port is base port 3000, active_profile is None
+        let st_stopped = loaded.status("app").unwrap();
+        assert_eq!(st_stopped.port, 3000);
+        assert_eq!(st_stopped.active_profile, None);
+
+        // 2. Simulate running process with active profile "mock"
+        let pid_file = dir.join("logs/app.pid");
+        let _ = std::fs::create_dir_all(dir.join("logs"));
+        let my_pid = std::process::id();
+        std::fs::write(&pid_file, my_pid.to_string()).unwrap();
+        let prof_marker = profile_marker_path(&pid_file);
+        std::fs::write(&prof_marker, "mock").unwrap();
+
+        let st_active = loaded.status("app").unwrap();
+        assert_eq!(st_active.port, 3001);
+        assert_eq!(st_active.active_profile.as_deref(), Some("mock"));
+        assert_eq!(st_active.login_probe.url, "http://127.0.0.1:3001/health");
+
+        // 3. Clean up active profile marker
+        let _ = std::fs::remove_file(&prof_marker);
+        let st_no_prof = loaded.status("app").unwrap();
+        assert_eq!(st_no_prof.port, 3000);
+        assert_eq!(st_no_prof.active_profile, None);
+        let _ = std::fs::remove_file(&pid_file);
     }
 }
 

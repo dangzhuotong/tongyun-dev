@@ -114,25 +114,30 @@ export function App() {
       } else if (e.key === "/" && !typing && !document.querySelector(".modal-backdrop")) {
         e.preventDefault();
         searchRef.current?.focus();
-      } else if (e.key === "Escape" && menu) {
-        setMenu("");
+      } else if (e.key === "Escape") {
+        if (menu) setMenu("");
+        if (pagesDropdownOpen) setPagesDropdownOpen(false);
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [menu]);
+  }, [menu, pagesDropdownOpen]);
 
   // 点菜单外面关闭菜单
   useEffect(() => {
-    if (!menu) return;
+    if (!menu && !pagesDropdownOpen) return;
     function onDown(e: MouseEvent) {
       const el = e.target as HTMLElement | null;
-      if (el && el.closest(".menu-anchor")) return;
-      setMenu("");
+      if (menu && !el?.closest(".menu-anchor")) {
+        setMenu("");
+      }
+      if (pagesDropdownOpen && !el?.closest(".pages-split-btn")) {
+        setPagesDropdownOpen(false);
+      }
     }
     window.addEventListener("mousedown", onDown);
     return () => window.removeEventListener("mousedown", onDown);
-  }, [menu]);
+  }, [menu, pagesDropdownOpen]);
 
   const refresh = useCallback(async (id: string) => {
     const [nextStatus, nextLog] = await Promise.all([
@@ -240,13 +245,34 @@ export function App() {
     };
   }, [selected, refresh, projects]);
 
+  const prevSelectedRef = useRef<string>("");
+  const prevActiveProfileRef = useRef<string | null | undefined>(undefined);
+
   useEffect(() => {
     if (!selected) {
       setSelectedProfile("");
+      prevSelectedRef.current = "";
+      prevActiveProfileRef.current = undefined;
       return;
     }
     const proj = projects?.projects.find((p) => p.id === selected);
-    setSelectedProfile(status?.active_profile || proj?.default_profile || "");
+    const currentActive = status?.active_profile;
+
+    if (prevSelectedRef.current !== selected) {
+      // 切换项目：选项目当前运行环境或默认配置
+      setSelectedProfile(currentActive || proj?.default_profile || "");
+      prevSelectedRef.current = selected;
+      prevActiveProfileRef.current = currentActive;
+    } else if (prevActiveProfileRef.current !== currentActive) {
+      // 外部状态变化（如刚启动或停止）
+      if (currentActive) {
+        setSelectedProfile(currentActive);
+      } else if (prevActiveProfileRef.current !== undefined) {
+        // 项目由运行变为停止，恢复为默认配置
+        setSelectedProfile(proj?.default_profile || "");
+      }
+      prevActiveProfileRef.current = currentActive;
+    }
   }, [selected, projects, status?.active_profile]);
 
   async function handlePickConfig() {

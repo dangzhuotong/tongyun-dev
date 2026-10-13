@@ -12,7 +12,7 @@
 
 ## 后续完善
 
-- 已补：三端统一重启、网页项目设置、重复启动保护、停止结果校验、Windows 进程管理与跨平台兼容性（tasklist/taskkill 树终止、cmd/PowerShell 解包、TOML/JSON 路径规范化）、macOS/Linux CI。
+- 已补：三端统一重启、网页项目设置、重复启动保护、停止结果校验、Windows 进程管理与跨平台兼容性（tasklist/taskkill 树终止、cmd/PowerShell 解包、TOML/JSON 路径规范化）、多环境预设（`--profile`、动态重写端口与探针、active_profile 反映）、快捷网页链接与全开（`links`、`open --all`、多链接折叠菜单）、系统原生终端拉起（`terminal` 命令与跨平台命令转义）、macOS/Linux CI。
 - 待完成：旧日志/PID 目录迁移引导、各平台 GUI 真机验收、签名发布。
 - 后续产品功能：项目分组、批量启停、依赖启动顺序。
 - 交互输入后续（#8 合入后非阻塞备注，2026-10-12）：

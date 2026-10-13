@@ -657,4 +657,64 @@ describe("buildEditRequest with links, profiles and default_profile", () => {
   });
 });
 
+describe("Link protocol and default_profile validation", () => {
+  const baseValid: ProjectFormData = {
+    id: "demo",
+    name: "Demo",
+    root: "/tmp",
+    start: "echo 1",
+    stop: "",
+    port: 3000,
+    login_url: "",
+    health_url: "",
+    log_file: "",
+    node: "",
+    java: "",
+    enabled: true,
+    reason: "",
+    start_timeout_secs: "",
+  };
+
+  it("rejects link URLs not starting with http:// or https://", () => {
+    const resFtp = parseLinksLines("文档 => ftp://example.com");
+    expect(resFtp.error).toContain("必须以 http:// 或 https:// 开头");
+
+    const resJs = parseLinksLines("javascript:alert(1)");
+    expect(resJs.error).toContain("必须以 http:// 或 https:// 开头");
+
+    const resNoProto = parseLinksLines("example.com/api");
+    expect(resNoProto.error).toContain("必须以 http:// 或 https:// 开头");
+
+    const errors = validateProjectForm({
+      ...baseValid,
+      links_text: "bad link => ftp://foo.bar",
+    });
+    expect(errors.links_text).toContain("必须以 http:// 或 https:// 开头");
+  });
+
+  it("validates default_profile key characters and existence in profiles_text", () => {
+    const errInvalidKey = validateProjectForm({
+      ...baseValid,
+      default_profile: "dev with spaces!",
+      profiles_text: "dev: pnpm dev",
+    });
+    expect(errInvalidKey.default_profile).toContain("字母、数字、下划线和连字符");
+
+    const errMissingProfile = validateProjectForm({
+      ...baseValid,
+      default_profile: "staging",
+      profiles_text: "dev: pnpm dev\nprod: pnpm start",
+    });
+    expect(errMissingProfile.default_profile).toContain("不在配置的环境列表");
+
+    const okProfile = validateProjectForm({
+      ...baseValid,
+      default_profile: "dev",
+      profiles_text: "dev: pnpm dev\nprod: pnpm start",
+    });
+    expect(okProfile.default_profile).toBeUndefined();
+  });
+});
+
+
 

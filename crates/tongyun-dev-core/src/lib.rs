@@ -296,6 +296,10 @@ pub struct ProjectRow {
     pub default_profile: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub profiles: std::collections::BTreeMap<String, ProfileConfig>,
+    /// Set when this row could not be resolved (for example a bad `log_dir`).
+    /// The rest of the catalog still loads, so the main window can open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -439,6 +443,40 @@ pub struct StatusJson {
     /// 当前生效的启动预设环境（可选）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_profile: Option<String>,
+    /// Set when the project could not be resolved. Absent on a normal status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve_error: Option<String>,
+}
+
+/// Status row for a project `list` could not resolve. Other projects are unaffected.
+pub fn unresolved_status(row: &ProjectRow, failure: impl Into<String>) -> StatusJson {
+    StatusJson {
+        id: row.id.clone(),
+        name: row.name.clone(),
+        running: false,
+        state: LifeState::Stopped,
+        elapsed_secs: None,
+        timeout_secs: 0,
+        failure: Some(failure.into()),
+        pid: None,
+        port: row.port,
+        port_open: false,
+        login_probe: LoginProbe {
+            url: String::new(),
+            http_code: None,
+            ok: false,
+        },
+        log_path: String::new(),
+        pid_path: String::new(),
+        root: row.root.clone(),
+        port_conflict: false,
+        port_holder: String::new(),
+        deps_missing: false,
+        install_command: String::new(),
+        hints: Vec::new(),
+        active_profile: None,
+        resolve_error: row.resolve_error.clone(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -455,6 +493,92 @@ pub struct LogTail {
     pub text: String,
 }
 
+fn row_from_resolved(
+    resolved: &Resolved,
+    configured: bool,
+    default_profile: Option<String>,
+    profiles: std::collections::BTreeMap<String, ProfileConfig>,
+) -> ProjectRow {
+    ProjectRow {
+        id: resolved.id.clone(),
+        name: resolved.name.clone(),
+        group: if resolved.group.is_empty() {
+            None
+        } else {
+            Some(resolved.group.clone())
+        },
+        root: path_to_string(&resolved.root),
+        enabled: resolved.enabled,
+        port: resolved.port,
+        reason: resolved.reason.clone(),
+        configured,
+        start_timeout_secs: resolved.start_timeout_secs,
+        stop_grace_secs: resolved.stop_grace_secs,
+        node: resolved.node.clone(),
+        java: resolved.java.clone(),
+        java_home: resolved.java_home.as_ref().map(|p| path_to_string(p)),
+        node_home: resolved.node_home.as_ref().map(|p| path_to_string(p)),
+        shell: resolved.shell.clone(),
+        auto_install: resolved.auto_install,
+        port_mode: resolved.port_mode.clone(),
+        port_arg: resolved.port_arg.clone(),
+        port_env: resolved.port_env.clone(),
+        env: resolved.env.clone(),
+        pty: resolved.pty,
+        auto_answers: resolved.auto_answers.clone(),
+        links: resolved.links.clone(),
+        default_profile,
+        profiles,
+        resolve_error: None,
+    }
+}
+
+fn unresolved_row(id: &str, raw: Option<&Project>, err: String) -> ProjectRow {
+    let name = raw
+        .map(|p| p.name.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(id)
+        .to_string();
+    ProjectRow {
+        id: id.to_string(),
+        name,
+        group: raw.and_then(|p| {
+            let g = p.group.trim();
+            if g.is_empty() {
+                None
+            } else {
+                Some(g.to_string())
+            }
+        }),
+        root: raw.map(|p| p.root.clone()).unwrap_or_default(),
+        enabled: raw.map(|p| p.enabled).unwrap_or(true),
+        port: raw.map(|p| p.port).unwrap_or(0),
+        reason: raw.map(|p| p.reason.clone()).unwrap_or_default(),
+        configured: false,
+        start_timeout_secs: raw.and_then(|p| p.start_timeout_secs),
+        stop_grace_secs: raw.and_then(|p| p.stop_grace_secs),
+        node: raw.and_then(|p| p.node.clone()),
+        java: raw.and_then(|p| p.java.clone()),
+        java_home: raw.and_then(|p| p.java_home.clone()),
+        node_home: raw.and_then(|p| p.node_home.clone()),
+        shell: raw.and_then(|p| p.shell.clone()),
+        auto_install: raw.map(|p| p.auto_install.unwrap_or(true)).unwrap_or(true),
+        port_mode: raw
+            .and_then(|p| p.port_mode.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "none".to_string()),
+        port_arg: raw.and_then(|p| p.port_arg.clone()),
+        port_env: raw.and_then(|p| p.port_env.clone()),
+        env: raw.map(|p| p.env.clone()).unwrap_or_default(),
+        pty: raw.map(|p| p.pty).unwrap_or(false),
+        auto_answers: raw.map(|p| p.auto_answers.clone()).unwrap_or_default(),
+        links: raw.map(|p| p.links.clone()).unwrap_or_default(),
+        default_profile: raw.and_then(|p| p.default_profile.clone()),
+        profiles: raw.map(|p| p.profiles.clone()).unwrap_or_default(),
+        resolve_error: Some(err),
+    }
+}
+
 impl Loaded {
     pub fn path(&self) -> &Path {
         &self.path
@@ -465,40 +589,23 @@ impl Loaded {
         ids.sort();
         let mut projects = Vec::with_capacity(ids.len());
         for id in ids {
-            let resolved = self.resolve(&id)?;
-            let configured = resolved.port > 0
-                && (!resolved.active_start().is_empty() || resolved.tomcat.is_some());
-            projects.push(ProjectRow {
-                id: resolved.id,
-                name: resolved.name,
-                group: if resolved.group.is_empty() {
-                    None
-                } else {
-                    Some(resolved.group.clone())
-                },
-                root: path_to_string(&resolved.root),
-                enabled: resolved.enabled,
-                port: resolved.port,
-                reason: resolved.reason,
-                configured,
-                start_timeout_secs: resolved.start_timeout_secs,
-                stop_grace_secs: resolved.stop_grace_secs,
-                node: resolved.node,
-                java: resolved.java,
-                java_home: resolved.java_home.as_ref().map(|p| path_to_string(p)),
-                node_home: resolved.node_home.as_ref().map(|p| path_to_string(p)),
-                shell: resolved.shell,
-                auto_install: resolved.auto_install,
-                port_mode: resolved.port_mode,
-                port_arg: resolved.port_arg,
-                port_env: resolved.port_env,
-                env: resolved.env.clone(),
-                pty: resolved.pty,
-                auto_answers: resolved.auto_answers.clone(),
-                links: resolved.links.clone(),
-                default_profile: self.config.projects.get(&id).and_then(|p| p.default_profile.clone()),
-                profiles: self.config.projects.get(&id).map(|p| p.profiles.clone()).unwrap_or_default(),
-            });
+            match self.resolve(&id) {
+                Ok(resolved) => {
+                    let configured = resolved.port > 0
+                        && (!resolved.active_start().is_empty() || resolved.tomcat.is_some());
+                    let raw = self.config.projects.get(&id);
+                    projects.push(row_from_resolved(
+                        &resolved,
+                        configured,
+                        raw.and_then(|p| p.default_profile.clone()),
+                        raw.map(|p| p.profiles.clone()).unwrap_or_default(),
+                    ));
+                }
+                Err(err) => {
+                    let raw = self.config.projects.get(&id);
+                    projects.push(unresolved_row(&id, raw, format!("{err:#}")));
+                }
+            }
         }
         let groups = self.groups();
         Ok(ProjectList {
@@ -765,7 +872,11 @@ impl Loaded {
         self.start_detached_with_profile(id, None)
     }
 
-    pub fn start_detached_with_profile(&self, id: &str, profile_name: Option<&str>) -> Result<StatusJson> {
+    pub fn start_detached_with_profile(
+        &self,
+        id: &str,
+        profile_name: Option<&str>,
+    ) -> Result<StatusJson> {
         let project = self.resolve_with_profile(id, profile_name)?;
         if !project.enabled {
             let why = if project.reason.is_empty() {
@@ -809,7 +920,11 @@ impl Loaded {
         let _ = clear_install_marker(&project.pid_file);
 
         let prof_marker = profile_marker_path(&project.pid_file);
-        let effective_prof = profile_name.or(self.config.projects.get(id).and_then(|p| p.default_profile.as_deref()));
+        let effective_prof = profile_name.or(self
+            .config
+            .projects
+            .get(id)
+            .and_then(|p| p.default_profile.as_deref()));
         if let Some(prof) = effective_prof {
             let _ = std::fs::write(&prof_marker, prof);
         } else {
@@ -926,7 +1041,11 @@ impl Loaded {
         self.restart_detached_with_profile(id, None)
     }
 
-    pub fn restart_detached_with_profile(&self, id: &str, profile_name: Option<&str>) -> Result<StatusJson> {
+    pub fn restart_detached_with_profile(
+        &self,
+        id: &str,
+        profile_name: Option<&str>,
+    ) -> Result<StatusJson> {
         let project = self.resolve_with_profile(id, profile_name)?;
         if !project.enabled {
             bail!("project `{id}` is disabled: {}", project.reason);
@@ -1136,7 +1255,11 @@ impl Loaded {
         self.resolve_with_profile(id, None)
     }
 
-    pub(crate) fn resolve_with_profile(&self, id: &str, profile_name: Option<&str>) -> Result<Resolved> {
+    pub(crate) fn resolve_with_profile(
+        &self,
+        id: &str,
+        profile_name: Option<&str>,
+    ) -> Result<Resolved> {
         let project = self
             .config
             .projects
@@ -1523,6 +1646,52 @@ fn default_under_log(id: &str, suffix: &str) -> String {
     raw
 }
 
+/// Absolute log directory.
+///
+/// Empty uses `~/.tongyun-dev/logs`. `{{root}}` and `{{tomcat}}` are replaced
+/// with the already-expanded paths. A relative value is placed under the
+/// project root (`logs` → `<root>/logs`). A relative value that contains a `..`
+/// segment is rejected so it cannot leave the project root. `\` is treated as
+/// a separator here, the same way `path_to_string` rewrites it to `/`, so
+/// `..\x` cannot slip past the check. Absolute paths are kept as written.
+/// One project's log_dir cannot fail the whole catalog.
+fn resolve_log_dir(
+    raw: &str,
+    root: &Path,
+    tomcat: Option<&Path>,
+    home: Option<&Path>,
+) -> Result<PathBuf> {
+    let raw = if raw.trim().is_empty() {
+        DEFAULT_LOG_DIR.to_string()
+    } else {
+        raw.trim().to_string()
+    };
+    if raw.contains("{{tomcat}}") && tomcat.is_none() {
+        bail!("log_dir uses {{{{tomcat}}}} but tomcat is not set");
+    }
+    let prelim = Vars {
+        root: path_to_string(root),
+        tomcat: tomcat.map(path_to_string).unwrap_or_default(),
+        log_dir: String::new(),
+    };
+    let substituted = subst(&raw, &prelim);
+    if substituted.contains("{{") {
+        bail!("log_dir has an unresolved template: {substituted}");
+    }
+    let expanded = expand_tilde_with(&substituted, home)?;
+    let path = PathBuf::from(&expanded);
+    if path.is_absolute() || is_windows_absolute(&expanded) || expanded.starts_with('/') {
+        return Ok(path);
+    }
+    // `path_to_string` rewrites `\` to `/` after this returns. Check that form
+    // so a relative `..\x` cannot become `../x` outside the project root.
+    let normalized = expanded.replace('\\', "/");
+    if normalized.split('/').any(|seg| seg == "..") {
+        bail!("relative log_dir cannot contain `..` (got `{expanded}`)");
+    }
+    Ok(root.join(normalized))
+}
+
 fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolved> {
     if p.enabled && p.port == 0 {
         bail!("port must be non-zero");
@@ -1536,12 +1705,7 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
     } else {
         Some(expand_path("tomcat", &p.tomcat, home)?)
     };
-    let log_dir_raw = if p.log_dir.trim().is_empty() {
-        DEFAULT_LOG_DIR.to_string()
-    } else {
-        p.log_dir.clone()
-    };
-    let log_dir = expand_path("log_dir", &log_dir_raw, home)?;
+    let log_dir = resolve_log_dir(&p.log_dir, &root, tomcat.as_deref(), home)?;
     let vars = Vars {
         root: path_to_string(&root),
         tomcat: tomcat
@@ -2257,6 +2421,7 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
             .unwrap_or_default(),
         hints,
         active_profile,
+        resolve_error: None,
     }
 }
 
@@ -3861,6 +4026,13 @@ fn cmd_start_detached(p: &Resolved) -> Result<()> {
         bail!("start script not found: {missing}");
     }
     ensure_log_dir(&p.log_dir, current_home().as_deref())?;
+    if let Some(parent) = p
+        .log_file
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty() && *d != p.log_dir.as_path())
+    {
+        ensure_log_dir(parent, current_home().as_deref())?;
+    }
     if p.background && is_ready(p) && !tracked_pids(p).is_empty() {
         eprintln!("{} already up on port {}", p.id, p.port);
         return Ok(());
@@ -4230,6 +4402,9 @@ pub struct NewProject {
     pub login_url: Option<String>,
     #[serde(default)]
     pub health_url: Option<String>,
+    /// Log directory. Empty uses `~/.tongyun-dev/logs`.
+    #[serde(default)]
+    pub log_dir: Option<String>,
     #[serde(default)]
     pub log_file: Option<String>,
     #[serde(default)]
@@ -4382,7 +4557,7 @@ impl NewProject {
             start_windows: Vec::new(),
             stop_windows: Vec::new(),
             tomcat: non_empty(&self.tomcat).unwrap_or_default(),
-            log_dir: String::new(),
+            log_dir: non_empty(&self.log_dir).unwrap_or_default(),
             log_file: non_empty(&self.log_file).unwrap_or_default(),
             pid_file: String::new(),
             port,
@@ -4453,6 +4628,9 @@ fn project_table(p: &Project) -> toml_edit::Table {
     if !p.tomcat.is_empty() {
         t["tomcat"] = value(p.tomcat.as_str());
     }
+    if !p.log_dir.is_empty() {
+        t["log_dir"] = value(p.log_dir.as_str());
+    }
     if p.auto_install == Some(false) {
         t["auto_install"] = value(false);
     }
@@ -4507,9 +4685,7 @@ fn project_table(p: &Project) -> toml_edit::Table {
         ));
     }
     if !p.links.is_empty() {
-        t["links"] = toml_edit::Item::Value(toml_edit::Value::Array(
-            links_to_toml_array(&p.links),
-        ));
+        t["links"] = toml_edit::Item::Value(toml_edit::Value::Array(links_to_toml_array(&p.links)));
     }
     if let Some(ref dp) = p.default_profile {
         if !dp.is_empty() {
@@ -4649,6 +4825,8 @@ pub struct ProjectEdit {
     #[serde(default)]
     pub health_url: Option<String>,
     #[serde(default)]
+    pub log_dir: Option<String>,
+    #[serde(default)]
     pub log_file: Option<String>,
     #[serde(default)]
     pub node: Option<String>,
@@ -4704,6 +4882,7 @@ pub struct ProjectDetail {
     pub port: u16,
     pub login_url: String,
     pub health_url: String,
+    pub log_dir: String,
     pub log_file: String,
     pub node: Option<String>,
     pub java: Option<String>,
@@ -4844,37 +5023,13 @@ impl Loaded {
         self.config.projects.insert(id.clone(), project);
         let r = self.resolve(&id)?;
         let configured = r.port > 0 && (!r.active_start().is_empty() || r.tomcat.is_some());
-        Ok(ProjectRow {
-            id: r.id,
-            name: r.name,
-            group: if r.group.is_empty() {
-                None
-            } else {
-                Some(r.group.clone())
-            },
-            root: path_to_string(&r.root),
-            enabled: r.enabled,
-            port: r.port,
-            reason: r.reason,
+        let raw = self.config.projects.get(&id);
+        Ok(row_from_resolved(
+            &r,
             configured,
-            start_timeout_secs: r.start_timeout_secs,
-            stop_grace_secs: r.stop_grace_secs,
-            node: r.node,
-            java: r.java,
-            java_home: r.java_home.as_ref().map(|p| path_to_string(p)),
-            node_home: r.node_home.as_ref().map(|p| path_to_string(p)),
-            shell: r.shell,
-            auto_install: r.auto_install,
-            port_mode: r.port_mode,
-            port_arg: r.port_arg,
-            port_env: r.port_env,
-            env: r.env.clone(),
-            pty: r.pty,
-            auto_answers: r.auto_answers.clone(),
-            links: r.links.clone(),
-            default_profile: self.config.projects.get(&id).and_then(|p| p.default_profile.clone()),
-            profiles: self.config.projects.get(&id).map(|p| p.profiles.clone()).unwrap_or_default(),
-        })
+            raw.and_then(|p| p.default_profile.clone()),
+            raw.map(|p| p.profiles.clone()).unwrap_or_default(),
+        ))
     }
 
     /// Remove a project from the config file. Does not touch the project's files.
@@ -5004,6 +5159,7 @@ impl Loaded {
             port: p.port,
             login_url: p.login_url.clone(),
             health_url: p.health_url.clone(),
+            log_dir: p.log_dir.clone(),
             log_file: p.log_file.clone(),
             node: p.node.clone(),
             java: p.java.clone(),
@@ -5071,6 +5227,12 @@ impl Loaded {
         }
         if let Some(ref reason) = edit.reason {
             test_project.reason = reason.trim().to_string();
+        }
+        if let Some(ref log_dir) = edit.log_dir {
+            test_project.log_dir = log_dir.trim().to_string();
+        }
+        if let Some(ref log_file) = edit.log_file {
+            test_project.log_file = log_file.trim().to_string();
         }
         resolve_project(id, &test_project, current_home().as_deref())?;
         Ok(())
@@ -5183,6 +5345,15 @@ impl Loaded {
                 proj_table.remove("health_url");
             } else {
                 set_table_val(proj_table, "health_url", toml_edit::Value::from(trimmed));
+            }
+        }
+
+        if let Some(ref log_dir) = edit.log_dir {
+            let trimmed = log_dir.trim();
+            if trimmed.is_empty() {
+                proj_table.remove("log_dir");
+            } else {
+                set_table_val(proj_table, "log_dir", toml_edit::Value::from(trimmed));
             }
         }
 
@@ -5336,7 +5507,11 @@ impl Loaded {
             if trimmed.is_empty() {
                 proj_table.remove("default_profile");
             } else {
-                set_table_val(proj_table, "default_profile", toml_edit::Value::from(trimmed));
+                set_table_val(
+                    proj_table,
+                    "default_profile",
+                    toml_edit::Value::from(trimmed),
+                );
             }
         }
 
@@ -5344,7 +5519,10 @@ impl Loaded {
             if profiles.is_empty() {
                 proj_table.remove("profiles");
             } else {
-                proj_table.insert("profiles", toml_edit::Item::Table(profiles_to_toml_table(profiles)));
+                proj_table.insert(
+                    "profiles",
+                    toml_edit::Item::Table(profiles_to_toml_table(profiles)),
+                );
             }
         }
 
@@ -5379,37 +5557,13 @@ impl Loaded {
 
         let r = self.resolve(id)?;
         let configured = r.port > 0 && (!r.active_start().is_empty() || r.tomcat.is_some());
-        Ok(ProjectRow {
-            id: r.id,
-            name: r.name,
-            group: if r.group.is_empty() {
-                None
-            } else {
-                Some(r.group.clone())
-            },
-            root: path_to_string(&r.root),
-            enabled: r.enabled,
-            port: r.port,
-            reason: r.reason,
+        let raw = self.config.projects.get(id);
+        Ok(row_from_resolved(
+            &r,
             configured,
-            start_timeout_secs: r.start_timeout_secs,
-            stop_grace_secs: r.stop_grace_secs,
-            node: r.node,
-            java: r.java,
-            java_home: r.java_home.as_ref().map(|p| path_to_string(p)),
-            node_home: r.node_home.as_ref().map(|p| path_to_string(p)),
-            shell: r.shell,
-            auto_install: r.auto_install,
-            port_mode: r.port_mode,
-            port_arg: r.port_arg,
-            port_env: r.port_env,
-            env: r.env.clone(),
-            pty: r.pty,
-            auto_answers: r.auto_answers.clone(),
-            links: r.links.clone(),
-            default_profile: self.config.projects.get(id).and_then(|p| p.default_profile.clone()),
-            profiles: self.config.projects.get(id).map(|p| p.profiles.clone()).unwrap_or_default(),
-        })
+            raw.and_then(|p| p.default_profile.clone()),
+            raw.map(|p| p.profiles.clone()).unwrap_or_default(),
+        ))
     }
 
     /// Create a new group, writing `[group.<key>]` (with optional label) to config preserving comments.
@@ -5625,7 +5779,12 @@ pub fn open_terminal_command(dir: &Path, cmd_str: &str, title: &str) -> Result<(
             dir_str, cmd_str
         );
         let mut c = Command::new("osascript");
-        c.args(["-e", &script, "-e", "tell application \"Terminal\" to activate"]);
+        c.args([
+            "-e",
+            &script,
+            "-e",
+            "tell application \"Terminal\" to activate",
+        ]);
         c.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -5649,7 +5808,10 @@ pub fn open_terminal_command(dir: &Path, cmd_str: &str, title: &str) -> Result<(
                 return Ok(());
             }
         }
-        bail!("no supported terminal emulator found (tried: {})", terms.join(", "));
+        bail!(
+            "no supported terminal emulator found (tried: {})",
+            terms.join(", ")
+        );
     }
 }
 
@@ -5858,6 +6020,7 @@ login_url = "http://127.0.0.1:8080/legacy_app/admin/login.html"
             install_command: String::new(),
             hints: Vec::new(),
             active_profile: None,
+            resolve_error: None,
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
@@ -6184,6 +6347,180 @@ port = 9
     }
 
     #[test]
+    fn log_dir_accepts_root_template_and_relative_path() {
+        let home = Path::new("/home/demo");
+        let cfg: FileConfig = toml::from_str(
+            r#"
+[projects.templated]
+name = "templated"
+root = "/tmp/demo-ok"
+start = ["true"]
+port = 9
+log_dir = "{{root}}/logs"
+
+[projects.relative]
+name = "relative"
+root = "/tmp/demo-rel"
+start = ["true"]
+port = 9
+log_dir = "logs"
+
+[projects.tomcat_logs]
+name = "tomcat_logs"
+root = "/tmp/demo-tc"
+tomcat = "/opt/tomcat"
+start = ["true"]
+stop = ["true"]
+port = 9
+enabled = false
+reason = "off"
+log_dir = "{{tomcat}}/logs"
+"#,
+        )
+        .unwrap();
+        let templated = resolve_project(
+            "templated",
+            cfg.projects.get("templated").unwrap(),
+            Some(home),
+        )
+        .unwrap();
+        assert_eq!(templated.log_dir, PathBuf::from("/tmp/demo-ok/logs"));
+        assert_eq!(
+            templated.log_file,
+            PathBuf::from("/tmp/demo-ok/logs/templated.out")
+        );
+        let relative = resolve_project(
+            "relative",
+            cfg.projects.get("relative").unwrap(),
+            Some(home),
+        )
+        .unwrap();
+        assert_eq!(relative.log_dir, PathBuf::from("/tmp/demo-rel/logs"));
+        let tomcat_logs = resolve_project(
+            "tomcat_logs",
+            cfg.projects.get("tomcat_logs").unwrap(),
+            Some(home),
+        )
+        .unwrap();
+        assert_eq!(tomcat_logs.log_dir, PathBuf::from("/opt/tomcat/logs"));
+
+        let bad: FileConfig = toml::from_str(
+            r#"
+[projects.bad]
+name = "bad"
+root = "/tmp/demo-bad"
+start = ["true"]
+port = 9
+log_dir = "{{not_a_var}}/logs"
+"#,
+        )
+        .unwrap();
+        let err = resolve_project("bad", bad.projects.get("bad").unwrap(), Some(home)).unwrap_err();
+        assert!(err.to_string().contains("unresolved template"), "{err}");
+
+        for raw in ["../../escaped", r"..\x", r"a\..\..\x"] {
+            let escaped: FileConfig = toml::from_str(&format!(
+                r#"
+[projects.escaped]
+name = "escaped"
+root = "/tmp/demo-esc"
+start = ["true"]
+port = 9
+log_dir = '{raw}'
+"#
+            ))
+            .unwrap();
+            let err = resolve_project(
+                "escaped",
+                escaped.projects.get("escaped").unwrap(),
+                Some(home),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains(".."),
+                "log_dir `{raw}` should be rejected, got {err}"
+            );
+        }
+
+        let nested: FileConfig = toml::from_str(
+            r#"
+[projects.nested]
+name = "nested"
+root = "/tmp/demo-nested"
+start = ["true"]
+port = 9
+log_dir = 'logs\sub'
+"#,
+        )
+        .unwrap();
+        let nested =
+            resolve_project("nested", nested.projects.get("nested").unwrap(), Some(home)).unwrap();
+        assert_eq!(nested.log_dir, PathBuf::from("/tmp/demo-nested/logs/sub"));
+
+        let absolute: FileConfig = toml::from_str(
+            r#"
+[projects.absolute]
+name = "absolute"
+root = "/tmp/demo-abs"
+start = ["true"]
+port = 9
+log_dir = "/tmp/../tongyun-logs"
+"#,
+        )
+        .unwrap();
+        let absolute = resolve_project(
+            "absolute",
+            absolute.projects.get("absolute").unwrap(),
+            Some(home),
+        )
+        .unwrap();
+        assert_eq!(absolute.log_dir, PathBuf::from("/tmp/../tongyun-logs"));
+    }
+
+    #[test]
+    fn list_keeps_other_projects_when_one_log_dir_fails() {
+        let dir = std::env::temp_dir().join(format!("tongyun_dev_listdir_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.join("app");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = dir.join("projects.toml");
+        let root_s = path_to_string(&root);
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+[projects.good]
+name = "good"
+root = "{root_s}"
+start = ["true"]
+port = 9
+log_dir = "{root_s}/logs"
+
+[projects.bad]
+name = "bad"
+root = "{root_s}"
+start = ["true"]
+port = 9
+log_dir = "{{{{not_a_var}}}}/logs"
+"#
+            ),
+        )
+        .unwrap();
+        let loaded = load(Some(&path)).unwrap();
+        let list = loaded.list().unwrap();
+        assert_eq!(list.projects.len(), 2);
+        let good = list.projects.iter().find(|p| p.id == "good").unwrap();
+        assert!(good.resolve_error.is_none(), "{:?}", good.resolve_error);
+        assert!(good.configured);
+        let bad = list.projects.iter().find(|p| p.id == "bad").unwrap();
+        assert!(!bad.configured);
+        let err = bad.resolve_error.as_deref().unwrap_or("");
+        assert!(err.contains("unresolved template"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn example_config_resolves() {
         let home = Path::new("/home/demo");
         let cfg = parse_config(EXAMPLE_TOML).unwrap();
@@ -6351,6 +6688,7 @@ port = 3002
             links: Vec::new(),
             default_profile: None,
             profiles: Default::default(),
+            resolve_error: None,
         };
         let json_fs: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row_fs).unwrap()).unwrap();
@@ -6384,6 +6722,7 @@ port = 3002
             links: Vec::new(),
             default_profile: None,
             profiles: Default::default(),
+            resolve_error: None,
         };
         let json_none: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row_none).unwrap()).unwrap();
@@ -6482,6 +6821,24 @@ port = 8080
             port: Some(5173),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn add_persists_log_dir_and_resolves_it_under_root() {
+        let path = temp_config("logdir", BASE);
+        let root = path.parent().unwrap().join("app");
+        let mut loaded = load(Some(&path)).unwrap();
+        let mut created = req("web_app", &root);
+        created.log_dir = Some("{{root}}/logs".into());
+        loaded.add_project(created).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("log_dir = \"{{root}}/logs\""));
+        let reloaded = load(Some(&path)).unwrap();
+        let resolved = reloaded.resolve("web_app").unwrap();
+        assert_eq!(resolved.log_dir, root.join("logs"));
+        assert_eq!(resolved.log_file, root.join("logs").join("web_app.out"));
+        let detail = reloaded.project_detail("web_app").unwrap();
+        assert_eq!(detail.log_dir, "{{root}}/logs");
     }
 
     #[test]
@@ -7441,9 +7798,14 @@ USE_MOCK = "true"
         assert_eq!(res_default.port, 3000);
 
         // Resolution with mock profile
-        let res_mock = loaded.resolve_with_profile("web_app", Some("mock")).unwrap();
+        let res_mock = loaded
+            .resolve_with_profile("web_app", Some("mock"))
+            .unwrap();
         assert_eq!(res_mock.port, 3001);
-        assert_eq!(res_mock.env.get("USE_MOCK").map(|s| s.as_str()), Some("true"));
+        assert_eq!(
+            res_mock.env.get("USE_MOCK").map(|s| s.as_str()),
+            Some("true")
+        );
 
         // Update links and profiles
         let mut new_profiles = std::collections::BTreeMap::new();
@@ -7480,7 +7842,10 @@ USE_MOCK = "true"
         assert_eq!(reloaded_detail.links.len(), 1);
         assert_eq!(reloaded_detail.default_profile.as_deref(), Some("prod"));
         assert_eq!(reloaded_detail.profiles.len(), 1);
-        assert_eq!(reloaded_detail.profiles.get("prod").unwrap().port, Some(4000));
+        assert_eq!(
+            reloaded_detail.profiles.get("prod").unwrap().port,
+            Some(4000)
+        );
     }
 }
 

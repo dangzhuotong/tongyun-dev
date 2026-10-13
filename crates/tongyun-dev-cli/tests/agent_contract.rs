@@ -309,3 +309,80 @@ fn group_cli_resolves_existing_label_and_suggests_group_add() {
     assert!(stderr.contains("未找到分组 `未知分组`"));
     assert!(stderr.contains("tongyun-dev group-add <key> --label 未知分组"));
 }
+
+#[test]
+fn status_without_id_continues_past_bad_log_dir() {
+    let root = std::env::temp_dir().join(format!(
+        "tongyun_status_badlog_{}_{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let app = root.join("app");
+    fs::create_dir_all(&app).unwrap();
+    let config = root.join("projects.toml");
+    let app_s = app.display();
+    fs::write(
+        &config,
+        format!(
+            "[projects.good]\nname = \"good\"\nroot = \"{app_s}\"\nport = 9\nstart = [\"true\"]\nlog_dir = \"{app_s}/logs\"\n\n[projects.bad]\nname = \"bad\"\nroot = \"{app_s}\"\nport = 9\nstart = [\"true\"]\nlog_dir = \"{{{{not_a_var}}}}/logs\"\n"
+        ),
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_tongyun-dev"))
+            .arg("--config")
+            .arg(&config)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let text = run(&["status"]);
+    assert!(
+        !text.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&text.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(stdout.contains("good"), "{stdout}");
+    assert!(stdout.contains("bad"), "{stdout}");
+    assert!(stdout.contains("failure"), "{stdout}");
+    assert!(stdout.contains("unresolved template"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&text.stderr);
+    assert!(stderr.contains("无法解析状态"), "{stderr}");
+
+    let json_out = run(&["status", "--json"]);
+    assert!(!json_out.status.success());
+    let arr: Value = serde_json::from_slice(&json_out.stdout).expect("status --json is one array");
+    let rows = arr.as_array().expect("array");
+    let bad = rows.iter().find(|v| v["id"] == "bad").unwrap();
+    let good = rows.iter().find(|v| v["id"] == "good").unwrap();
+    assert!(bad["failure"]
+        .as_str()
+        .unwrap()
+        .contains("unresolved template"));
+    assert!(bad["resolve_error"]
+        .as_str()
+        .unwrap()
+        .contains("unresolved template"));
+    assert!(good.get("resolve_error").is_none());
+    assert_eq!(good["state"], "stopped");
+
+    let list = run(&["list"]);
+    assert!(
+        list.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let list_out = String::from_utf8_lossy(&list.stdout);
+    assert!(list_out.contains("good"), "{list_out}");
+    assert!(list_out.contains("!解析失败:"), "{list_out}");
+    assert!(list_out.contains("unresolved template"), "{list_out}");
+
+    let one = run(&["status", "bad"]);
+    assert!(!one.status.success());
+    assert!(String::from_utf8_lossy(&one.stderr).contains("unresolved template"));
+
+    let _ = fs::remove_dir_all(&root);
+}

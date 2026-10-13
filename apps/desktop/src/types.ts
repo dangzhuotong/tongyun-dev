@@ -40,6 +40,8 @@ export type Project = {
   links?: WebLink[];
   default_profile?: string | null;
   profiles?: Record<string, ProfileConfig>;
+  /** 这一条解析失败（例如 log_dir 展不开）。列表里的其他项目仍然显示。 */
+  resolve_error?: string | null;
 };
 
 export type AutoAnswer = {
@@ -118,6 +120,7 @@ export type ProjectDetail = {
   port: number;
   login_url: string;
   health_url: string;
+  log_dir: string;
   log_file: string;
   node: string | null;
   java: string | null;
@@ -148,6 +151,7 @@ export type NewProjectReq = {
   port?: number | null;
   login_url?: string | null;
   health_url?: string | null;
+  log_dir?: string | null;
   log_file?: string | null;
   node?: string | null;
   java?: string | null;
@@ -178,6 +182,7 @@ export type ProjectEditReq = {
   port?: number | null;
   login_url?: string | null;
   health_url?: string | null;
+  log_dir?: string | null;
   log_file?: string | null;
   node?: string | null;
   java?: string | null;

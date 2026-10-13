@@ -72,7 +72,9 @@ async fn install_deps(id: String) -> Result<StatusJson, String> {
 async fn restart_project(id: String, profile: Option<String>) -> Result<StatusJson, String> {
     blocking(move || {
         let loaded = tongyun_dev_core::load(None).map_err(report)?;
-        loaded.restart_detached_with_profile(&id, profile.as_deref()).map_err(report)
+        loaded
+            .restart_detached_with_profile(&id, profile.as_deref())
+            .map_err(report)
     })
     .await
 }
@@ -81,7 +83,9 @@ async fn restart_project(id: String, profile: Option<String>) -> Result<StatusJs
 async fn open_terminal(id: String, profile: Option<String>) -> Result<(), String> {
     blocking(move || {
         let loaded = tongyun_dev_core::load(None).map_err(report)?;
-        loaded.open_in_terminal(&id, profile.as_deref()).map_err(report)
+        loaded
+            .open_in_terminal(&id, profile.as_deref())
+            .map_err(report)
     })
     .await
 }
@@ -289,8 +293,27 @@ async fn set_project_group(id: String, group: Option<String>) -> Result<ProjectR
     .await
 }
 
+fn show_main_window(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    #[cfg(target_os = "macos")]
+    {
+        // A GUI launch (Dock / Finder) otherwise can come up without ordering
+        // the main window front.
+        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            show_main_window(app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             list_projects,
             project_status,

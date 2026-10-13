@@ -10,6 +10,7 @@ export interface ProjectFormData {
   port: number | string;
   login_url: string;
   health_url: string;
+  log_dir?: string;
   log_file: string;
   node: string;
   java: string;
@@ -330,6 +331,7 @@ export interface EditBaseline {
   port: number;
   login_url: string;
   health_url: string;
+  log_dir?: string | null;
   log_file: string;
   node?: string | null;
   java?: string | null;
@@ -370,6 +372,7 @@ export function buildEditRequest(
   if (port !== base.port) out.port = port;
   text("login_url", base.login_url, form.login_url);
   text("health_url", base.health_url, form.health_url);
+  text("log_dir", base.log_dir, form.log_dir ?? "");
   text("log_file", base.log_file, form.log_file);
   text("node", base.node, form.node);
   text("java", base.java, form.java);

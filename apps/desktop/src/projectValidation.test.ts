@@ -149,6 +149,9 @@ describe("buildEditRequest (只提交改过的字段)", () => {
   });
   it("清空登录页发空串（删键）", () => {
     expect(buildEditRequest(base, form({ login_url: "" }))).toEqual({ login_url: "" });
+    expect(buildEditRequest(base, form({ log_dir: "{{root}}/logs" }))).toEqual({
+      log_dir: "{{root}}/logs",
+    });
   });
   it("start 不可编辑时永不提交 start", () => {
     expect(

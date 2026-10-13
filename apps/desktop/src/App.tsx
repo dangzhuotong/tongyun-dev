@@ -219,6 +219,12 @@ export function App() {
   // Poll selected project status and log every 1 second
   useEffect(() => {
     if (!selected) return;
+    const broken = projects?.projects.find((p) => p.id === selected)?.resolve_error;
+    if (broken) {
+      setStatus(null);
+      setError(broken);
+      return;
+    }
     let cancelled = false;
     const tick = () => {
       if (cancelled) return;
@@ -232,7 +238,7 @@ export function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [selected, refresh]);
+  }, [selected, refresh, projects]);
 
   useEffect(() => {
     if (!selected) {
@@ -634,6 +640,9 @@ export function App() {
               </span>
             ))}
           </div>
+          {project.resolve_error && (
+            <div className="project-reason">{project.resolve_error}</div>
+          )}
           {!project.enabled && project.reason && (
             <div className="project-reason">{project.reason}</div>
           )}
@@ -997,8 +1006,11 @@ export function App() {
               </>
             ) : (
               <>
-                <h2>{projects ? "选一个项目" : "正在读取…"}</h2>
+                <h2>{!projects && error ? "没能读出项目" : projects ? "选一个项目" : "正在读取…"}</h2>
                 {projects && <p className="empty-desc">在左边选一个项目，或者新增一个。</p>}
+                {!projects && error && (
+                  <p className="empty-desc">配置没读出来，项目列表是空的。改好后从设置里重新加载。</p>
+                )}
               </>
             )}
             {error && <p className="banner danger">{error}</p>}
@@ -1248,7 +1260,20 @@ export function App() {
                 }}
               />
 
-              {!current.configured && (
+              {current.resolve_error && (
+                <div className="callout warn">
+                  <AlertIcon className="callout-icon" />
+                  <div className="callout-text">
+                    <strong>这个项目的配置解析失败</strong>
+                    <p>{current.resolve_error}</p>
+                  </div>
+                  <button type="button" className="btn btn-primary" onClick={handleOpenEdit}>
+                    <GearIcon /> 去配置
+                  </button>
+                </div>
+              )}
+
+              {!current.configured && !current.resolve_error && (
                 <div className="callout warn">
                   <AlertIcon className="callout-icon" />
                   <div className="callout-text">

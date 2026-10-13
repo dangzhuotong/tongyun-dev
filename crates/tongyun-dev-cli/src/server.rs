@@ -223,7 +223,29 @@ pub fn overview(loaded: &Loaded) -> Result<Vec<Value>> {
     let list = loaded.list()?;
     let mut out = Vec::with_capacity(list.projects.len());
     for row in list.projects {
-        let mut v = serde_json::to_value(loaded.status(&row.id)?)?;
+        let mut v = match loaded.status(&row.id) {
+            Ok(st) => serde_json::to_value(st)?,
+            Err(e) => json!({
+                "id": row.id.clone(),
+                "name": row.name.clone(),
+                "running": false,
+                "state": "stopped",
+                "elapsed_secs": null,
+                "timeout_secs": 0,
+                "failure": format!("{e:#}"),
+                "pid": null,
+                "port": row.port,
+                "port_open": false,
+                "login_probe": {"url": "", "http_code": null, "ok": false},
+                "log_path": "",
+                "pid_path": "",
+                "root": row.root.clone(),
+                "port_conflict": false,
+                "port_holder": "",
+                "deps_missing": false,
+                "install_command": "",
+            }),
+        };
         if let Value::Object(m) = &mut v {
             m.insert("enabled".into(), json!(row.enabled));
             m.insert("configured".into(), json!(row.configured));
@@ -237,6 +259,10 @@ pub fn overview(loaded: &Loaded) -> Result<Vec<Value>> {
             m.insert("links".into(), json!(row.links));
             m.insert("default_profile".into(), json!(row.default_profile));
             m.insert("profiles".into(), json!(row.profiles));
+            if let Some(err) = &row.resolve_error {
+                m.insert("resolve_error".into(), json!(err));
+                m.insert("configured".into(), json!(false));
+            }
         }
         out.push(v);
     }
@@ -486,9 +512,11 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                     }
                 };
             }
-            let action = ["start", "stop", "restart", "install", "open", "open-dir", "terminal"]
-                .into_iter()
-                .find_map(|a| project_route(path, a).map(|id| (a, id)));
+            let action = [
+                "start", "stop", "restart", "install", "open", "open-dir", "terminal",
+            ]
+            .into_iter()
+            .find_map(|a| project_route(path, a).map(|id| (a, id)));
             let Some((action, id)) = action else {
                 return err_json(404, "not found");
             };
@@ -924,6 +952,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       </div>
       <div id="editOptions" hidden>
         <div class="form-group"><label>备用健康探针 URL</label><input id="editHealth" /></div>
+        <div class="form-group"><label>日志目录</label><input id="editLogDir" placeholder="默认 ~/.tongyun-dev/logs；可写 ~/logs、{{root}}/logs，或相对项目根的 logs（不能含 ..）" /></div>
         <div class="form-group"><label>日志文件</label><input id="editLog" /></div>
         <div class="form-group"><label>启动超时（秒；留空保持原值）</label><input id="editTimeout" type="number" min="1" /></div>
         <div class="form-group"><label>停止宽限（秒；留空保持原值）</label><input id="editGrace" type="number" min="1" /></div>
@@ -1257,7 +1286,8 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
             </div>
           </div>
           ${!enabled ? `<div class="reason">停用原因：${escapeHtml(p.reason)}</div>` : ''}
-          ${!configured ? `<div class="note">还没配置好：缺端口或启动命令。打开这个项目的「设置」填好就能启动。</div>` : ''}
+          ${!configured && p.resolve_error ? `<div class="fail">${escapeHtml(p.resolve_error)}</div>` : ''}
+          ${!configured && !p.resolve_error ? `<div class="note">还没配置好：缺端口或启动命令。打开这个项目的「设置」填好就能启动。</div>` : ''}
           ${conflict}
           ${configured && enabled && state === 'failed' && p.failure ? `<div class="fail">${escapeHtml(p.failure)}</div>` : ''}
           ${state === 'failed' && p.pid ? `<div class="note">进程 PID ${p.pid} 仍在，停止可清理，重启可重新尝试。</div>` : ''}
@@ -1433,7 +1463,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         openAddModal();
         editingProject = data.project;
         document.getElementById('editOptions').hidden = false;
-        for (const [key, field] of Object.entries({Health: 'health_url', Log: 'log_file', Timeout: 'start_timeout_secs', Grace: 'stop_grace_secs', Reason: 'reason'})) document.getElementById('edit' + key).value = editingProject[field] ?? '';
+        for (const [key, field] of Object.entries({Health: 'health_url', LogDir: 'log_dir', Log: 'log_file', Timeout: 'start_timeout_secs', Grace: 'stop_grace_secs', Reason: 'reason'})) document.getElementById('edit' + key).value = editingProject[field] ?? '';
         document.getElementById('editEnabled').checked = editingProject.enabled;
         document.getElementById('editAutoInstall').checked = editingProject.auto_install;
         const fields = {Id: 'id', Name: 'name', Group: 'group', Root: 'root', Start: 'start', Stop: 'stop', Port: 'port', Url: 'login_url', Node: 'node', Java: 'java'};
@@ -1511,6 +1541,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
           payload.auto_install = document.getElementById('editAutoInstall').checked;
           payload.reason = document.getElementById('editReason').value.trim();
           payload.health_url = document.getElementById('editHealth').value.trim();
+          payload.log_dir = document.getElementById('editLogDir').value.trim();
           payload.log_file = document.getElementById('editLog').value.trim();
           for (const [key, field] of Object.entries({Timeout: 'start_timeout_secs', Grace: 'stop_grace_secs'})) {
             const value = document.getElementById('edit' + key).value.trim();

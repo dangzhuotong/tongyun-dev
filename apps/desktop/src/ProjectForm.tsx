@@ -515,7 +515,7 @@ export function ProjectForm({
               id="field-log-dir"
               type="text"
               value={form.log_dir ?? ""}
-              placeholder="默认 ~/.tongyun-dev/logs；可写 ~/logs、{{root}}/logs，或相对项目根的 logs"
+              placeholder="默认 ~/.tongyun-dev/logs；可写 ~/logs、{{root}}/logs，或相对项目根的 logs（不能含 ..）"
               onChange={(e) => handleChange("log_dir", e.target.value)}
             />
           </div>

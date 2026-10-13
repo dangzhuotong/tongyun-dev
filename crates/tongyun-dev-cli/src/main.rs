@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tongyun_dev_cli::server::{start_ui_server, DEFAULT_UI_PORT};
 use tongyun_dev_core::{
-    Loaded, NewProject, ScanReport, StatusJson, DEFAULT_ADD_PORT, DEFAULT_SCAN_DEPTH,
+    unresolved_status, Loaded, NewProject, ScanReport, StatusJson, DEFAULT_ADD_PORT,
+    DEFAULT_SCAN_DEPTH,
 };
 
 #[derive(Parser, Debug)]
@@ -138,7 +139,7 @@ enum Cmd {
         /// Ready probe used when login_url is empty
         #[arg(long)]
         health_url: Option<String>,
-        /// Log directory (default ~/.tongyun-dev/logs). `~`, `{{root}}`, or a path relative to the project root.
+        /// Log directory (default ~/.tongyun-dev/logs). `~`, `{{root}}`, or a path relative to the project root (`..` is not allowed).
         #[arg(long)]
         log_dir: Option<String>,
         /// Log file (default ~/.tongyun-dev/logs/<id>.out)
@@ -393,6 +394,11 @@ fn print_status(st: &StatusJson, json: bool) -> Result<()> {
         if let Some(why) = &st.failure {
             println!("  failure {why}");
         }
+        if let Some(err) = &st.resolve_error {
+            if st.failure.as_deref() != Some(err.as_str()) {
+                println!("  resolve_error {err}");
+            }
+        }
         for hint in &st.hints {
             println!("  hint {hint}");
         }
@@ -524,9 +530,20 @@ fn main() -> Result<()> {
         Cmd::Status { id: Some(id), json } => print_status(&loaded.status(&id)?, json)?,
         Cmd::Status { id: None, json } => {
             let list = loaded.list()?;
+            let mut failed = 0usize;
             let mut all = Vec::with_capacity(list.projects.len());
             for row in &list.projects {
-                all.push(loaded.status(&row.id)?);
+                match loaded.status(&row.id) {
+                    Ok(st) => all.push(st),
+                    Err(e) => {
+                        failed += 1;
+                        let msg = row
+                            .resolve_error
+                            .clone()
+                            .unwrap_or_else(|| format!("{e:#}"));
+                        all.push(unresolved_status(row, msg));
+                    }
+                }
             }
             if json {
                 println!("{}", serde_json::to_string_pretty(&all)?);
@@ -535,6 +552,9 @@ fn main() -> Result<()> {
                     print_status(st, false)?;
                     println!();
                 }
+            }
+            if failed > 0 {
+                anyhow::bail!("{failed} 个项目无法解析状态");
             }
         }
         Cmd::Logs {
@@ -869,6 +889,9 @@ fn print_list(loaded: &Loaded, json: bool, with_groups: bool) -> Result<()> {
             }
             if !project.enabled {
                 line.push_str(&format!("\tdisabled\t{}", project.reason));
+            }
+            if let Some(err) = &project.resolve_error {
+                line.push_str(&format!("\t!解析失败: {err}"));
             }
             println!("{line}");
         }

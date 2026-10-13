@@ -952,7 +952,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       </div>
       <div id="editOptions" hidden>
         <div class="form-group"><label>备用健康探针 URL</label><input id="editHealth" /></div>
-        <div class="form-group"><label>日志目录</label><input id="editLogDir" placeholder="默认 ~/.tongyun-dev/logs；可写 ~/logs、{{root}}/logs，或相对项目根的 logs" /></div>
+        <div class="form-group"><label>日志目录</label><input id="editLogDir" placeholder="默认 ~/.tongyun-dev/logs；可写 ~/logs、{{root}}/logs，或相对项目根的 logs（不能含 ..）" /></div>
         <div class="form-group"><label>日志文件</label><input id="editLog" /></div>
         <div class="form-group"><label>启动超时（秒；留空保持原值）</label><input id="editTimeout" type="number" min="1" /></div>
         <div class="form-group"><label>停止宽限（秒；留空保持原值）</label><input id="editGrace" type="number" min="1" /></div>

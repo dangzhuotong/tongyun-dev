@@ -443,6 +443,40 @@ pub struct StatusJson {
     /// 当前生效的启动预设环境（可选）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_profile: Option<String>,
+    /// Set when the project could not be resolved. Absent on a normal status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve_error: Option<String>,
+}
+
+/// Status row for a project `list` could not resolve. Other projects are unaffected.
+pub fn unresolved_status(row: &ProjectRow, failure: impl Into<String>) -> StatusJson {
+    StatusJson {
+        id: row.id.clone(),
+        name: row.name.clone(),
+        running: false,
+        state: LifeState::Stopped,
+        elapsed_secs: None,
+        timeout_secs: 0,
+        failure: Some(failure.into()),
+        pid: None,
+        port: row.port,
+        port_open: false,
+        login_probe: LoginProbe {
+            url: String::new(),
+            http_code: None,
+            ok: false,
+        },
+        log_path: String::new(),
+        pid_path: String::new(),
+        root: row.root.clone(),
+        port_conflict: false,
+        port_holder: String::new(),
+        deps_missing: false,
+        install_command: String::new(),
+        hints: Vec::new(),
+        active_profile: None,
+        resolve_error: row.resolve_error.clone(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -1616,8 +1650,9 @@ fn default_under_log(id: &str, suffix: &str) -> String {
 ///
 /// Empty uses `~/.tongyun-dev/logs`. `{{root}}` and `{{tomcat}}` are replaced
 /// with the already-expanded paths. A relative value is placed under the
-/// project root (`logs` → `<root>/logs`), so one project's log_dir cannot
-/// fail the whole catalog and blank the main window on launch.
+/// project root (`logs` → `<root>/logs`). A relative value that contains `..`
+/// is rejected so it cannot leave the project root. Absolute paths are kept
+/// as written. One project's log_dir cannot fail the whole catalog.
 fn resolve_log_dir(
     raw: &str,
     root: &Path,
@@ -1645,6 +1680,12 @@ fn resolve_log_dir(
     let path = PathBuf::from(&expanded);
     if path.is_absolute() || is_windows_absolute(&expanded) || expanded.starts_with('/') {
         return Ok(path);
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        bail!("relative log_dir cannot contain `..` (got `{expanded}`)");
     }
     Ok(root.join(path))
 }
@@ -2378,6 +2419,7 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
             .unwrap_or_default(),
         hints,
         active_profile,
+        resolve_error: None,
     }
 }
 
@@ -5976,6 +6018,7 @@ login_url = "http://127.0.0.1:8080/legacy_app/admin/login.html"
             install_command: String::new(),
             hints: Vec::new(),
             active_profile: None,
+            resolve_error: None,
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
@@ -6372,6 +6415,44 @@ log_dir = "{{not_a_var}}/logs"
         .unwrap();
         let err = resolve_project("bad", bad.projects.get("bad").unwrap(), Some(home)).unwrap_err();
         assert!(err.to_string().contains("unresolved template"), "{err}");
+
+        let escaped: FileConfig = toml::from_str(
+            r#"
+[projects.escaped]
+name = "escaped"
+root = "/tmp/demo-esc"
+start = ["true"]
+port = 9
+log_dir = "../../escaped"
+"#,
+        )
+        .unwrap();
+        let err = resolve_project(
+            "escaped",
+            escaped.projects.get("escaped").unwrap(),
+            Some(home),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains(".."), "{err}");
+
+        let absolute: FileConfig = toml::from_str(
+            r#"
+[projects.absolute]
+name = "absolute"
+root = "/tmp/demo-abs"
+start = ["true"]
+port = 9
+log_dir = "/tmp/../tongyun-logs"
+"#,
+        )
+        .unwrap();
+        let absolute = resolve_project(
+            "absolute",
+            absolute.projects.get("absolute").unwrap(),
+            Some(home),
+        )
+        .unwrap();
+        assert_eq!(absolute.log_dir, PathBuf::from("/tmp/../tongyun-logs"));
     }
 
     #[test]

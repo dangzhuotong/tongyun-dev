@@ -35,6 +35,10 @@ pub struct Loaded {
 
 #[derive(Debug, serde::Deserialize)]
 struct FileConfig {
+    /// Default `log_dir` for every project that does not set its own.
+    /// Empty means `~/.tongyun-dev/logs`. Same resolution rules as a project value.
+    #[serde(default)]
+    log_dir: String,
     #[serde(default)]
     projects: HashMap<String, Project>,
     #[serde(default)]
@@ -1265,7 +1269,13 @@ impl Loaded {
             .projects
             .get(id)
             .with_context(|| format!("unknown project id `{id}`; try `tongyun-dev list`"))?;
-        resolve_project_with_profile(id, project, current_home().as_deref(), profile_name)
+        resolve_project_with_profile(
+            id,
+            project,
+            current_home().as_deref(),
+            profile_name,
+            &self.config.log_dir,
+        )
     }
 }
 
@@ -1648,13 +1658,14 @@ fn default_under_log(id: &str, suffix: &str) -> String {
 
 /// Absolute log directory.
 ///
-/// Empty uses `~/.tongyun-dev/logs`. `{{root}}` and `{{tomcat}}` are replaced
-/// with the already-expanded paths. A relative value is placed under the
-/// project root (`logs` → `<root>/logs`). A relative value that contains a `..`
-/// segment is rejected so it cannot leave the project root. `\` is treated as
-/// a separator here, the same way `path_to_string` rewrites it to `/`, so
-/// `..\x` cannot slip past the check. Absolute paths are kept as written.
-/// One project's log_dir cannot fail the whole catalog.
+/// Empty uses the file-level `log_dir` when one was passed in, otherwise
+/// `~/.tongyun-dev/logs`. `{{root}}` and `{{tomcat}}` are replaced with the
+/// already-expanded paths. A relative value is placed under the project root
+/// (`logs` → `<root>/logs`). A relative value that contains a `..` segment is
+/// rejected so it cannot leave the project root. `\` is treated as a separator
+/// here, the same way `path_to_string` rewrites it to `/`, so `..\x` cannot
+/// slip past the check. Absolute paths are kept as written. One project's
+/// log_dir cannot fail the whole catalog.
 fn resolve_log_dir(
     raw: &str,
     root: &Path,
@@ -1692,7 +1703,17 @@ fn resolve_log_dir(
     Ok(root.join(normalized))
 }
 
+#[cfg(test)]
 fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolved> {
+    resolve_project_with_log_default(id, p, home, "")
+}
+
+fn resolve_project_with_log_default(
+    id: &str,
+    p: &Project,
+    home: Option<&Path>,
+    default_log_dir: &str,
+) -> Result<Resolved> {
     if p.enabled && p.port == 0 {
         bail!("port must be non-zero");
     }
@@ -1705,7 +1726,12 @@ fn resolve_project(id: &str, p: &Project, home: Option<&Path>) -> Result<Resolve
     } else {
         Some(expand_path("tomcat", &p.tomcat, home)?)
     };
-    let log_dir = resolve_log_dir(&p.log_dir, &root, tomcat.as_deref(), home)?;
+    let log_dir_raw = if p.log_dir.trim().is_empty() {
+        default_log_dir
+    } else {
+        p.log_dir.as_str()
+    };
+    let log_dir = resolve_log_dir(log_dir_raw, &root, tomcat.as_deref(), home)?;
     let vars = Vars {
         root: path_to_string(&root),
         tomcat: tomcat
@@ -1868,6 +1894,7 @@ fn resolve_project_with_profile(
     p: &Project,
     home: Option<&Path>,
     profile_name: Option<&str>,
+    default_log_dir: &str,
 ) -> Result<Resolved> {
     let mut project = p.clone();
     let effective_profile = profile_name.or(project.default_profile.as_deref());
@@ -1891,7 +1918,7 @@ fn resolve_project_with_profile(
             bail!("unknown profile `{name}` for project `{id}`");
         }
     }
-    resolve_project(id, &project, home)
+    resolve_project_with_log_default(id, &project, home, default_log_dir)
 }
 
 fn parse_config(text: &str) -> Result<FileConfig> {
@@ -4974,7 +5001,12 @@ impl Loaded {
         if self.config.projects.contains_key(&id) {
             bail!("project `{id}` already exists; remove it first or pick another id");
         }
-        resolve_project(&id, &project, current_home().as_deref())?;
+        resolve_project_with_log_default(
+            &id,
+            &project,
+            current_home().as_deref(),
+            &self.config.log_dir,
+        )?;
         Ok(())
     }
 
@@ -4985,7 +5017,12 @@ impl Loaded {
             bail!("project `{id}` already exists; remove it first or pick another id");
         }
         // Same validation as loading: absolute root, templates resolve, etc.
-        resolve_project(&id, &project, current_home().as_deref())?;
+        resolve_project_with_log_default(
+            &id,
+            &project,
+            current_home().as_deref(),
+            &self.config.log_dir,
+        )?;
         let mut doc = read_doc(&self.path)?;
         if !project.group.is_empty() {
             validate_group_key(&project.group)?;
@@ -5234,7 +5271,12 @@ impl Loaded {
         if let Some(ref log_file) = edit.log_file {
             test_project.log_file = log_file.trim().to_string();
         }
-        resolve_project(id, &test_project, current_home().as_deref())?;
+        resolve_project_with_log_default(
+            id,
+            &test_project,
+            current_home().as_deref(),
+            &self.config.log_dir,
+        )?;
         Ok(())
     }
 
@@ -5550,7 +5592,12 @@ impl Loaded {
             .projects
             .get(id)
             .context(format!("project `{id}` missing after update"))?;
-        resolve_project(id, updated_project, current_home().as_deref())?;
+        resolve_project_with_log_default(
+            id,
+            updated_project,
+            current_home().as_deref(),
+            &temp_config.log_dir,
+        )?;
 
         write_doc(&self.path, &doc)?;
         self.config = temp_config;
@@ -6475,6 +6522,107 @@ log_dir = "/tmp/../tongyun-logs"
         )
         .unwrap();
         assert_eq!(absolute.log_dir, PathBuf::from("/tmp/../tongyun-logs"));
+    }
+
+    #[test]
+    fn top_level_log_dir_is_the_default_and_a_project_can_override_it() {
+        let home = Path::new("/home/demo");
+        let cfg: FileConfig = toml::from_str(
+            r#"
+log_dir = "logs"
+
+[projects.inherit]
+name = "inherit"
+root = "/tmp/demo-inherit"
+start = ["true"]
+port = 9
+
+[projects.own]
+name = "own"
+root = "/tmp/demo-own"
+start = ["true"]
+port = 9
+log_dir = "/tmp/own-logs"
+"#,
+        )
+        .unwrap();
+        let inherit = resolve_project_with_log_default(
+            "inherit",
+            cfg.projects.get("inherit").unwrap(),
+            Some(home),
+            &cfg.log_dir,
+        )
+        .unwrap();
+        assert_eq!(inherit.log_dir, PathBuf::from("/tmp/demo-inherit/logs"));
+        assert_eq!(
+            inherit.log_file,
+            PathBuf::from("/tmp/demo-inherit/logs/inherit.out")
+        );
+        let own = resolve_project_with_log_default(
+            "own",
+            cfg.projects.get("own").unwrap(),
+            Some(home),
+            &cfg.log_dir,
+        )
+        .unwrap();
+        assert_eq!(own.log_dir, PathBuf::from("/tmp/own-logs"));
+
+        let escaped: FileConfig = toml::from_str(
+            r#"
+log_dir = '..\x'
+
+[projects.inherits_bad]
+name = "inherits_bad"
+root = "/tmp/demo-bad-top"
+start = ["true"]
+port = 9
+
+[projects.overrides]
+name = "overrides"
+root = "/tmp/demo-ok-top"
+start = ["true"]
+port = 9
+log_dir = "logs"
+"#,
+        )
+        .unwrap();
+        let err = resolve_project_with_log_default(
+            "inherits_bad",
+            escaped.projects.get("inherits_bad").unwrap(),
+            Some(home),
+            &escaped.log_dir,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains(".."), "{err}");
+        let overrides = resolve_project_with_log_default(
+            "overrides",
+            escaped.projects.get("overrides").unwrap(),
+            Some(home),
+            &escaped.log_dir,
+        )
+        .unwrap();
+        assert_eq!(overrides.log_dir, PathBuf::from("/tmp/demo-ok-top/logs"));
+
+        let nested: FileConfig = toml::from_str(
+            r#"
+log_dir = 'a\..\..\x'
+
+[projects.nested_bad]
+name = "nested_bad"
+root = "/tmp/demo-nested-bad"
+start = ["true"]
+port = 9
+"#,
+        )
+        .unwrap();
+        let err = resolve_project_with_log_default(
+            "nested_bad",
+            nested.projects.get("nested_bad").unwrap(),
+            Some(home),
+            &nested.log_dir,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains(".."), "{err}");
     }
 
     #[test]

@@ -6,6 +6,10 @@
 #   桌面 App / 网页控制台 →「扫描目录…」     # 勾选后写进你的配置
 # 字段说明见 config/projects.template.toml 和 docs/development.md。
 
+# 全部项目的默认日志目录。某个 [projects.*] 里的 log_dir 会覆盖这里。
+# 省略则是 ~/.tongyun-dev/logs。相对路径相对该项目的 root，不能含 ..（/ 和 \ 都算分隔符）。
+log_dir = "~/.tongyun-dev/logs"
+
 # 分组定义（可选）
 [group.demo]
 label = "Demo 业务线"

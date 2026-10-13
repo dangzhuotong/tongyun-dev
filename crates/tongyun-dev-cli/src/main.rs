@@ -138,6 +138,9 @@ enum Cmd {
         /// Ready probe used when login_url is empty
         #[arg(long)]
         health_url: Option<String>,
+        /// Log directory (default ~/.tongyun-dev/logs). `~`, `{{root}}`, or a path relative to the project root.
+        #[arg(long)]
+        log_dir: Option<String>,
         /// Log file (default ~/.tongyun-dev/logs/<id>.out)
         #[arg(long)]
         log_file: Option<String>,
@@ -318,12 +321,20 @@ fn run_machine_operation(config: Option<&std::path::Path>, cmd: &Cmd) -> Result<
     let result: Result<()> = (|| {
         let loaded = loaded.as_ref().map_err(|e| anyhow::anyhow!("{e:#}"))?;
         let next = match cmd {
-            Cmd::Start { timeout, profile, .. } => {
-                loaded.start_with_profile(id, profile.as_deref(), timeout.map(Duration::from_secs))?
-            }
-            Cmd::Restart { timeout, profile, .. } => {
-                loaded.restart_with_profile(id, profile.as_deref(), timeout.map(Duration::from_secs))?
-            }
+            Cmd::Start {
+                timeout, profile, ..
+            } => loaded.start_with_profile(
+                id,
+                profile.as_deref(),
+                timeout.map(Duration::from_secs),
+            )?,
+            Cmd::Restart {
+                timeout, profile, ..
+            } => loaded.restart_with_profile(
+                id,
+                profile.as_deref(),
+                timeout.map(Duration::from_secs),
+            )?,
             Cmd::Stop { .. } => loaded.stop(id)?,
             Cmd::Install { .. } => loaded.install_deps_blocking(id)?,
             Cmd::Wait { timeout, .. } => loaded.wait_ready(id, Duration::from_secs(*timeout))?,
@@ -449,7 +460,11 @@ fn main() -> Result<()> {
             ..
         } => {
             match if matches!(cmd, Cmd::Restart { .. }) {
-                loaded.restart_with_profile(id, profile.as_deref(), timeout.map(Duration::from_secs))
+                loaded.restart_with_profile(
+                    id,
+                    profile.as_deref(),
+                    timeout.map(Duration::from_secs),
+                )
             } else {
                 loaded.start_with_profile(id, profile.as_deref(), timeout.map(Duration::from_secs))
             } {
@@ -562,6 +577,7 @@ fn main() -> Result<()> {
             port,
             login_url,
             health_url,
+            log_dir,
             log_file,
             node,
             java,
@@ -587,6 +603,7 @@ fn main() -> Result<()> {
                 port: Some(port),
                 login_url,
                 health_url,
+                log_dir,
                 log_file,
                 node,
                 java,

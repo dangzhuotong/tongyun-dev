@@ -90,7 +90,7 @@ tongyun-dev ui [--port 9099] [--no-open]
 ## 日志与 PID
 
 - 每个项目默认把输出写到 `~/.tongyun-dev/logs/<id>.out`，PID 记在 `~/.tongyun-dev/logs/<id>.pid`。
-- 想换位置：在该项目的配置里写 `log_dir = "~/somewhere"`；也可以单独指定 `log_file` / `pid_file`，里面能用 `{{log_dir}}`、`{{root}}`。
+- 想换位置：在该项目的配置里写 `log_dir = "~/somewhere"`，或 `log_dir = "{{root}}/logs"`，或相对项目根的 `log_dir = "logs"`。桌面「项目设置」、网页控制台和 `tongyun-dev add --log-dir` 也能写。也可以单独指定 `log_file` / `pid_file`，里面能用 `{{log_dir}}`、`{{root}}`。
 - 看日志：`tongyun-dev logs <id> [--follow]`，或者桌面 App / 网页控制台的日志面板。
 
 **从旧版升级**：默认日志目录已经改成 `~/.tongyun-dev/logs`。升级后第一次打开，App 可能认不出用旧位置启动、还在跑的进程（显示为未运行）。手动停掉旧进程再从 App 启动即可；想沿用旧目录，就在对应项目里设 `log_dir`。

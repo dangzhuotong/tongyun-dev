@@ -49,6 +49,7 @@ export function ProjectForm({
     port: initialDetail ? (initialDetail.port ? String(initialDetail.port) : "") : "8080",
     login_url: initialDetail?.login_url ?? "",
     health_url: initialDetail?.health_url ?? "",
+    log_dir: initialDetail?.log_dir ?? "",
     log_file: initialDetail?.log_file ?? "",
     node: initialDetail?.node ?? "",
     java: initialDetail?.java ?? "",
@@ -176,6 +177,7 @@ export function ProjectForm({
           port: Number(form.port),
           login_url: form.login_url.trim() || undefined,
           health_url: form.health_url.trim() || undefined,
+          log_dir: form.log_dir?.trim() || undefined,
           log_file: form.log_file.trim() || undefined,
           node: form.node.trim() || undefined,
           java: form.java.trim() || undefined,
@@ -505,6 +507,17 @@ export function ProjectForm({
                 onChange={(e) => handleChange("node", e.target.value)}
               />
             </div>
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="field-log-dir">日志目录</label>
+            <input
+              id="field-log-dir"
+              type="text"
+              value={form.log_dir ?? ""}
+              placeholder="默认 ~/.tongyun-dev/logs；可写 ~/logs、{{root}}/logs，或相对项目根的 logs"
+              onChange={(e) => handleChange("log_dir", e.target.value)}
+            />
           </div>
 
           {/* 日志文件 */}

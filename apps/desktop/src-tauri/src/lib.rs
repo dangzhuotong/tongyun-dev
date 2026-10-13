@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tongyun_dev_core::{
     ImportReport, LogTail, NewProject, ProjectDetail, ProjectEdit, ProjectList, ProjectRow,
     ScanReport, StatusJson,
@@ -293,26 +294,74 @@ async fn set_project_group(id: String, group: Option<String>) -> Result<ProjectR
     .await
 }
 
-fn show_main_window(app: &tauri::AppHandle) {
+/// Set when the user asks the window to close (close button / Cmd-Q path that
+/// delivers `CloseRequested`). A launch-time window drop does not set this.
+static USER_CLOSED_MAIN: AtomicBool = AtomicBool::new(false);
+
+/// Bring `main` forward on the next event-loop turn.
+///
+/// On macOS, `setup` runs inside `applicationDidFinishLaunching`, after tao has
+/// already called `activateIgnoringOtherApps` and before that callback returns.
+/// The config window does not exist yet at that earlier call, and AppKit ignores
+/// `makeKeyAndOrderFront` issued before `didFinishLaunching` returns, so the
+/// window can show without the process becoming frontmost. There is no
+/// single-instance plugin and no tray. Tauri then exits when the last window is
+/// destroyed. Queue the show/activate until the run loop is actually running.
+fn schedule_front(app: &tauri::AppHandle) {
+    let app = app.clone();
+    let _ = app
+        .clone()
+        .run_on_main_thread(move || bring_main_window_front(&app));
+}
+
+fn bring_main_window_front(app: &tauri::AppHandle) {
     use tauri::Manager;
-    #[cfg(target_os = "macos")]
-    {
-        // A GUI launch (Dock / Finder) otherwise can come up without ordering
-        // the main window front.
-        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    if app.get_webview_window("main").is_none() {
+        let config = app
+            .config()
+            .app
+            .windows
+            .iter()
+            .find(|window| window.label == "main")
+            .cloned();
+        if let Some(config) = config {
+            if let Ok(builder) = tauri::WebviewWindowBuilder::from_config(app, &config) {
+                let _ = builder.build();
+            }
+        }
     }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
+    #[cfg(target_os = "macos")]
+    {
+        // `show` / `set_focus` are themselves queued. Activate only after them.
+        let _ = app.run_on_main_thread(move || activate_macos_app());
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn activate_macos_app() {
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return;
+    };
+    let ns_app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+    #[allow(deprecated)]
+    ns_app.activateIgnoringOtherApps(true);
 }
 
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            show_main_window(app.handle());
+            schedule_front(app.handle());
             Ok(())
+        })
+        .on_window_event(|_window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                USER_CLOSED_MAIN.store(true, Ordering::Relaxed);
+            }
         })
         .invoke_handler(tauri::generate_handler![
             list_projects,
@@ -342,6 +391,20 @@ pub fn run() {
             open_terminal,
             open_pages
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tongyun-dev");
+        .build(tauri::generate_context!())
+        .expect("error while building tongyun-dev")
+        .run(|app, event| match event {
+            // Dock click on an already-running app. Show the same window again.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => schedule_front(app),
+            // Last window destroyed with no tray. A user close is allowed to
+            // exit. A launch that drops the window without CloseRequested is not.
+            tauri::RunEvent::ExitRequested { api, code, .. } if code.is_none() => {
+                if !USER_CLOSED_MAIN.load(Ordering::Relaxed) {
+                    api.prevent_exit();
+                    schedule_front(app);
+                }
+            }
+            _ => {}
+        });
 }

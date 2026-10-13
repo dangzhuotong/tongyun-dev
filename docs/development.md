@@ -65,7 +65,7 @@ npm run tauri build
 
 配置查找顺序与 CLI 相同：1) 显式 `--config` 参数 → 2) 环境变量 `TONGYUN_DEV_CONFIG` → 3) `~/.config/tongyun-dev/settings.json` 记住的路径 → 4) 默认配置 `~/.config/tongyun-dev/projects.toml` → 5) 从当前目录及上级目录找 `config/projects.toml`。未找到配置时桌面端主区域会展示空状态，支持「扫描一个目录 / 手动新增」，或选择已有文件 / 一键创建默认配置。
 
-Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/release/bundle/macos/tongyun-dev.app`。安装步骤见 [README](../README.md)。
+Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/release/bundle/macos/tongyun-dev.app`。安装步骤见 [README](../README.md)。第一次用 `open` 打开时，主窗口会在 `applicationDidFinishLaunching` 返回之后再显示到最前，避免窗口出现了但进程不是前台、随后自己退出。
 
 ## 扫描目录
 
@@ -166,7 +166,9 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 
 ## 配置字段
 
-`~/.config/tongyun-dev/projects.toml` 里每个 `[projects.<id>]`：
+`~/.config/tongyun-dev/projects.toml` 顶层可以写 `log_dir`，作为所有项目的默认日志目录。某个项目自己的 `log_dir` 覆盖它。省略两边时仍是 `~/.tongyun-dev/logs`。相对路径相对该项目的 `root`，校验和项目级相同（`/` 和 `\` 都算分隔符，含 `..` 段则拒绝）。
+
+每个 `[projects.<id>]`：
 
 | 字段 | 说明 |
 | --- | --- |
@@ -194,7 +196,7 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 | `env` | 可选。额外环境变量键值对（例如 `env = { CI = "1", APP_ENV = "dev" }`），注入启动和依赖安装环境，用户显式配置的值优先 |
 | `pty` | 可选（缺省 `false`）。Unix 上是否用 openpty relay 在伪终端中运行后台进程（macOS 与 Linux 同一路径，不用系统 `script`）。Windows 忽略该字段 |
 | `auto_answers` | 可选。自动应答规则数组（例如 `[{ expect = "Select environment", send = "dev" }]`），启动时匹配日志输出并自动向标准输入发送内容 |
-| `log_dir` / `log_file` / `pid_file` | 可省略。默认日志与 PID 路径为 `~/.tongyun-dev/logs/<id>.out` 和 `.pid`。`log_dir` 可以是绝对路径、`~` / `$HOME`、`{{root}}` / `{{tomcat}}`，或相对项目根的路径（如 `logs`；相对路径不能含 `..`，`/` 和 `\` 都算分隔符）。某一项 `log_dir` 展不开时，列表仍返回其余项目，该项带 `resolve_error`，桌面主窗口不会停在「正在读取…」。`tongyun-dev status`（不带 id）同样逐项继续，并在有失败项时以非 0 退出 |
+| `log_dir` / `log_file` / `pid_file` | 可省略。未写项目级 `log_dir` 时用顶层 `log_dir`，再省略则日志与 PID 为 `~/.tongyun-dev/logs/<id>.out` 和 `.pid`。`log_dir` 可以是绝对路径、`~` / `$HOME`、`{{root}}` / `{{tomcat}}`，或相对项目根的路径（如 `logs`；相对路径不能含 `..`，`/` 和 `\` 都算分隔符）。某一项 `log_dir` 展不开时，列表仍返回其余项目，该项带 `resolve_error`，桌面主窗口不会停在「正在读取…」。`tongyun-dev status`（不带 id）同样逐项继续，并在有失败项时以非 0 退出 |
 
 ### 分组配置 `[group.<key>]`
 

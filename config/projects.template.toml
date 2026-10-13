@@ -20,6 +20,8 @@
 #   java_home / node_home  可选，显式指定安装目录（Windows 或特殊安装时用）
 #   shell       可选，单条命令用哪个 shell 执行：bash（macOS/Linux 默认）、sh、cmd（Windows 默认）、powershell
 #   start_windows / stop_windows  可选，Windows 上优先使用的启动 / 停止命令数组
+#   log_dir     顶层可选。全部项目的默认日志目录（默认 ~/.tongyun-dev/logs）。
+#               某个项目自己的 log_dir 会覆盖它。相对路径相对该项目的 root，不能含 ..（/ 和 \ 都算分隔符）。
 #   log_file    日志文件路径（可选，默认 ~/.tongyun-dev/logs/<id>.out）
 #   pid_file    PID 文件路径（可选，默认 ~/.tongyun-dev/logs/<id>.pid）
 #   auto_install  可选，缺省 true。根目录有 package.json 但缺 node_modules 时，启动前先自动装依赖（按锁文件选 pnpm / yarn / npm）；false 时只提示「依赖未安装」

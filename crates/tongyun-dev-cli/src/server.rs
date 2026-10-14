@@ -2220,3 +2220,142 @@ mod tests {
         assert_eq!(url_decode("%E5%90%8E%E7%AB%AF"), "后端");
     }
 }
+
+#[cfg(test)]
+mod tests_pure_helpers {
+    use super::*;
+
+    #[test]
+    fn test_find_bytes() {
+        assert_eq!(find(b"hello world", b"world"), Some(6));
+        assert_eq!(find(b"abc", b"def"), None);
+        assert_eq!(find(b"abc", b"abcd"), None);
+        assert_eq!(find(b"a\r\n\r\nb", b"\r\n\r\n"), Some(1));
+    }
+
+    #[test]
+    fn test_trusted_logic() {
+        let req_get = Request {
+            method: "GET".to_string(),
+            path: "/api/projects".to_string(),
+            host: "127.0.0.1:9099".to_string(),
+            origin: None,
+            body: Vec::new(),
+        };
+        assert!(trusted(&req_get, 9099));
+
+        let req_get_localhost = Request {
+            method: "GET".to_string(),
+            path: "/api/projects".to_string(),
+            host: "localhost:9099".to_string(),
+            origin: None,
+            body: Vec::new(),
+        };
+        assert!(trusted(&req_get_localhost, 9099));
+
+        let req_get_bad_host = Request {
+            method: "GET".to_string(),
+            path: "/api/projects".to_string(),
+            host: "example.com:9099".to_string(),
+            origin: None,
+            body: Vec::new(),
+        };
+        assert!(!trusted(&req_get_bad_host, 9099));
+
+        let req_post_no_origin = Request {
+            method: "POST".to_string(),
+            path: "/api/projects/demo/start".to_string(),
+            host: "127.0.0.1:9099".to_string(),
+            origin: None,
+            body: Vec::new(),
+        };
+        assert!(trusted(&req_post_no_origin, 9099));
+
+        let req_post_good_origin = Request {
+            method: "POST".to_string(),
+            path: "/api/projects/demo/start".to_string(),
+            host: "127.0.0.1:9099".to_string(),
+            origin: Some("http://127.0.0.1:9099".to_string()),
+            body: Vec::new(),
+        };
+        assert!(trusted(&req_post_good_origin, 9099));
+
+        let req_post_bad_origin = Request {
+            method: "POST".to_string(),
+            path: "/api/projects/demo/start".to_string(),
+            host: "127.0.0.1:9099".to_string(),
+            origin: Some("http://attacker.example.com".to_string()),
+            body: Vec::new(),
+        };
+        assert!(!trusted(&req_post_bad_origin, 9099));
+    }
+
+    #[test]
+    fn test_project_route_matching() {
+        assert_eq!(
+            project_route("/api/projects/demo_web", ""),
+            Some("demo_web")
+        );
+        assert_eq!(
+            project_route("/api/projects/demo_web/start", "start"),
+            Some("demo_web")
+        );
+        assert_eq!(
+            project_route("/api/projects/demo_web/stop", "stop"),
+            Some("demo_web")
+        );
+        assert_eq!(
+            project_route("/api/projects/demo_web/logs", "logs"),
+            Some("demo_web")
+        );
+        assert_eq!(
+            project_route("/api/projects/demo_web/input", "input"),
+            Some("demo_web")
+        );
+
+        assert_eq!(project_route("/api/projects/demo_web/start", "stop"), None);
+        assert_eq!(project_route("/api/projects//start", "start"), None);
+        assert_eq!(
+            project_route("/api/projects/nested/sub/start", "start"),
+            None
+        );
+        assert_eq!(project_route("/api/projects/", ""), None);
+        assert_eq!(project_route("/api/other/demo_web", ""), None);
+    }
+
+    #[test]
+    fn test_url_decode_edge_cases() {
+        assert_eq!(url_decode("a+b%20c"), "a b c");
+        assert_eq!(url_decode("no_escapes"), "no_escapes");
+        assert_eq!(url_decode("invalid%zz"), "invalid%zz");
+        assert_eq!(url_decode("tail%"), "tail%");
+        assert_eq!(url_decode("tail%a"), "tail%a");
+    }
+
+    #[test]
+    fn test_json_shaping_helpers() {
+        let (code, ctype, body) = json_body(200, json!({"test_key": "test_val"}));
+        assert_eq!(code, 200);
+        assert_eq!(ctype, "application/json; charset=utf-8");
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["test_key"], "test_val");
+
+        let (err_code, err_ctype, err_body) = err_json(404, "resource not found");
+        assert_eq!(err_code, 404);
+        assert_eq!(err_ctype, "application/json; charset=utf-8");
+        let err_parsed: Value = serde_json::from_slice(&err_body).unwrap();
+        assert_eq!(err_parsed["ok"], false);
+        assert_eq!(err_parsed["error"], "resource not found");
+    }
+
+    #[test]
+    fn test_reason_codes() {
+        assert_eq!(reason(200), "OK");
+        assert_eq!(reason(400), "Bad Request");
+        assert_eq!(reason(403), "Forbidden");
+        assert_eq!(reason(404), "Not Found");
+        assert_eq!(reason(405), "Method Not Allowed");
+        assert_eq!(reason(500), "Internal Server Error");
+        assert_eq!(reason(502), "Internal Server Error");
+    }
+}

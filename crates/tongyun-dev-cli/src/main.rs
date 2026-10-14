@@ -1752,3 +1752,184 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod tests_pure_helpers {
+    use super::*;
+
+    #[test]
+    fn test_parse_env_pair_valid_and_invalid() {
+        assert_eq!(
+            parse_env_pair("KEY=VALUE").unwrap(),
+            ("KEY".to_string(), "VALUE".to_string())
+        );
+        assert_eq!(
+            parse_env_pair("  SPACED_KEY =VALUE=EXTRA ").unwrap(),
+            ("SPACED_KEY".to_string(), "VALUE=EXTRA ".to_string())
+        );
+        assert_eq!(
+            parse_env_pair("EMPTY_VAL=").unwrap(),
+            ("EMPTY_VAL".to_string(), "".to_string())
+        );
+
+        assert!(parse_env_pair("NO_EQUALS").is_err());
+        assert_eq!(
+            parse_env_pair("NO_EQUALS").unwrap_err(),
+            "env must be in KEY=VALUE format, got `NO_EQUALS`"
+        );
+        assert!(parse_env_pair("=VALUE").is_err());
+        assert_eq!(
+            parse_env_pair("=VALUE").unwrap_err(),
+            "env variable key cannot be empty in `=VALUE`"
+        );
+        assert!(parse_env_pair("   =VALUE").is_err());
+    }
+
+    #[test]
+    fn test_parse_auto_answer_pair_valid_and_invalid() {
+        let res = parse_auto_answer_pair("Proceed?=>y").unwrap();
+        assert_eq!(res.expect, "Proceed?");
+        assert_eq!(res.send, "y");
+        assert!(res.once);
+        assert!(!res.regex);
+
+        let res2 = parse_auto_answer_pair("  pattern  =>  response  ").unwrap();
+        assert_eq!(res2.expect, "pattern");
+        assert_eq!(res2.send, "response");
+
+        let err1 = parse_auto_answer_pair("no_arrow").unwrap_err();
+        assert_eq!(
+            err1,
+            "auto-answer must be in 'MATCH=>SEND' format, got `no_arrow`"
+        );
+
+        let err2 = parse_auto_answer_pair("   =>send").unwrap_err();
+        assert_eq!(
+            err2,
+            "auto-answer expect pattern cannot be empty in `   =>send`"
+        );
+    }
+
+    #[test]
+    fn test_parse_web_link_pair_valid_and_invalid() {
+        let err_empty = parse_web_link_pair("   ").unwrap_err();
+        assert_eq!(err_empty, "web link cannot be empty");
+
+        let link_http = parse_web_link_pair("http://127.0.0.1:8080/app").unwrap();
+        assert_eq!(link_http.title, "http://127.0.0.1:8080/app");
+        assert_eq!(link_http.url, "http://127.0.0.1:8080/app");
+
+        let link_https = parse_web_link_pair("https://example.com").unwrap();
+        assert_eq!(link_https.title, "https://example.com");
+        assert_eq!(link_https.url, "https://example.com");
+
+        let link_titled = parse_web_link_pair("Docs=https://example.com/docs").unwrap();
+        assert_eq!(link_titled.title, "Docs");
+        assert_eq!(link_titled.url, "https://example.com/docs");
+
+        let link_empty_title = parse_web_link_pair("=https://example.com/docs").unwrap();
+        assert_eq!(link_empty_title.title, "https://example.com/docs");
+        assert_eq!(link_empty_title.url, "https://example.com/docs");
+
+        let err_url = parse_web_link_pair("Docs=").unwrap_err();
+        assert_eq!(err_url, "link url cannot be empty in `Docs=`");
+
+        let link_raw = parse_web_link_pair("custom_path").unwrap();
+        assert_eq!(link_raw.title, "custom_path");
+        assert_eq!(link_raw.url, "custom_path");
+    }
+
+    #[test]
+    fn test_machine_operation_matrix() {
+        let start_json = Cmd::Start {
+            id: Some("demo_api".to_string()),
+            all: false,
+            group: None,
+            profile: None,
+            open: false,
+            json: true,
+            timeout: None,
+        };
+        assert_eq!(machine_operation(&start_json), Some(("start", "demo_api")));
+
+        let start_no_json = Cmd::Start {
+            id: Some("demo_api".to_string()),
+            all: false,
+            group: None,
+            profile: None,
+            open: false,
+            json: false,
+            timeout: None,
+        };
+        assert_eq!(machine_operation(&start_no_json), None);
+
+        let restart_json = Cmd::Restart {
+            id: Some("demo_api".to_string()),
+            all: false,
+            group: None,
+            profile: None,
+            open: false,
+            json: true,
+            timeout: None,
+        };
+        assert_eq!(
+            machine_operation(&restart_json),
+            Some(("restart", "demo_api"))
+        );
+
+        let stop_json = Cmd::Stop {
+            id: Some("demo_api".to_string()),
+            all: false,
+            group: None,
+            json: true,
+        };
+        assert_eq!(machine_operation(&stop_json), Some(("stop", "demo_api")));
+
+        let stop_no_json = Cmd::Stop {
+            id: Some("demo_api".to_string()),
+            all: false,
+            group: None,
+            json: false,
+        };
+        assert_eq!(machine_operation(&stop_no_json), None);
+
+        let install_json = Cmd::Install {
+            id: "demo_api".to_string(),
+            json: true,
+        };
+        assert_eq!(
+            machine_operation(&install_json),
+            Some(("install", "demo_api"))
+        );
+
+        let wait_json = Cmd::Wait {
+            id: "demo_api".to_string(),
+            timeout: 30,
+            json: true,
+        };
+        assert_eq!(machine_operation(&wait_json), Some(("wait", "demo_api")));
+
+        let logs_json = Cmd::Logs {
+            id: "demo_api".to_string(),
+            follow: false,
+            json: true,
+            lines: 50,
+        };
+        assert_eq!(machine_operation(&logs_json), Some(("logs", "demo_api")));
+
+        let input_json = Cmd::Input {
+            id: "demo_api".to_string(),
+            text: "test".to_string(),
+            no_enter: false,
+            key: None,
+            json: true,
+        };
+        assert_eq!(machine_operation(&input_json), Some(("input", "demo_api")));
+
+        let list_json = Cmd::List {
+            json: true,
+            with_groups: false,
+        };
+        assert_eq!(machine_operation(&list_json), None);
+    }
+}

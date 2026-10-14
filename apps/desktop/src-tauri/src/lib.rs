@@ -453,3 +453,16 @@ pub fn run() {
             _ => {}
         });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_report_formatting() {
+        assert_eq!(report("simple error message"), "simple error message");
+        assert_eq!(report(12345), "12345");
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        assert_eq!(report(io_err), "file not found");
+    }
+}

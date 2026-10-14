@@ -43,4 +43,12 @@ describe("stopButtonTitle", () => {
     expect(stopButtonTitle(null)).toBeUndefined();
     expect(stopButtonTitle(undefined)).toBeUndefined();
   });
+
+  it("支持传入包含 status 字段的对象形态", () => {
+    expect(stopButtonTitle({ status: { state: "stopped" } })).toBe("清理残留进程和端口占用");
+    expect(stopButtonTitle({ status: { state: "ready" } })).toBeUndefined();
+    expect(stopButtonTitle({ status: null })).toBeUndefined();
+    expect(stopButtonTitle({ status: undefined })).toBeUndefined();
+  });
 });
+

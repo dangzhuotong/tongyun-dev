@@ -324,7 +324,6 @@ start = ["bash", "-c", "echo base"]
 }
 
 #[test]
-#[test]
 fn test_add_project_validation_rejects_without_modifying_file() {
     let temp = TempDir::new("add_validation");
     let cfg_file = temp.path().join("projects.toml");
@@ -445,7 +444,6 @@ start = ["echo", "1"]
     assert_eq!(current_content, initial_toml);
 }
 
-#[test]
 #[test]
 fn test_validate_new_project_method() {
     let temp = TempDir::new("validate_method");

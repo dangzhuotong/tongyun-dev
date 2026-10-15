@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use toml_edit::DocumentMut;
 use tongyun_dev_core::{
     default_port_mode, derive_state, generate_group_key, load, map_key, normalize_start_arg,
-    resolve_input_data, unresolved_status, validate_group_key, LifeState, NewProject,
-    ProjectRow, StateInput, WebLink,
+    resolve_input_data, unresolved_status, validate_group_key, LifeState, NewProject, ProjectRow,
+    StateInput, WebLink,
 };
 
 struct TempDir {
@@ -155,7 +155,10 @@ port = 3000
     assert_eq!(api.port_arg.as_deref(), Some("--port"));
     assert_eq!(api.port_env.as_deref(), Some("PORT"));
     assert!(api.pty);
-    assert_eq!(api.env.get("ENV_MODE").map(String::as_str), Some("production"));
+    assert_eq!(
+        api.env.get("ENV_MODE").map(String::as_str),
+        Some("production")
+    );
     assert_eq!(api.auto_answers.len(), 2);
     assert_eq!(api.auto_answers[0].expect, "Ready?");
     assert_eq!(api.auto_answers[0].send, "yes");
@@ -308,7 +311,10 @@ start = ["bash", "-c", "echo base"]
     assert!(content.contains("# Author notes"));
     assert!(content.contains("[projects.base_app]"));
     assert!(content.contains("[projects.added_app]"));
-    assert!(content.contains("[group.services]"), "group table should be created in toml");
+    assert!(
+        content.contains("[group.services]"),
+        "group table should be created in toml"
+    );
 
     let doc: DocumentMut = content.parse().expect("toml_edit document must be valid");
     assert!(doc.as_table().contains_key("projects"));
@@ -797,7 +803,10 @@ fn test_validate_group_key() {
 #[test]
 fn test_generate_group_key() {
     // ASCII labels
-    assert_eq!(generate_group_key("Backend Team", &[] as &[&str]), "backend-team");
+    assert_eq!(
+        generate_group_key("Backend Team", &[] as &[&str]),
+        "backend-team"
+    );
     assert_eq!(generate_group_key("API_v2", &[] as &[&str]), "api_v2");
     assert_eq!(
         generate_group_key("   --hello..world--   ", &[] as &[&str]),
@@ -862,6 +871,7 @@ fn test_unresolved_status_construction() {
         default_profile: None,
         profiles: BTreeMap::new(),
         depends_on: Vec::new(),
+        start_command: String::new(),
         resolve_error: Some("log_dir resolution failed".to_string()),
     };
 
@@ -872,7 +882,10 @@ fn test_unresolved_status_construction() {
     assert_eq!(st.state, LifeState::Stopped);
     assert_eq!(st.port, 9090);
     assert_eq!(st.failure.as_deref(), Some("bad config"));
-    assert_eq!(st.resolve_error.as_deref(), Some("log_dir resolution failed"));
+    assert_eq!(
+        st.resolve_error.as_deref(),
+        Some("log_dir resolution failed")
+    );
 }
 
 #[test]
@@ -894,5 +907,8 @@ fn test_normalize_start_arg_pnpm_rules() {
     );
 
     // Plain commands left untouched
-    assert_eq!(normalize_start_arg("mvn spring-boot:run"), "mvn spring-boot:run");
+    assert_eq!(
+        normalize_start_arg("mvn spring-boot:run"),
+        "mvn spring-boot:run"
+    );
 }

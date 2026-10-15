@@ -41,6 +41,8 @@ export type Project = {
   default_profile?: string | null;
   profiles?: Record<string, ProfileConfig>;
   depends_on?: string[];
+  /** Assembled start command, safe to copy into a terminal. */
+  start_command?: string;
   /** 这一条解析失败（例如 log_dir 展不开）。列表里的其他项目仍然显示。 */
   resolve_error?: string | null;
 };
@@ -58,6 +60,8 @@ export type GroupInfo = {
   key: string;
   label: string;
   order: number | null;
+  /** Project ids in group start order. */
+  members?: string[];
   depends_on?: string[];
 };
 
@@ -229,6 +233,13 @@ export type ScanCandidate = {
   needs_tomcat: boolean;
   why: string[];
   existing_id: string | null;
+  profiles?: Record<string, ProfileConfig>;
+  env?: Record<string, string>;
+  maven_guide?: {
+    packaging: string;
+    main_classes: string[];
+    ports: number[];
+  } | null;
 };
 
 export type ScanReport = {
@@ -248,14 +259,16 @@ export type BatchItemResult = {
   id: string;
   success: boolean;
   ok: boolean;
-  message: string;
-  elapsed_secs: number;
+  message?: string;
+  error?: string | null;
+  elapsed_secs?: number;
 };
 
 export type BatchOutput = {
   total: number;
   succeeded: number;
   failed: number;
-  items: BatchItemResult[];
+  results?: BatchItemResult[];
+  items?: BatchItemResult[];
 };
 

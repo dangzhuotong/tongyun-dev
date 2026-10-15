@@ -694,10 +694,15 @@ fn delayed_listen_transitions_from_starting_to_ready() {
             format!("python3 -m http.server {port} --bind 127.0.0.1"),
         )
     } else {
+        // Same listener as agent_contract: skip http.server, which stalls in
+        // socket.getfqdn before listen on macOS 15+.
         (
             "sh",
             "-c",
-            format!("sleep 2; exec python3 -m http.server {port} --bind 127.0.0.1"),
+            format!(
+                "sleep 2; exec python3 '{}' {port}",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/listen.py")
+            ),
         )
     };
     fs::write(

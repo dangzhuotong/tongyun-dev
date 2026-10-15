@@ -52,6 +52,8 @@ export function toImportItems(rows: ScanRow[]): NewProjectReq[] {
       java: r.java,
       background: r.background,
       tomcat: tomcat || null,
+      env: r.env,
+      profiles: r.profiles,
       enabled: parked ? false : undefined,
       reason: parked ? TOMCAT_REASON : null,
     };

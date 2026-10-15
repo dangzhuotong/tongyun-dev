@@ -571,6 +571,29 @@ svg {
   flex-direction: column;
 }
 
+.group-card {
+  margin: 4px 8px 6px;
+  padding: 2px 2px 4px;
+  border: 1px solid var(--ty-border);
+  border-radius: var(--ty-radius-xs);
+  background: var(--ty-surface);
+}
+
+.group-order {
+  padding: 0 8px 6px 28px;
+  font-size: var(--ty-font-size-xs);
+  color: var(--ty-text-muted);
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.shortcut-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
 .group-header {
   display: flex;
   align-items: center;

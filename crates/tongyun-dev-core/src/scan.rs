@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::{detect_package_manager, NewProject, PackageManager};
+use crate::{detect_package_manager, NewProject, PackageManager, ProfileConfig};
 
 /// Default walk depth below the chosen root (root itself = depth 0).
 pub const DEFAULT_SCAN_DEPTH: usize = 3;
@@ -97,6 +97,23 @@ pub struct Candidate {
     pub existing_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port_mode: Option<String>,
+    /// Suggested Spring profiles, one per existing `application-<name>.*` file.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub profiles: BTreeMap<String, ProfileConfig>,
+    /// Extra env for the project itself (scanner leaves this empty unless a file says so).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Non-Spring-Boot Maven: packaging / mainClass / port candidates. Not a disabled row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maven_guide: Option<MavenGuide>,
+}
+
+/// Candidates read from a non-Spring-Boot `pom.xml`. The project stays enabled.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MavenGuide {
+    pub packaging: String,
+    pub main_classes: Vec<String>,
+    pub ports: Vec<u16>,
 }
 
 impl Candidate {
@@ -121,6 +138,8 @@ impl Candidate {
                 None
             },
             port_mode: self.port_mode.clone(),
+            env: self.env.clone(),
+            profiles: self.profiles.clone(),
             ..Default::default()
         }
     }
@@ -272,6 +291,9 @@ fn base_candidate(dir: &Path, home: Option<&Path>, kind: &str, label: &str) -> C
         why: Vec::new(),
         existing_id: None,
         port_mode: None,
+        profiles: BTreeMap::new(),
+        env: BTreeMap::new(),
+        maven_guide: None,
     }
 }
 
@@ -465,6 +487,181 @@ fn yaml_server_port(text: &str) -> Option<u16> {
     None
 }
 
+/// Profile name from `application-<name>.yml` / `.yaml` / `.properties`.
+/// `application.yml` itself is not a profile.
+pub fn spring_profile_from_filename(name: &str) -> Option<String> {
+    let rest = name.strip_prefix("application-")?;
+    let stem = rest
+        .strip_suffix(".yml")
+        .or_else(|| rest.strip_suffix(".yaml"))
+        .or_else(|| rest.strip_suffix(".properties"))?;
+    if stem.is_empty()
+        || stem.contains('.')
+        || stem.contains('/')
+        || stem.contains('\\')
+        || !stem
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    Some(stem.to_string())
+}
+
+/// Suggest `[profiles.<name>]` only for `application-*` files that exist.
+/// Each profile sets `SPRING_PROFILES_ACTIVE` and copies `server.port` when present.
+pub fn suggest_spring_profiles(dir: &Path) -> BTreeMap<String, ProfileConfig> {
+    let res = dir.join("src/main/resources");
+    let Ok(rd) = std::fs::read_dir(&res) else {
+        return BTreeMap::new();
+    };
+    let mut names: Vec<String> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    let mut out = BTreeMap::new();
+    for name in names {
+        let Some(profile) = spring_profile_from_filename(&name) else {
+            continue;
+        };
+        let text = read(&res.join(&name)).unwrap_or_default();
+        let port = if name.ends_with(".properties") {
+            properties_port(&text)
+        } else {
+            yaml_server_port(&text)
+        };
+        let mut env = BTreeMap::new();
+        env.insert("SPRING_PROFILES_ACTIVE".into(), profile.clone());
+        out.insert(
+            profile.clone(),
+            ProfileConfig {
+                label: profile,
+                start: None,
+                port,
+                env,
+            },
+        );
+    }
+    out
+}
+
+fn attach_spring_profiles(c: &mut Candidate, dir: &Path) {
+    let profiles = suggest_spring_profiles(dir);
+    if profiles.is_empty() {
+        return;
+    }
+    let names: Vec<&str> = profiles.keys().map(String::as_str).collect();
+    c.why.push(format!(
+        "环境预设来自已有的 application-*.yml / .yaml / .properties：{}",
+        names.join("、")
+    ));
+    c.profiles = profiles;
+}
+
+fn pom_main_classes(pom: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = pom;
+    while let Some(i) = rest.find("<mainClass>") {
+        let after = &rest[i + "<mainClass>".len()..];
+        let Some(end) = after.find("</mainClass>") else {
+            break;
+        };
+        let v = after[..end].trim();
+        let ok = !v.is_empty()
+            && !v.contains('<')
+            && !v.contains('>')
+            && !v.contains('$')
+            && v.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_'));
+        if ok && !out.iter().any(|e| e == v) {
+            out.push(v.to_string());
+        }
+        rest = &after[end + "</mainClass>".len()..];
+    }
+    out
+}
+
+fn spring_ports(dir: &Path) -> Vec<u16> {
+    let res = dir.join("src/main/resources");
+    let Ok(rd) = std::fs::read_dir(&res) else {
+        return Vec::new();
+    };
+    let mut files: Vec<_> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            let n = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            (n.starts_with("application") || n.starts_with("bootstrap"))
+                && (n.ends_with(".properties") || n.ends_with(".yml") || n.ends_with(".yaml"))
+        })
+        .collect();
+    files.sort();
+    let mut ports = Vec::new();
+    for f in files {
+        let Some(text) = read(&f) else { continue };
+        let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let port = if name.ends_with(".properties") {
+            properties_port(&text)
+        } else {
+            yaml_server_port(&text)
+        };
+        if let Some(p) = port {
+            if !ports.contains(&p) {
+                ports.push(p);
+            }
+        }
+    }
+    ports
+}
+
+fn fill_maven_guide(c: &mut Candidate, pom: &str, dir: &Path, packaging: &str, mvn: &str) {
+    let mains = pom_main_classes(pom);
+    let ports = spring_ports(dir);
+    if let Some(p) = ports.first().copied() {
+        c.port = p;
+        c.why.push(format!(
+            "端口候选：{}",
+            ports
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join("、")
+        ));
+    } else {
+        c.port = 8080;
+        c.port_guessed = true;
+        c.why
+            .push("没找到 server.port，端口候选按 8080（请按应用实际端口改）".into());
+    }
+    c.why.push(format!("packaging：{packaging}"));
+    if mains.is_empty() {
+        c.why.push(
+            "pom 里没有 <mainClass>。可在 maven-jar-plugin 或 exec-maven-plugin 里补上，或改启动命令"
+                .into(),
+        );
+        c.start = format!("{mvn} -q -DskipTests package");
+    } else {
+        c.why.push(format!("mainClass 候选：{}", mains.join("、")));
+        c.start = format!("{mvn} -q exec:java -Dexec.mainClass={}", mains[0]);
+    }
+    if packaging != "war" {
+        c.why.push(
+            "这不是 Spring Boot：按 mainClass / 端口 / packaging 候选确认即可启动，不会默认停用"
+                .into(),
+        );
+    }
+    c.maven_guide = Some(MavenGuide {
+        packaging: packaging.to_string(),
+        main_classes: mains,
+        ports: if ports.is_empty() {
+            vec![c.port]
+        } else {
+            ports
+        },
+    });
+}
+
 fn detect_maven(dir: &Path, home: Option<&Path>) -> Option<Detection> {
     let pom = read(&dir.join("pom.xml"))?;
     let own = pom_own_section(&pom);
@@ -481,23 +678,7 @@ fn detect_maven(dir: &Path, home: Option<&Path>) -> Option<Detection> {
     let mvn = if has_wrapper { "./mvnw" } else { "mvn" };
     let java = java_version_files(dir).or_else(|| pom_java_version(&pom));
 
-    let mut c = if packaging == "war" && !pom.contains("spring-boot-maven-plugin") {
-        let mut c = base_candidate(dir, home, "tomcat-war", "Tomcat WAR（Maven）");
-        let war = artifact.clone().unwrap_or_else(|| dir_name(dir));
-        c.why
-            .push("pom.xml <packaging>war</packaging>，需要外部 Tomcat".into());
-        c.needs_tomcat = true;
-        c.confidence = Confidence::Medium;
-        c.start = format!(
-            "{mvn} -q -DskipTests package && cp target/*.war \"{{{{tomcat}}}}/webapps/{war}.war\" && exec \"{{{{tomcat}}}}/bin/catalina.sh\" run"
-        );
-        c.stop = Some("\"{{tomcat}}/bin/catalina.sh\" stop 15 -force".into());
-        c.port = 8080;
-        c.port_guessed = true;
-        c.why.push("端口按 Tomcat 默认 8080 猜的".into());
-        c.login_url = Some(format!("http://127.0.0.1:8080/{war}/"));
-        c
-    } else if is_boot {
+    let mut c = if is_boot {
         let mut c = base_candidate(dir, home, "spring-boot-maven", "Spring Boot（Maven）");
         c.confidence = if pom.contains("spring-boot-maven-plugin")
             || pom.contains("spring-boot-starter-parent")
@@ -528,10 +709,33 @@ fn detect_maven(dir: &Path, home: Option<&Path>) -> Option<Detection> {
             c.why.push("有 actuator，用 /actuator/health 探活".into());
         }
         c
+    } else if packaging == "pom" {
+        return Some(Detection {
+            container: true,
+            candidate: None,
+        });
     } else {
-        // Plain jar / library module: not something you "start".
-        return None;
+        let mut c = base_candidate(dir, home, "maven-app", "Maven（非 Spring Boot）");
+        c.confidence = Confidence::Low;
+        fill_maven_guide(&mut c, &pom, dir, &packaging, mvn);
+        if packaging == "war" {
+            c.confidence = Confidence::Medium;
+            c.label = "Maven WAR（非 Spring Boot）".into();
+            c.needs_tomcat = true;
+            let war_name = artifact.clone().unwrap_or_else(|| dir_name(dir));
+            c.start = format!(
+                "{mvn} -q -DskipTests package && cp target/*.war \"{{{{tomcat}}}}/webapps/{war_name}.war\" && exec \"{{{{tomcat}}}}/bin/catalina.sh\" run"
+            );
+            c.stop = Some("\"{{tomcat}}/bin/catalina.sh\" stop 15 -force".into());
+            c.login_url = Some(format!("http://127.0.0.1:{}/{war_name}/", c.port));
+            c.why.push(
+                "非 Spring Boot 的 WAR 需要外部 Tomcat，未填 tomcat 时先停用。未配置的 {{tomcat}} 在启动时会报错，不会空替换成 /bin/catalina.sh。也可改成 mainClass 候选里的 exec:java。"
+                    .into(),
+            );
+        }
+        c
     };
+    attach_spring_profiles(&mut c, dir);
     if let Some(a) = artifact.filter(|a| !a.contains('$')) {
         c.name = a;
     }
@@ -603,6 +807,7 @@ fn detect_gradle(dir: &Path, home: Option<&Path>) -> Option<Detection> {
     if text.contains("spring-boot-starter-actuator") {
         c.health_url = Some(format!("http://127.0.0.1:{}/actuator/health", c.port));
     }
+    attach_spring_profiles(&mut c, dir);
     let java = java_version_files(dir)
         .or_else(|| gradle_java_version(&text).map(|v| (v, file.to_string())));
     if let Some((v, src)) = java {
@@ -1101,30 +1306,122 @@ mod tests {
             "<project><artifactId>shop-core</artifactId></project>",
         );
         let cs = run(&t);
-        assert_eq!(cs.len(), 1, "{cs:#?}");
-        assert_eq!(cs[0].id, "shop-web");
+        assert_eq!(cs.len(), 2, "{cs:#?}");
+        assert!(cs
+            .iter()
+            .any(|c| c.id == "shop-web" && c.kind == "spring-boot-maven"));
+        let core = cs
+            .iter()
+            .find(|c| c.id == "shop-core")
+            .expect("plain module");
+        assert_eq!(core.kind, "maven-app");
+        assert!(core.maven_guide.is_some());
+        assert_ne!(core.to_new_project().enabled, Some(false));
     }
 
     #[test]
-    fn tomcat_war_needs_tomcat_and_converts_disabled() {
+    fn plain_maven_guides_main_class_port_and_packaging_without_disabling() {
+        let t = Tmp::new("plainjar");
+        t.write(
+            "worker/pom.xml",
+            r#"<project>
+              <artifactId>demo-worker</artifactId>
+              <packaging>jar</packaging>
+              <build><plugins><plugin><artifactId>exec-maven-plugin</artifactId>
+                <configuration><mainClass>com.example.DemoApp</mainClass></configuration>
+              </plugin></plugins></build>
+            </project>"#,
+        );
+        t.write(
+            "worker/src/main/resources/application.yml",
+            "server:\n  port: 8090\n",
+        );
+        t.write(
+            "worker/src/main/resources/application-dev.yml",
+            "server:\n  port: 8091\n",
+        );
+        t.write(
+            "worker/src/main/resources/application-local.yaml",
+            "server.port: 8092\n",
+        );
+        let cs = run(&t);
+        let c = one(&cs, "maven-app");
+        assert!(!c.needs_tomcat);
+        let guide = c.maven_guide.as_ref().unwrap();
+        assert_eq!(guide.packaging, "jar");
+        assert_eq!(guide.main_classes, vec!["com.example.DemoApp".to_string()]);
+        assert!(guide.ports.contains(&8090));
+        assert!(c.start.contains("exec:java"));
+        assert!(c.start.contains("com.example.DemoApp"));
+        assert_eq!(c.profiles.len(), 2);
+        assert!(c.profiles.contains_key("dev"));
+        assert!(c.profiles.contains_key("local"));
+        assert!(!c.profiles.contains_key("prod"));
+        assert_eq!(
+            c.profiles["dev"]
+                .env
+                .get("SPRING_PROFILES_ACTIVE")
+                .map(String::as_str),
+            Some("dev")
+        );
+        assert_eq!(c.profiles["dev"].port, Some(8091));
+        let req = c.to_new_project();
+        assert_ne!(req.enabled, Some(false));
+        assert!(req.reason.is_none());
+        assert_eq!(req.profiles.len(), 2);
+    }
+
+    #[test]
+    fn war_pom_is_guided_and_needs_tomcat() {
         let t = Tmp::new("war");
         t.write(
             "legacy/pom.xml",
-            "<project><artifactId>legacy-admin</artifactId><packaging>war</packaging><properties><java.version>1.8</java.version></properties></project>",
+            "<project><artifactId>legacy-admin</artifactId><packaging>war</packaging>\
+             <properties><java.version>1.8</java.version></properties>\
+             <build><plugins><plugin><configuration><mainClass>com.example.LegacyMain</mainClass></configuration></plugin></plugins></build>\
+             </project>",
         );
         let cs = run(&t);
-        let c = one(&cs, "tomcat-war");
+        let c = one(&cs, "maven-app");
         assert!(c.needs_tomcat);
+        assert!(c.start.contains("{{tomcat}}"));
+        assert!(c.stop.as_deref().unwrap_or("").contains("{{tomcat}}"));
         assert_eq!(c.java.as_deref(), Some("8"));
-        assert!(c.start.contains("{{tomcat}}/webapps/legacy-admin.war"));
-        assert!(c.stop.as_deref().unwrap().contains("catalina.sh\" stop"));
+        assert_eq!(c.label, "Maven WAR（非 Spring Boot）");
+        let guide = c.maven_guide.as_ref().unwrap();
+        assert_eq!(guide.packaging, "war");
         assert_eq!(
-            c.login_url.as_deref(),
-            Some("http://127.0.0.1:8080/legacy-admin/")
+            guide.main_classes,
+            vec!["com.example.LegacyMain".to_string()]
         );
+        assert!(guide.ports.contains(&8080));
         let req = c.to_new_project();
         assert_eq!(req.enabled, Some(false));
-        assert!(req.reason.unwrap().contains("Tomcat"));
+        assert!(req.reason.as_deref().unwrap_or("").contains("Tomcat"));
+    }
+
+    #[test]
+    fn spring_boot_profiles_come_only_from_existing_application_files() {
+        let t = Tmp::new("bootprof");
+        t.write("api/pom.xml", BOOT_POM);
+        t.write(
+            "api/src/main/resources/application.yml",
+            "server:\n  port: 8080\n",
+        );
+        t.write(
+            "api/src/main/resources/application-dev.yml",
+            "server:\n  port: 8088\n",
+        );
+        let cs = run(&t);
+        let c = one(&cs, "spring-boot-maven");
+        assert_eq!(c.profiles.len(), 1);
+        assert!(c.profiles.contains_key("dev"));
+        assert!(!c.profiles.contains_key("test"));
+        assert_eq!(c.profiles["dev"].port, Some(8088));
+        assert!(c
+            .why
+            .iter()
+            .any(|w| w.contains("application-*.yml") && w.contains("dev")));
     }
 
     #[test]

@@ -10,6 +10,10 @@ use std::time::{Duration, Instant};
 use tongyun_dev_core::{LifeState, Loaded};
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
+// Not `python -m http.server`: its server_bind calls socket.getfqdn after bind
+// and before listen. On macOS 15+ that reverse lookup can block for tens of
+// seconds, so the process stays alive while connect() is still refused.
+const LISTEN_PY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/listen.py");
 struct Fixture {
     root: PathBuf,
     config: PathBuf,
@@ -53,7 +57,8 @@ log_dir = "{}/logs"
         .unwrap();
         let content = fs::read_to_string(&config)
             .unwrap()
-            .replace("DEMO_PORT", &port.to_string());
+            .replace("DEMO_PORT", &port.to_string())
+            .replace("LISTEN_SCRIPT", LISTEN_PY);
         fs::write(&config, content).unwrap();
         let loaded = tongyun_dev_core::load(Some(&config)).unwrap();
         Self {
@@ -167,7 +172,7 @@ fn wait_is_bounded_read_only_and_start_timeout_keeps_service_tracked() {
 #[test]
 fn ready_start_wait_restart_and_stop_return_consistent_json() {
     let f = Fixture::new(
-        r#"["python3", "-m", "http.server", "DEMO_PORT", "--bind", "127.0.0.1"]"#,
+        r#"["python3", "LISTEN_SCRIPT", "DEMO_PORT"]"#,
         r#"stop = ["sh", "-c", "echo stop-diagnostic"]"#,
     );
     let started = json(

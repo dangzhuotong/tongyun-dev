@@ -95,6 +95,7 @@ export function App() {
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
   const [newGroupLabel, setNewGroupLabel] = useState("");
   const [selectedProfile, setSelectedProfile] = useState<string>("");
+  const [copiedCmd, setCopiedCmd] = useState(false);
   const [pagesDropdownOpen, setPagesDropdownOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<"overview" | "logs" | "details">(() => {
     try {
@@ -547,9 +548,10 @@ export function App() {
         ids: undefined,
       });
       if (res.failed > 0) {
-        const failedMsgs = res.items
+        const rows = res.results || res.items || [];
+        const failedMsgs = rows
           .filter((i) => !i.success && !i.ok)
-          .map((i) => `${i.id}: ${i.message}`)
+          .map((i) => `${i.id}: ${i.error || i.message || "失败"}`)
           .join("; ");
         setError(`批量启动部分失败 (${res.succeeded}/${res.total}): ${failedMsgs}`);
       }
@@ -574,9 +576,10 @@ export function App() {
         ids: undefined,
       });
       if (res.failed > 0) {
-        const failedMsgs = res.items
+        const rows = res.results || res.items || [];
+        const failedMsgs = rows
           .filter((i) => !i.success && !i.ok)
-          .map((i) => `${i.id}: ${i.message}`)
+          .map((i) => `${i.id}: ${i.error || i.message || "失败"}`)
           .join("; ");
         setError(`批量停止部分失败 (${res.succeeded}/${res.total}): ${failedMsgs}`);
       }
@@ -627,6 +630,32 @@ export function App() {
       } else {
         await invoke("open_page", { url: pageUrl(status, current) });
       }
+    } catch (err: unknown) {
+      setError(String(err));
+    }
+  }
+
+  async function openInCursor() {
+    const folder = status?.root || current?.root || "";
+    if (!folder) return;
+    setError("");
+    try {
+      await invoke("open_in_cursor", { path: folder });
+    } catch (err: unknown) {
+      setError(String(err));
+    }
+  }
+
+  async function copyStartCommand() {
+    const cmd = current?.start_command?.trim() || "";
+    if (!cmd) {
+      setError("没有可复制的启动命令");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(cmd);
+      setCopiedCmd(true);
+      window.setTimeout(() => setCopiedCmd(false), 1500);
     } catch (err: unknown) {
       setError(String(err));
     }
@@ -1059,6 +1088,7 @@ export function App() {
                       }
                     }}
                   >
+                    <div className="group-card">
                     <div className="group-header">
                       <button
                         type="button"
@@ -1076,18 +1106,19 @@ export function App() {
                           运行中 {section.runningCount} / 共 {section.totalCount}
                         </span>
                       </button>
+                      {!section.isUngrouped && (
                       <div className="group-header-actions">
                         <button
                           type="button"
                           className="btn btn-ghost btn-xs"
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleStartBatch(section.isUngrouped ? undefined : section.key);
+                            handleStartBatch(section.key);
                           }}
                           disabled={busy !== ""}
-                          title={`启动组内全部项目 (${section.label})`}
+                          title="按配置顺序启动，前一个就绪后再启下一个"
                         >
-                          启动
+                          全部启动
                         </button>
                         <button
                           type="button"
@@ -1102,7 +1133,13 @@ export function App() {
                           停止
                         </button>
                       </div>
+                      )}
                     </div>
+                    {!section.isUngrouped && section.members.length > 0 && (
+                      <div className="group-order" title="全部启动时按此顺序，前一个就绪后再启下一个">
+                        {section.members.join(" → ")}
+                      </div>
+                    )}
                     {!collapsed &&
                       (section.visibleProjects.length === 0 ? (
                         <div className="group-empty-drop-zone">拖动项目至此归类</div>
@@ -1111,6 +1148,7 @@ export function App() {
                           {section.visibleProjects.map((project) => renderProjectItem(project))}
                         </ul>
                       ))}
+                    </div>
                   </div>
                 );
               })}
@@ -1364,6 +1402,28 @@ export function App() {
                     <FolderIcon />
                     {status?.root ?? current.root}
                   </span>
+                </div>
+                <div className="shortcut-row">
+                  <button type="button" className="btn btn-secondary btn-xs" onClick={openInCursor} title="用 Cursor 打开项目目录">
+                    用 Cursor 打开
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-xs"
+                    disabled={!canOpenLog}
+                    onClick={() => reveal("log")}
+                    title="用系统默认程序打开日志文件"
+                  >
+                    打开日志文件
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-xs"
+                    onClick={copyStartCommand}
+                    title={current.start_command || "复制启动命令"}
+                  >
+                    {copiedCmd ? "已复制" : "复制启动命令"}
+                  </button>
                 </div>
               </div>
               <div className="header-actions" aria-busy={busy !== ""}>

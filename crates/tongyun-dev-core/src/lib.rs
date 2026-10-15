@@ -2196,9 +2196,16 @@ fn expand_tilde_with(input: &str, home: Option<&Path>) -> Result<String> {
 }
 
 fn subst(s: &str, vars: &Vars) -> String {
-    s.replace("{{root}}", &vars.root)
-        .replace("{{tomcat}}", &vars.tomcat)
-        .replace("{{log_dir}}", &vars.log_dir)
+    let out = s
+        .replace("{{root}}", &vars.root)
+        .replace("{{log_dir}}", &vars.log_dir);
+    // An empty tomcat must not erase the placeholder. `{{tomcat}}/bin/catalina.sh`
+    // would otherwise become `/bin/catalina.sh`.
+    if vars.tomcat.is_empty() {
+        out
+    } else {
+        out.replace("{{tomcat}}", &vars.tomcat)
+    }
 }
 
 fn is_windows_absolute(s: &str) -> bool {
@@ -2222,11 +2229,39 @@ fn expand_path(label: &str, raw: &str, home: Option<&Path>) -> Result<PathBuf> {
 }
 
 fn render_token(raw: &str, vars: &Vars, home: Option<&Path>) -> Result<String> {
+    if raw.contains("{{tomcat}}") && vars.tomcat.is_empty() {
+        bail!("command uses {{{{tomcat}}}} but tomcat is not set");
+    }
     let expanded = expand_tilde_with(&subst(raw, vars), home)?;
     if expanded.contains("{{") {
         bail!("unresolved template in `{raw}` -> `{expanded}`");
     }
     Ok(expanded)
+}
+
+/// Render a start/stop argv. Enabled projects with `{{tomcat}}` and no tomcat
+/// path fail here. Disabled ones keep the placeholder so import can park a WAR
+/// until the path is filled, without ever rewriting it to `/bin/catalina.sh`.
+fn render_project_argv(
+    id: &str,
+    label: &str,
+    argv: &[String],
+    vars: &Vars,
+    home: Option<&Path>,
+    enabled: bool,
+) -> Result<Vec<String>> {
+    if argv.is_empty() {
+        return Ok(Vec::new());
+    }
+    let missing_tomcat =
+        vars.tomcat.is_empty() && argv.iter().any(|arg| arg.contains("{{tomcat}}"));
+    if missing_tomcat {
+        if enabled {
+            bail!("project `{id}` {label} uses {{{{tomcat}}}} but tomcat is not set");
+        }
+        return Ok(argv.to_vec());
+    }
+    render_argv(argv, vars, home)
 }
 
 fn render_argv(argv: &[String], vars: &Vars, home: Option<&Path>) -> Result<Vec<String>> {
@@ -2351,26 +2386,18 @@ fn resolve_project_with_log_default(
     if p.enabled && tomcat.is_some() && p.stop.is_empty() {
         bail!("project `{id}` needs a stop command");
     }
-    let start = if p.start.is_empty() {
-        Vec::new()
-    } else {
-        render_argv(&p.start, &vars, home)?
-    };
-    let stop = if p.stop.is_empty() {
-        Vec::new()
-    } else {
-        render_argv(&p.stop, &vars, home)?
-    };
-    let start_windows = if p.start_windows.is_empty() {
-        Vec::new()
-    } else {
-        render_argv(&p.start_windows, &vars, home)?
-    };
-    let stop_windows = if p.stop_windows.is_empty() {
-        Vec::new()
-    } else {
-        render_argv(&p.stop_windows, &vars, home)?
-    };
+    let start = render_project_argv(id, "start", &p.start, &vars, home, p.enabled)?;
+    let stop = render_project_argv(id, "stop", &p.stop, &vars, home, p.enabled)?;
+    let start_windows = render_project_argv(
+        id,
+        "start_windows",
+        &p.start_windows,
+        &vars,
+        home,
+        p.enabled,
+    )?;
+    let stop_windows =
+        render_project_argv(id, "stop_windows", &p.stop_windows, &vars, home, p.enabled)?;
     let node = p
         .node
         .as_deref()
@@ -10054,11 +10081,64 @@ mod scan_import_tests {
         assert_eq!(r.tomcat.as_deref(), Some(Path::new("/opt/tomcat")));
         assert!(r.active_start()[2].contains("/opt/tomcat/webapps/legacy.war"));
         assert!(!r.stop.is_empty());
+        assert!(!r
+            .active_start()
+            .iter()
+            .any(|a| a.contains("/bin/catalina.sh") && !a.contains("/opt/tomcat")));
         let text = std::fs::read_to_string(&cfg).unwrap();
         assert!(
             text.contains("tongyun-dev 项目配置"),
             "template header kept"
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn unresolved_tomcat_is_not_rewritten_to_root_catalina() {
+        let home = Path::new("/home/demo");
+        let enabled = r#"
+[projects.legacy]
+name = "legacy"
+root = "/opt/demo-legacy"
+enabled = true
+port = 8080
+start = ["bash", "-c", "exec \"{{tomcat}}/bin/catalina.sh\" run"]
+stop = ["bash", "{{tomcat}}/bin/catalina.sh", "stop", "15", "-force"]
+"#;
+        let cfg = parse_config(enabled).unwrap();
+        let project = cfg.projects.get("legacy").unwrap();
+        let err = resolve_project("legacy", project, Some(home)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("tomcat is not set"), "{msg}");
+        assert!(!msg.contains("/bin/catalina.sh"), "{msg}");
+
+        let disabled = enabled.replace(
+            "enabled = true",
+            "enabled = false\nreason = \"先填 Tomcat 安装目录\"",
+        );
+        let cfg = parse_config(&disabled).unwrap();
+        let project = cfg.projects.get("legacy").unwrap();
+        let resolved = resolve_project("legacy", project, Some(home)).unwrap();
+        for arg in resolved.start.iter().chain(resolved.stop.iter()) {
+            assert!(
+                !arg.contains("/bin/catalina.sh") || arg.contains("{{tomcat}}"),
+                "empty tomcat rewrote the command: {arg}"
+            );
+        }
+        assert!(resolved.start.iter().any(|a| a.contains("{{tomcat}}")));
+        assert!(resolved
+            .stop
+            .iter()
+            .any(|a| a.contains("{{tomcat}}/bin/catalina.sh")));
+
+        let d = tmp("notomcat");
+        let cfg_path = d.join("projects.toml");
+        std::fs::write(&cfg_path, enabled).unwrap();
+        let loaded = load(Some(&cfg_path)).unwrap();
+        let err = loaded.start("legacy").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("tomcat is not set"), "{msg}");
+        assert!(!msg.contains("/bin/catalina.sh"), "{msg}");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

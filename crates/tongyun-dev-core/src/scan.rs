@@ -645,9 +645,12 @@ fn fill_maven_guide(c: &mut Candidate, pom: &str, dir: &Path, packaging: &str, m
         c.why.push(format!("mainClass 候选：{}", mains.join("、")));
         c.start = format!("{mvn} -q exec:java -Dexec.mainClass={}", mains[0]);
     }
-    c.why.push(
-        "这不是 Spring Boot：按 mainClass / 端口 / packaging 候选确认即可启动，不会默认停用".into(),
-    );
+    if packaging != "war" {
+        c.why.push(
+            "这不是 Spring Boot：按 mainClass / 端口 / packaging 候选确认即可启动，不会默认停用"
+                .into(),
+        );
+    }
     c.maven_guide = Some(MavenGuide {
         packaging: packaging.to_string(),
         main_classes: mains,
@@ -718,6 +721,7 @@ fn detect_maven(dir: &Path, home: Option<&Path>) -> Option<Detection> {
         if packaging == "war" {
             c.confidence = Confidence::Medium;
             c.label = "Maven WAR（非 Spring Boot）".into();
+            c.needs_tomcat = true;
             let war_name = artifact.clone().unwrap_or_else(|| dir_name(dir));
             c.start = format!(
                 "{mvn} -q -DskipTests package && cp target/*.war \"{{{{tomcat}}}}/webapps/{war_name}.war\" && exec \"{{{{tomcat}}}}/bin/catalina.sh\" run"
@@ -725,7 +729,7 @@ fn detect_maven(dir: &Path, home: Option<&Path>) -> Option<Detection> {
             c.stop = Some("\"{{tomcat}}/bin/catalina.sh\" stop 15 -force".into());
             c.login_url = Some(format!("http://127.0.0.1:{}/{war_name}/", c.port));
             c.why.push(
-                "启动命令按外部 Tomcat 部署来写，但扫描结果保持启用，不写成停用项。也可改成 mainClass 候选里的 exec:java。"
+                "非 Spring Boot 的 WAR 需要外部 Tomcat，未填 tomcat 时先停用。未配置的 {{tomcat}} 在启动时会报错，不会空替换成 /bin/catalina.sh。也可改成 mainClass 候选里的 exec:java。"
                     .into(),
             );
         }
@@ -1368,7 +1372,7 @@ mod tests {
     }
 
     #[test]
-    fn war_pom_is_guided_and_stays_enabled() {
+    fn war_pom_is_guided_and_needs_tomcat() {
         let t = Tmp::new("war");
         t.write(
             "legacy/pom.xml",
@@ -1379,7 +1383,9 @@ mod tests {
         );
         let cs = run(&t);
         let c = one(&cs, "maven-app");
-        assert!(!c.needs_tomcat);
+        assert!(c.needs_tomcat);
+        assert!(c.start.contains("{{tomcat}}"));
+        assert!(c.stop.as_deref().unwrap_or("").contains("{{tomcat}}"));
         assert_eq!(c.java.as_deref(), Some("8"));
         assert_eq!(c.label, "Maven WAR（非 Spring Boot）");
         let guide = c.maven_guide.as_ref().unwrap();
@@ -1390,7 +1396,8 @@ mod tests {
         );
         assert!(guide.ports.contains(&8080));
         let req = c.to_new_project();
-        assert_ne!(req.enabled, Some(false));
+        assert_eq!(req.enabled, Some(false));
+        assert!(req.reason.as_deref().unwrap_or("").contains("Tomcat"));
     }
 
     #[test]

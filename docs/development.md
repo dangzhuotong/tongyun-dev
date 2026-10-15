@@ -78,7 +78,7 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
   - **Spring Boot（Maven）**：`pom.xml` 包含 `spring-boot`。启动命令 `mvn spring-boot:run`（存在 `mvnw` 时优先使用 `./mvnw`）。端口优先读取 `src/main/resources/application*.yml/properties` 中的 `server.port`，缺省 8080。Java 版本读取自 `.sdkmanrc` / `.java-version` / `pom.xml`（`java.version` / `maven.compiler.*`）。
   - **Spring Boot（Gradle）**：`build.gradle(.kts)` 使用 `org.springframework.boot`。启动命令 `./gradlew bootRun`。端口同上；Java 版本来自 toolchain / `sourceCompatibility`。
   - **Spring 环境预设**：项目下已有 `src/main/resources/application-<名>.yml` / `.yaml` / `.properties` 时，扫描为每个文件名建议一个 profile，并写入 `SPRING_PROFILES_ACTIVE=<名>`。不会凭空添加仓库里不存在的环境名。
-  - **非 Spring Boot 的 pom.xml**：普通 jar / war 不再默认停用。扫描给出 `packaging`、pom 里的 `<mainClass>` 和 `server.port` 候选；有主类时启动命令是 `mvn exec:java -Dexec.mainClass=...`，没有主类时是 `mvn -q -DskipTests package`，说明里列出候选，方便改成可执行启动或外部 Tomcat。
+  - **非 Spring Boot 的 pom.xml**：普通 jar 不默认停用。扫描给出 `packaging`、pom 里的 `<mainClass>` 和 `server.port` 候选；有主类时启动命令是 `mvn exec:java -Dexec.mainClass=...`，没有主类时是 `mvn -q -DskipTests package`。`packaging=war` 且不是 Spring Boot 时标记为需要 Tomcat（`needs_tomcat`），导入后先停用，启动命令仍带 `{{tomcat}}`；填好 `tomcat` 再启用。也可改成 mainClass 候选里的 `exec:java`。
   - **Vite（Vue / React）**：依赖中包含 `vite`。启动命令按锁文件自动选择 `pnpm dev` / `yarn dev` / `npm run dev`。端口从脚本参数 `--port` / `-p` 或 `vite.config.*` 读取，缺省 5173。Node 版本读取自 `.nvmrc` / `.node-version` / `package.json`（`engines.node`）。
   - **Vue CLI**：依赖中包含 `@vue/cli-service`。启动命令 `npm run serve` 等。端口从脚本或 `vue.config.js` 的 `devServer.port` 读取，缺省 8080。
   - **Next.js / Nuxt**：依赖中包含 `next` 或 `nuxt`。启动命令 `pnpm dev` 等。端口从脚本参数或配置文件读取，缺省 3000。
@@ -93,7 +93,7 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 ## 运行行为与启停机制
 
 - **路径与变量展开**：
-  - `~`、`$HOME`、`${HOME}` 会展开成绝对路径；`{{root}}`、`{{tomcat}}`、`{{log_dir}}` 用展开后的值替换。若无法展开（如缺失 HOME 环境变量）直接报错，不会拼接异常路径。
+  - `~`、`$HOME`、`${HOME}` 会展开成绝对路径；`{{root}}`、`{{tomcat}}`、`{{log_dir}}` 用展开后的值替换。若无法展开（如缺失 HOME 环境变量）直接报错，不会拼接异常路径。`start` / `stop` 里有 `{{tomcat}}` 但没配 `tomcat` 时，已启用的项目在解析阶段报错退出，不会把占位符换成空串变成 `/bin/catalina.sh`。尚未启用的项目保留占位符，方便先登记再补路径。
 - **后台运行项目（`background = true`）**：
   - 如 Spring Boot 项目（`demo_api`）或前端项目（`demo_web`）。命令在独立的新进程组中执行，stdout/stderr 追加写入日志，PID 记录至 pid 文件。
   - **前端依赖自动安装**：若项目根目录有 `package.json` 但缺失 `node_modules`，且配置 `auto_install = true`（缺省值），启动前会先按锁文件（pnpm / yarn / npm）自动执行依赖安装，状态置为 `installing`，装好后接着启动。

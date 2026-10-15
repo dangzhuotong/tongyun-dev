@@ -1,0 +1,129 @@
+@import "tailwindcss";
+@import "./tokens.css";
+
+:root {
+  --color-bg: var(--ty-bg);
+  --color-surface: var(--ty-surface);
+  --color-surface-raised: var(--ty-surface-raised);
+  --color-surface-sunken: var(--ty-surface-sunken);
+  --color-text: var(--ty-text);
+  --color-text-muted: var(--ty-text-muted);
+  --color-text-subtle: var(--ty-text-subtle);
+  --color-accent: var(--ty-matcha);
+  --color-accent-hover: var(--ty-matcha-hover);
+  --color-accent-text: var(--ty-matcha);
+  --color-border: var(--ty-border);
+  --color-border-strong: var(--ty-border-strong);
+  --color-selection: var(--ty-matcha-tint);
+  --color-selection-unfocused: var(--ty-surface-raised);
+
+  --color-status-added: var(--ty-matcha);
+  --color-status-modified: var(--ty-sky);
+  --color-status-deleted: var(--ty-text-subtle);
+  --color-status-conflict: var(--ty-peach);
+
+  --color-danger: var(--ty-peach);
+  --color-danger-border: var(--ty-peach-soft);
+
+  --log-bg: #2b2620;
+  --log-bar: #332d26;
+  --log-text: #e9dfd0;
+  --log-muted: #a99b88;
+  --log-border: #463e34;
+}
+
+[data-theme="dark"],
+:root.dark {
+  --color-bg: var(--ty-bg);
+  --color-surface: var(--ty-surface);
+  --color-surface-raised: var(--ty-surface-raised);
+  --color-surface-sunken: var(--ty-surface-sunken);
+  --color-text: var(--ty-text);
+  --color-text-muted: var(--ty-text-muted);
+  --color-text-subtle: var(--ty-text-subtle);
+  --color-accent: var(--ty-matcha);
+  --color-accent-hover: var(--ty-matcha-hover);
+  --color-accent-text: var(--ty-matcha);
+  --color-border: var(--ty-border);
+  --color-border-strong: var(--ty-border-strong);
+  --color-selection: var(--ty-matcha-tint);
+  --color-selection-unfocused: var(--ty-surface-raised);
+
+  --color-status-added: var(--ty-matcha);
+  --color-status-modified: var(--ty-sky);
+  --color-status-deleted: var(--ty-text-subtle);
+  --color-status-conflict: var(--ty-peach);
+
+  --color-danger: var(--ty-peach);
+  --color-danger-border: var(--ty-peach-soft);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-bg: var(--ty-bg);
+    --color-surface: var(--ty-surface);
+    --color-surface-raised: var(--ty-surface-raised);
+    --color-surface-sunken: var(--ty-surface-sunken);
+    --color-text: var(--ty-text);
+    --color-text-muted: var(--ty-text-muted);
+    --color-text-subtle: var(--ty-text-subtle);
+    --color-accent: var(--ty-matcha);
+    --color-accent-hover: var(--ty-matcha-hover);
+    --color-accent-text: var(--ty-matcha);
+    --color-border: var(--ty-border);
+    --color-border-strong: var(--ty-border-strong);
+    --color-selection: var(--ty-matcha-tint);
+    --color-selection-unfocused: var(--ty-surface-raised);
+
+    --color-danger: var(--ty-peach);
+    --color-danger-border: var(--ty-peach-soft);
+  }
+}
+
+html,
+body {
+  font-family: var(--ty-font-sans);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+code,
+pre,
+.font-mono {
+  font-family: var(--ty-font-mono);
+}
+
+@theme {
+  --color-bg: var(--color-bg);
+  --color-surface: var(--color-surface);
+  --color-surface-raised: var(--color-surface-raised);
+  --color-surface-sunken: var(--color-surface-sunken);
+  --color-text: var(--color-text);
+  --color-text-muted: var(--color-text-muted);
+  --color-text-subtle: var(--color-text-subtle);
+  --color-accent: var(--color-accent);
+  --color-accent-hover: var(--color-accent-hover);
+  --color-accent-text: var(--color-accent-text);
+  --color-border: var(--color-border);
+  --color-border-strong: var(--color-border-strong);
+  --color-selection: var(--color-selection);
+  --color-selection-unfocused: var(--color-selection-unfocused);
+
+  --color-danger: var(--color-danger);
+  --color-danger-border: var(--color-danger-border);
+
+  --font-sans: var(--ty-font-sans);
+  --font-mono: var(--ty-font-mono);
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-2xl: 20px;
+
+  --shadow-xs: var(--ty-shadow-card);
+  --shadow-sm: var(--ty-shadow-card);
+  --shadow-lg: var(--ty-shadow-pop);
+  --shadow-2xl: var(--ty-shadow-pop);
+}

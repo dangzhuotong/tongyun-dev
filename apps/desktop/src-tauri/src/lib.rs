@@ -152,6 +152,15 @@ fn open_log(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_folder(path: String) -> Result<(), String> {
+    let path = path.trim();
+    if !Path::new(path).is_dir() {
+        return Err(format!("folder missing: {path}"));
+    }
+    tongyun_dev_core::open_path(Path::new(path)).map_err(report)
+}
+
+#[tauri::command]
 fn open_page(url: String) -> Result<(), String> {
     tongyun_dev_core::open_url(&url).map_err(report)
 }
@@ -415,6 +424,7 @@ pub fn run() {
             restart_project,
             log_tail,
             open_log,
+            open_folder,
             open_page,
             config_info,
             pick_config_file,

@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { BatchOutput, ConfigInfo, LogTail, ProjectDetail, ProjectList, Status } from "./types";
+import { Toolbar } from "./Toolbar";
+import { StatusBar } from "./StatusBar";
+import { AboutModal } from "./AboutModal";
+import { ShortcutsHelpModal } from "./ShortcutsHelpModal";
+import { ProjectDetailsTab } from "./ProjectDetailsTab";
 import { LogPanel } from "./LogPanel";
 import { stateShortLabel } from "./logFormat";
 import { ProjectForm } from "./ProjectForm";
@@ -91,6 +96,78 @@ export function App() {
   const [newGroupLabel, setNewGroupLabel] = useState("");
   const [selectedProfile, setSelectedProfile] = useState<string>("");
   const [pagesDropdownOpen, setPagesDropdownOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<"overview" | "logs" | "details">(() => {
+    try {
+      const urlTab = new URLSearchParams(window.location.search).get("tab");
+      if (urlTab === "overview" || urlTab === "logs" || urlTab === "details") return urlTab;
+    } catch {
+      // ignore
+    }
+    return "overview";
+  });
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Theme
+  const [theme, setTheme] = useState<"system" | "light" | "dark">(() => {
+    try {
+      const urlTheme = new URLSearchParams(window.location.search).get("theme");
+      if (urlTheme === "system" || urlTheme === "light" || urlTheme === "dark") return urlTheme;
+      return (localStorage.getItem("tongyun_theme") as "system" | "light" | "dark") || "system";
+    } catch {
+      return "system";
+    }
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === "dark") {
+      root.setAttribute("data-theme", "dark");
+      root.classList.add("dark");
+    } else if (theme === "light") {
+      root.setAttribute("data-theme", "light");
+      root.classList.remove("dark");
+    } else {
+      root.removeAttribute("data-theme");
+      root.classList.remove("dark");
+    }
+    localStorage.setItem("tongyun_theme", theme);
+  }, [theme]);
+
+  // Sidebar drag resizer
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem("tongyun_sidebar_width");
+      return saved ? Math.max(200, Math.min(550, parseInt(saved, 10))) : 280;
+    } catch {
+      return 280;
+    }
+  });
+  const isResizingRef = useRef(false);
+
+  const handleMouseDownResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    isResizingRef.current = true;
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      if (!isResizingRef.current) return;
+      const newWidth = Math.max(200, Math.min(550, moveEvent.clientX));
+      setSidebarWidth(newWidth);
+    };
+    const handleMouseUp = (upEvent: MouseEvent) => {
+      isResizingRef.current = false;
+      const finalWidth = Math.max(200, Math.min(550, upEvent.clientX));
+      try {
+        localStorage.setItem("tongyun_sidebar_width", finalWidth.toString());
+      } catch {
+        // ignore
+      }
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+  };
 
   const toggleGroupCollapse = useCallback((key: string) => {
     setCollapsedGroups((prev) => {
@@ -100,7 +177,7 @@ export function App() {
     });
   }, []);
 
-  // 「/」或 Cmd/Ctrl+K 聚焦项目搜索；在其他输入框里不拦截「/」
+  // 「/」或 Cmd/Ctrl+K 聚焦项目搜索；在其他输入框里不拦截「/」；F1 或 ? 唤出快捷键
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const target = e.target as HTMLElement | null;
@@ -114,6 +191,9 @@ export function App() {
       } else if (e.key === "/" && !typing && !document.querySelector(".modal-backdrop")) {
         e.preventDefault();
         searchRef.current?.focus();
+      } else if ((e.key === "F1" || (e.key === "?" && !typing)) && !document.querySelector(".modal-backdrop")) {
+        e.preventDefault();
+        setShortcutsOpen((prev) => !prev);
       } else if (e.key === "Escape") {
         if (menu) setMenu("");
         if (pagesDropdownOpen) setPagesDropdownOpen(false);
@@ -208,6 +288,18 @@ export function App() {
       // periodic status poll errors are ignored
     }
   }, []);
+
+  const handleRefreshAll = useCallback(async () => {
+    setIsRefreshing(true);
+    try {
+      await refreshAllStatuses();
+      if (selected) {
+        await refresh(selected).catch(() => undefined);
+      }
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [refreshAllStatuses, selected, refresh]);
 
   // Periodic poll of all project statuses every 3 seconds
   useEffect(() => {
@@ -523,12 +615,15 @@ export function App() {
     }
   }
 
-  async function reveal(kind: "log" | "page") {
+  async function reveal(kind: "log" | "page" | "folder") {
     setError("");
     try {
       if (kind === "log") {
         const path = log?.path || status?.log_path || "";
         await invoke("open_log", { path });
+      } else if (kind === "folder") {
+        const folder = status?.root || current?.root || "";
+        if (folder) await invoke("open_folder", { path: folder });
       } else {
         await invoke("open_page", { url: pageUrl(status, current) });
       }
@@ -737,18 +832,49 @@ export function App() {
 
   return (
     <div className="app">
-      <aside className="sidebar">
-        <div className="brand">
-          <img className="brand-logo" src={logoUrl} alt="" width={30} height={34} />
-          <div className="brand-text">
-            <strong>tongyun-dev</strong>
-            <span>
-              {projects ? `${projectList.length} 个项目 · ${runningCount} 个运行中` : "本机项目"}
-            </span>
-          </div>
-        </div>
+      <Toolbar
+        projects={projects}
+        selected={selected}
+        onSelectProject={(id) => {
+          setError("");
+          if (id === selected) return;
+          setStatus(null);
+          setLog(null);
+          setSelected(id);
+        }}
+        currentProject={current ?? undefined}
+        status={status}
+        busy={busy}
+        canStart={canStart}
+        canStop={canStop}
+        canRestart={canRestart}
+        canOpenPage={canOpenPage}
+        onStart={() => handleStart()}
+        onStop={handleStop}
+        onRestart={() => handleRestart()}
+        onOpenPage={() => reveal("page")}
+        onOpenAllPages={handleOpenAllPages}
+        onOpenTerminal={() => handleOpenTerminal()}
+        onOpenCreate={handleOpenCreate}
+        onOpenScan={handleOpenScan}
+        onOpenEdit={handleOpenEdit}
+        onRefresh={handleRefreshAll}
+        isRefreshing={isRefreshing}
+        theme={theme}
+        onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
+        selectedProfile={selectedProfile}
+        onProfileChange={setSelectedProfile}
+        onStartBatch={() => handleStartBatch()}
+        onStopBatch={() => handleStopBatch()}
+        configInfo={configInfo}
+        onPickConfig={handlePickConfig}
+        onOpenConfigFile={handleOpenConfigFile}
+        onReloadConfig={() => loadProjects().catch((err) => setError(String(err)))}
+      />
 
-        <div className="sidebar-search">
+      <div className="workspace-shell">
+        <aside className="sidebar" style={{ width: `${sidebarWidth}px` }}>
+          <div className="sidebar-search pt-2.5">
           <label className="search-field">
             <SearchIcon className="search-icon" />
             <input
@@ -1092,7 +1218,14 @@ export function App() {
         </div>
       </aside>
 
-      <main className="main">
+      {/* Resizer Splitter */}
+      <div
+        onMouseDown={handleMouseDownResize}
+        className="w-1 -mr-0.5 z-10 cursor-col-resize hover:bg-[var(--color-accent)]/50 transition-colors select-none shrink-0"
+        title="拖拽调整侧栏宽度"
+      />
+
+      <main className="main" style={{ flex: 1, minWidth: 0, height: "100%", overflowY: "auto" }}>
         {missingConfig ? (
           <div className="empty-config">
             <img src={logoUrl} alt="" width={56} height={64} />
@@ -1146,8 +1279,65 @@ export function App() {
             {error && <p className="banner danger">{error}</p>}
           </div>
         ) : (
-          <>
-            <header className="detail-header">
+          <div className="flex-1 flex flex-col h-full overflow-hidden">
+            {/* 34px Tab Bar */}
+            <div className="h-[34px] px-4 border-b border-[var(--color-border)] bg-[var(--color-surface)] flex items-center justify-between shrink-0 select-none">
+              <div className="flex items-center gap-4 h-full" role="tablist" aria-label="项目视图">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === "overview"}
+                  onClick={() => setActiveTab("overview")}
+                  className={`h-full flex items-center px-1 text-xs cursor-pointer border-b-2 font-medium transition-colors ${
+                    activeTab === "overview"
+                      ? "border-[var(--color-accent)] text-[var(--color-text)]"
+                      : "border-transparent text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                  }`}
+                >
+                  概览与控制
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === "logs"}
+                  onClick={() => setActiveTab("logs")}
+                  className={`h-full flex items-center px-1 text-xs cursor-pointer border-b-2 font-medium transition-colors ${
+                    activeTab === "logs"
+                      ? "border-[var(--color-accent)] text-[var(--color-text)]"
+                      : "border-transparent text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                  }`}
+                >
+                  实时日志
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === "details"}
+                  onClick={() => setActiveTab("details")}
+                  className={`h-full flex items-center px-1 text-xs cursor-pointer border-b-2 font-medium transition-colors ${
+                    activeTab === "details"
+                      ? "border-[var(--color-accent)] text-[var(--color-text)]"
+                      : "border-transparent text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                  }`}
+                >
+                  配置与环境
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => reveal("folder")}
+                className="flex items-center gap-1.5 font-mono text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:underline truncate max-w-[50%] cursor-pointer"
+                title="在系统资源管理器中打开项目目录"
+              >
+                <FolderIcon width={13} height={13} className="text-[var(--color-accent)] shrink-0" />
+                <span className="truncate">{status?.root ?? current.root}</span>
+              </button>
+            </div>
+
+            {activeTab === "overview" && (
+              <div className="flex-1 overflow-y-auto">
+                <header className="detail-header">
               <div className="title-area">
                 <div className="title-row">
                   <h1>{current.name}</h1>
@@ -1517,9 +1707,60 @@ export function App() {
                 onOpenTerminal={() => handleOpenTerminal()}
               />
             </div>
-          </>
+          </div>
         )}
+
+        {activeTab === "logs" && (
+          <div className="flex-1 flex flex-col p-4 h-full min-h-0 overflow-hidden bg-[var(--color-bg)]">
+            <LogPanel
+              log={log}
+              logPath={logPath}
+              canOpenLog={canOpenLog}
+              onOpenLog={() => reveal("log")}
+              selected={selected}
+              running={status?.running ?? false}
+              onOpenTerminal={() => handleOpenTerminal()}
+            />
+          </div>
+        )}
+
+        {activeTab === "details" && (
+          <ProjectDetailsTab
+            project={current}
+            status={status}
+            onEdit={handleOpenEdit}
+            onOpenFolder={() => reveal("folder")}
+          />
+        )}
+      </div>
+    )}
       </main>
+      </div>
+
+      <StatusBar
+        selectedProject={current ?? undefined}
+        status={status}
+        totalProjects={projectList.length}
+        runningCount={runningCount}
+        isRefreshing={isRefreshing}
+        configPath={projects?.config_path ?? configInfo?.path ?? configInfo?.default_path}
+        onOpenConfigFile={handleOpenConfigFile}
+        onOpenTerminal={current ? () => handleOpenTerminal() : undefined}
+        onOpenShortcuts={() => setShortcutsOpen(true)}
+        onOpenAbout={() => setAboutOpen(true)}
+      />
+
+      <AboutModal
+        isOpen={aboutOpen}
+        onClose={() => setAboutOpen(false)}
+        configPath={projects?.config_path ?? configInfo?.path ?? configInfo?.default_path}
+      />
+
+      <ShortcutsHelpModal
+        isOpen={shortcutsOpen}
+        onClose={() => setShortcutsOpen(false)}
+      />
+
       {scanOpen && (
         <ScanDialog
           onClose={() => setScanOpen(false)}

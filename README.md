@@ -77,6 +77,12 @@ tongyun-dev ui [--port 9099] [--no-open]
 
 **端口参数**：pnpm 直接带参数（`pnpm dev --port 5173`）；不要写 `pnpm dev -- --port`，旧配置里这样写的启动时会自动去掉 `--`。npm 才需要 `npm run dev -- --port 5173`。
 
+### 分组启动（Group start）
+
+- **成员顺序（`[group.<name>].members` order）**：在配置中通过 `[group.<name>].members` 定义组内项目的启动顺序（例如 `members = ["demo_api", "demo_web"]`）。执行 `tongyun-dev start <group>` 或 `tongyun-dev start --group <group>` 时，系统按列表声明顺序逐个拉起服务，等待前一个就绪后再启动下一个。项目级 `depends_on` 优先于 `members` 顺序；未在 `members` 中显式列出的组内项目排在最后。
+- **全部启动（start-all）**：执行 `tongyun-dev start --all`（start-all）将按照依赖拓扑与分组顺序依次启动所有已注册项目，并逐个等待就绪。
+- **名称冲突判定（project id wins over group name clash）**：当项目 ID 与分组名称重名时（例如同时存在名为 `demo_api` 的项目和分组），执行 `tongyun-dev start demo_api` 优先判定为项目 ID（project id wins over group name clash）。若需明确启动重名分组，请使用 `tongyun-dev start --group <group>`。
+
 ## Java / Node 版本
 
 项目里写 `java = "17"` / `node = "20"`，启动前由 core 直接找到对应 JDK / Node，注入 `JAVA_HOME` 和 `PATH`，不 source sdkman / fnm 的初始化脚本：

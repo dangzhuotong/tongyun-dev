@@ -216,6 +216,12 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 | `members` | 组内项目 id，按启动顺序排列。`tongyun-dev start <组名>` 与网页 / 桌面分组卡片的「全部启动」都按这个顺序，并等前一个就绪后再启下一个。未写入 members、但 `group` 字段指向本组的项目排在后面 |
 | `depends_on` | 可选。分组之间的依赖。项目级 `depends_on` 仍然优先于 members 顺序 |
 
+#### 分组启动（Group start）
+
+- **成员顺序（`[group.<name>].members` order）**：在配置中通过 `[group.<name>].members` 定义组内项目的启动顺序（例如 `members = ["demo_api", "demo_web"]`）。执行 `tongyun-dev start <group>` 或 `tongyun-dev start --group <group>` 时，系统按声明顺序逐个拉起服务，等待前一个就绪后再启动下一个。项目级 `depends_on` 优先于 `members` 顺序；未在 `members` 中显式列出的组内项目排在最后。
+- **全部启动（start-all）**：执行 `tongyun-dev start --all`（start-all）将按照依赖拓扑与分组顺序依次启动所有已注册项目，并逐个等待就绪。
+- **名称冲突判定（project id wins over group name clash）**：当项目 ID 与分组名称重名时（例如同时存在名为 `demo_api` 的项目和分组），执行 `tongyun-dev start demo_api` 优先判定为项目 ID（project id wins over group name clash）。若需明确启动重名分组，请使用 `tongyun-dev start --group <group>`。
+
 ## 验收清单
 
 用于验证核心功能的通用验收清单（可用示例项目或你自己的一个项目进行验证）：

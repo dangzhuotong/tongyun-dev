@@ -14,9 +14,10 @@
 
 - 已补：三端统一重启、网页项目设置、重复启动保护、停止结果校验、Windows 进程管理与跨平台兼容性（Toolhelp32 快照进程树与 netstat 端口监听检测、taskkill 树终止、cmd/PowerShell 解包、TOML/JSON 路径规范化）、多环境预设（`--profile`、动态重写端口与探针、active_profile 反映）、快捷网页链接与全开（`links`、`open --all`、多链接折叠菜单）、系统原生终端拉起（`terminal` 命令与跨平台命令转义）、旧日志/PID 目录迁移引导与停止清理、项目分组（`members` 与 `group` 字段、分组管理）、批量启停（CLI `--all` / `--group`、Web API 与控制台本组/全部启停、桌面端全启/全停与组级启停）、依赖启动拓扑排序（`depends_on` DAG 排序与逆向停止、环路检测、依赖失败跳过）、CLI add/edit 参数对齐（`--link`, `--default-profile`, `--depends-on` 及清除参数）、Web 控制台与桌面端设置表单完整对齐（pty, env, auto_answers, port_mode, depends_on）、子进程输出与自动应答前缀解耦（`› [`）、macOS/Linux CI。
 - 待完成：各平台 GUI 真机验收、签名发布。
+- 任务包：Antigravity 任务清单见 [docs/tasks/README.md](tasks/README.md)（打磨第 1 项任务池，按 01~05 顺序单次执行）。
 - 交互输入后续（#8 合入后非阻塞备注，2026-10-12）：
   - pty=true 时 Unix 走 openpty relay（macOS 与 Linux 同一路径）：输入仍写 FIFO，由 relay 转发到 PTY。管道满时仍可能返回「子进程没有读取输入（管道已满）」；大输入/子进程不读 stdin 的表现需单独观察。
-  - openpty relay；Mac 验收：安装后用一个虚构项目 `pty = true` 实跑 start/stop，确认没有 tcgetattr / Operation not supported、isatty 为真、input 可达、stop 后进程组与 FIFO 清理。
+  - openpty relay；Mac 验收：安装后用一个虚构项目（如 `demo_api` / `demo_web`）`pty = true` 实跑 start/stop，确认没有 tcgetattr / Operation not supported、isatty 为真、input 可达、stop 后进程组与 FIFO 清理。
 
 ## AI 与人工共用运行面板
 

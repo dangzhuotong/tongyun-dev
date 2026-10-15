@@ -61,9 +61,9 @@ tongyun-dev logs <id> [--follow] [--lines N]
 tongyun-dev open <id> [--dir]          # 打开页面（login_url / health_url / http://127.0.0.1:<port>/）或目录
 tongyun-dev install <id>               # 装前端依赖（按锁文件选 pnpm / yarn / npm）
 tongyun-dev scan <dir> [--depth N] [--apply] [--json]
-tongyun-dev add my_web --root ~/code/my-web --start "pnpm dev" --port 5173 --node 20
-tongyun-dev add my_api --root ~/code/my-api --start "mvn spring-boot:run" --port 8081 --java 17
-tongyun-dev remove my_web              # 只删登记，不动项目文件
+tongyun-dev add demo_web --root ~/code/demo/demo-web --start "pnpm dev" --port 5173 --node 20
+tongyun-dev add demo_api --root ~/code/demo/demo-api --start "mvn spring-boot:run" --port 8081 --java 17
+tongyun-dev remove demo_web            # 只删登记，不动项目文件
 tongyun-dev ui [--port 9099] [--no-open]
 ```
 
@@ -119,6 +119,7 @@ npm run tauri build    # 打包
 - [docs/prd.md](docs/prd.md) — 产品范围
 - [docs/plan.md](docs/plan.md) — 排期
 - [docs/development.md](docs/development.md) — 命令、配置字段与验收
+- [docs/tasks/README.md](docs/tasks/README.md) — 任务包（打磨第 1 项任务池 / Antigravity 顺序跑）
 
 ## License
 

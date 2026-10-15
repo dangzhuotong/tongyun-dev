@@ -28,7 +28,7 @@ tongyun-dev ui [--port 9099]   # 网页控制台，默认 http://127.0.0.1:9099
 | --- | --- | --- |
 | `list [--json] [--with-groups]` | 已登记项目 | 先 list 再 start；搭配 `--with-groups` 返回带 groups 对象 |
 | `status [id] [--json]` | 单项目或全部生命周期 | **解析 `--json`**（含 active_profile、端口、探针等） |
-| `start <id> [--profile 名] [--timeout N] [--json] [--open]` | 启到端口通/探针成功；`--open` 就绪后开页 | 支持指定环境预设；可能先 `installing` |
+| `start <id 或组名> [--profile 名] [--timeout N] [--json] [--open]` | 启到端口通/探针成功；`--open` 就绪后开页 | 参数若是分组 key 而不是项目 id，按 `[group].members` 顺序启动，等前一个就绪再启下一个。也可用 `--group` |
 | `restart <id> [--profile 名] [--timeout N] [--json] [--open]` | 停止成功后以指定环境重新启动并等待就绪 | 停止失败不会继续启动 |
 | `terminal <id> [--profile 名]` | 拉起系统原生终端执行启动命令或调试 | 跨平台打开终端窗口 |
 | `stop <id> [--json]` | 停进程组 | 失败也要读 status |
@@ -81,7 +81,8 @@ Unix 上 `pty = true` 的后台进程不走系统 `script`。macOS 与 Linux 同
 | PATCH | `/api/projects/{id}` | 部分更新项目设置 |
 | GET | `/api/projects/{id}/logs` | 日志 |
 | POST | `/api/projects/{id}/input` | 发送输入/按键（非运行中/管道满返回 409，超限返回 400，Windows 暂不支持） |
-| POST | `/api/projects/{id}/start\|stop\|restart\|install\|open\|open-all\|open-dir\|terminal` | 动作（start/restart/terminal 可带 `{profile}`，open 可带 `{url}`） |
+| POST | `/api/projects/{id}/start\|stop\|restart\|install\|open\|open-all\|open-dir\|open-log\|cursor\|terminal` | 动作（start/restart/terminal 可带 `{profile}`，open 可带 `{url}`；`cursor` 用 Cursor 打开目录，`open-log` 打开日志文件） |
+| POST | `/api/groups/{key}/start` | 按成员顺序启动该组，等前一个就绪再启下一个 |
 | POST | `/api/projects` | 新增登记 |
 | DELETE | `/api/projects/{id}` | 删登记 |
 | POST | `/api/scan` | 扫描预览 |

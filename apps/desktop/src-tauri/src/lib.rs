@@ -87,9 +87,15 @@ async fn start_batch(
 ) -> Result<BatchOutput, String> {
     blocking(move || {
         let loaded = tongyun_dev_core::load(None).map_err(report)?;
-        loaded
-            .start_batch_detached(group.as_deref(), ids.as_deref())
-            .map_err(report)
+        if group.is_some() {
+            loaded
+                .start_batch(group.as_deref(), ids.as_deref(), None)
+                .map_err(report)
+        } else {
+            loaded
+                .start_batch_detached(group.as_deref(), ids.as_deref())
+                .map_err(report)
+        }
     })
     .await
 }
@@ -149,6 +155,15 @@ fn open_log(path: String) -> Result<(), String> {
         return Err(format!("log file missing: {path}"));
     }
     tongyun_dev_core::open_path(Path::new(path)).map_err(report)
+}
+
+#[tauri::command]
+fn open_in_cursor(path: String) -> Result<(), String> {
+    let path = path.trim();
+    if !Path::new(path).is_dir() {
+        return Err(format!("folder missing: {path}"));
+    }
+    tongyun_dev_core::open_in_cursor(Path::new(path)).map_err(report)
 }
 
 #[tauri::command]
@@ -424,6 +439,7 @@ pub fn run() {
             restart_project,
             log_tail,
             open_log,
+            open_in_cursor,
             open_folder,
             open_page,
             config_info,

@@ -292,6 +292,7 @@ pub fn overview(loaded: &Loaded) -> Result<Vec<Value>> {
             m.insert("default_profile".into(), json!(row.default_profile));
             m.insert("profiles".into(), json!(row.profiles));
             m.insert("depends_on".into(), json!(row.depends_on));
+            m.insert("start_command".into(), json!(row.start_command));
             if let Some(err) = &row.resolve_error {
                 m.insert("resolve_error".into(), json!(err));
                 m.insert("configured".into(), json!(false));
@@ -547,18 +548,22 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
             }
             if let Some(raw_key) = group_route(path, "start") {
                 let key = url_decode(raw_key);
-                let out = match loaded.start_batch_detached(Some(&key), None) {
+                // Block until each project is ready so backends finish before frontends.
+                let out = match loaded.start_batch(Some(&key), None, None) {
                     Ok(out) => out,
                     Err(e) => return err_json(500, format!("{e:#}")),
                 };
-                return json_body(200, json!({
-                    "ok": out.failed == 0,
-                    "group": key,
-                    "total": out.total,
-                    "succeeded": out.succeeded,
-                    "failed": out.failed,
-                    "results": out.results
-                }));
+                return json_body(
+                    200,
+                    json!({
+                        "ok": out.failed == 0,
+                        "group": key,
+                        "total": out.total,
+                        "succeeded": out.succeeded,
+                        "failed": out.failed,
+                        "results": out.results
+                    }),
+                );
             }
             if let Some(raw_key) = group_route(path, "stop") {
                 let key = url_decode(raw_key);
@@ -566,14 +571,17 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                     Ok(out) => out,
                     Err(e) => return err_json(500, format!("{e:#}")),
                 };
-                return json_body(200, json!({
-                    "ok": out.failed == 0,
-                    "group": key,
-                    "total": out.total,
-                    "succeeded": out.succeeded,
-                    "failed": out.failed,
-                    "results": out.results
-                }));
+                return json_body(
+                    200,
+                    json!({
+                        "ok": out.failed == 0,
+                        "group": key,
+                        "total": out.total,
+                        "succeeded": out.succeeded,
+                        "failed": out.failed,
+                        "results": out.results
+                    }),
+                );
             }
             if let Some(raw_key) = group_route(path, "restart") {
                 let key = url_decode(raw_key);
@@ -581,56 +589,69 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                     Ok(out) => out,
                     Err(e) => return err_json(500, format!("{e:#}")),
                 };
-                return json_body(200, json!({
-                    "ok": out.failed == 0,
-                    "group": key,
-                    "total": out.total,
-                    "succeeded": out.succeeded,
-                    "failed": out.failed,
-                    "results": out.results
-                }));
+                return json_body(
+                    200,
+                    json!({
+                        "ok": out.failed == 0,
+                        "group": key,
+                        "total": out.total,
+                        "succeeded": out.succeeded,
+                        "failed": out.failed,
+                        "results": out.results
+                    }),
+                );
             }
             if path == "/api/projects/start-all" {
                 let out = match loaded.start_batch_detached(None, None) {
                     Ok(out) => out,
                     Err(e) => return err_json(500, format!("{e:#}")),
                 };
-                return json_body(200, json!({
-                    "ok": out.failed == 0,
-                    "total": out.total,
-                    "succeeded": out.succeeded,
-                    "failed": out.failed,
-                    "results": out.results
-                }));
+                return json_body(
+                    200,
+                    json!({
+                        "ok": out.failed == 0,
+                        "total": out.total,
+                        "succeeded": out.succeeded,
+                        "failed": out.failed,
+                        "results": out.results
+                    }),
+                );
             }
             if path == "/api/projects/stop-all" {
                 let out = match loaded.stop_batch(None, None) {
                     Ok(out) => out,
                     Err(e) => return err_json(500, format!("{e:#}")),
                 };
-                return json_body(200, json!({
-                    "ok": out.failed == 0,
-                    "total": out.total,
-                    "succeeded": out.succeeded,
-                    "failed": out.failed,
-                    "results": out.results
-                }));
+                return json_body(
+                    200,
+                    json!({
+                        "ok": out.failed == 0,
+                        "total": out.total,
+                        "succeeded": out.succeeded,
+                        "failed": out.failed,
+                        "results": out.results
+                    }),
+                );
             }
             if path == "/api/projects/restart-all" {
                 let out = match loaded.restart_batch_detached(None, None) {
                     Ok(out) => out,
                     Err(e) => return err_json(500, format!("{e:#}")),
                 };
-                return json_body(200, json!({
-                    "ok": out.failed == 0,
-                    "total": out.total,
-                    "succeeded": out.succeeded,
-                    "failed": out.failed,
-                    "results": out.results
-                }));
+                return json_body(
+                    200,
+                    json!({
+                        "ok": out.failed == 0,
+                        "total": out.total,
+                        "succeeded": out.succeeded,
+                        "failed": out.failed,
+                        "results": out.results
+                    }),
+                );
             }
             let action = [
-                "start", "stop", "restart", "install", "open", "open-all", "open-dir", "terminal",
+                "start", "stop", "restart", "install", "open", "open-all", "open-dir", "open-log",
+                "cursor", "terminal",
             ]
             .into_iter()
             .find_map(|a| project_route(path, a).map(|id| (a, id)));
@@ -659,9 +680,9 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                 "install" => loaded.install_deps(id).map(|st| json!({"status": st})),
                 "open" => match body_action.url.as_deref() {
                     Some(u) => tongyun_dev_core::open_url(u).map(|_| json!({"url": u})),
-                    None => loaded
-                        .page_url(id)
-                        .and_then(|url| tongyun_dev_core::open_url(&url).map(|_| json!({"url": url}))),
+                    None => loaded.page_url(id).and_then(|url| {
+                        tongyun_dev_core::open_url(&url).map(|_| json!({"url": url}))
+                    }),
                 },
                 "open-all" => loaded.page_urls(id).and_then(|urls| {
                     for link in &urls {
@@ -669,9 +690,18 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                     }
                     Ok(json!({"opened": urls.len()}))
                 }),
-                _ => loaded
+                "open-dir" => loaded
                     .root_dir(id)
                     .and_then(|p| tongyun_dev_core::open_path(&p).map(|_| json!({"path": p}))),
+                "open-log" => loaded.log_file(id).and_then(|p| {
+                    let shown = p.display().to_string();
+                    tongyun_dev_core::open_path(&p).map(|_| json!({"path": shown}))
+                }),
+                "cursor" => loaded.root_dir(id).and_then(|p| {
+                    let shown = p.display().to_string();
+                    tongyun_dev_core::open_in_cursor(&p).map(|_| json!({"path": shown}))
+                }),
+                _ => Err(anyhow::anyhow!("unknown action")),
             };
             match res {
                 Ok(mut v) => {
@@ -886,11 +916,14 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
     .btn-stop-all:hover { background: var(--ty-peach-tint); }
     .summary { color: var(--ty-text-muted); font-size: var(--ty-font-size-sm); }
 
-    .group-heading { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; padding: 14px 0 6px; font-weight: 600; font-size: 15px; color: var(--ty-text); border-bottom: 1px solid var(--ty-border); margin-top: 10px; }
-    .group-heading:first-child { margin-top: 0; }
-    .group-heading .count { font-size: var(--ty-font-size-xs); color: var(--ty-text-muted); font-weight: normal; }
-    .group-heading .group-actions { margin-left: auto; display: flex; gap: 6px; }
-    .group-heading .group-actions button { height: 24px; padding: 0 8px; font-size: var(--ty-font-size-xs); }
+    .group-card { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 8px; margin-top: 12px; padding: 12px 14px; background: var(--ty-surface); border: 1px solid var(--ty-border); border-radius: var(--ty-radius-md); }
+    .group-card:first-child { margin-top: 0; }
+    .group-card-head { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; color: var(--ty-text); }
+    .group-card .count { font-size: var(--ty-font-size-xs); color: var(--ty-text-muted); font-weight: normal; }
+    .group-card .group-actions { margin-left: auto; display: flex; gap: 6px; }
+    .group-card .group-actions button { height: 24px; padding: 0 8px; font-size: var(--ty-font-size-xs); }
+    .group-order { font-size: var(--ty-font-size-xs); color: var(--ty-text-muted); line-height: 1.5; }
+    .group-order code { font-family: var(--ty-font-mono); color: var(--ty-text); }
 
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
     .card {
@@ -1273,6 +1306,8 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         port: c.port || null, health_url: c.health_url || null, login_url: c.login_url || null,
         node: c.node || null, java: c.java || null, background: c.background,
         port_mode: c.port_mode || null,
+        env: c.env || {},
+        profiles: c.profiles || {},
         enabled: c.needs_tomcat ? false : null,
         reason: c.needs_tomcat ? 'Tomcat WAR：先填 Tomcat 安装目录（tomcat 字段）再启用' : null,
       }));
@@ -1670,6 +1705,9 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
             <button class="btn-outline" onclick="editProject('${p.id}')">设置</button>
             ${webBtn}
             <button class="btn-outline" onclick="openProjectDir('${p.id}')" title="在系统文件管理器中打开源码目录">目录</button>
+            <button class="btn-outline" onclick="openInCursor('${p.id}')" title="用 Cursor 打开项目目录">Cursor</button>
+            <button class="btn-outline" onclick="openLogFile('${p.id}')" title="用系统默认程序打开日志文件">日志文件</button>
+            <button class="btn-outline" onclick="copyStartCommand('${p.id}')" title="复制启动命令">复制命令</button>
             <button class="btn-outline" data-id="${escapeHtml(p.id)}" data-name="${escapeHtml(p.name)}" onclick="openLogModal(this.dataset.id, this.dataset.name)">日志</button>
             <button class="btn-danger-text" onclick="deleteProject('${p.id}')" title="从配置里删除这个项目" aria-label="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg></button>
           </div>
@@ -1710,6 +1748,18 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         }
         groups[gKey].projects.push(p);
       });
+      Object.values(groups).forEach(g => {
+        const members = (groupMap[g.key] && groupMap[g.key].members) || [];
+        g.members = members;
+        g.projects.sort((a, b) => {
+          const ia = members.indexOf(a.id);
+          const ib = members.indexOf(b.id);
+          const ra = ia === -1 ? 100000 : ia;
+          const rb = ib === -1 ? 100000 : ib;
+          if (ra !== rb) return ra - rb;
+          return String(a.name || a.id).localeCompare(String(b.name || b.id), 'zh-CN');
+        });
+      });
       const groupList = Object.values(groups).sort((a, b) => {
         if (a.key === '__ungrouped__') return 1;
         if (b.key === '__ungrouped__') return -1;
@@ -1723,12 +1773,15 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         if (g.key !== '__ungrouped__') {
           groupActionBtns = `
             <div class="group-actions">
-              <button class="btn-outline" onclick="startGroup('${escapeHtml(g.key)}')">启动本组</button>
+              <button class="btn-start" onclick="startGroup('${escapeHtml(g.key)}')">全部启动</button>
               <button class="btn-outline" onclick="stopGroup('${escapeHtml(g.key)}')">停止本组</button>
             </div>
           `;
         }
-        const heading = `<div class="group-heading"><span>${escapeHtml(g.label)}</span><span class="count">${g.projects.length} 个项目</span>${groupActionBtns}</div>`;
+        const order = (g.members || []).length
+          ? `<div class="group-order">启动顺序（前一个就绪后再启下一个）：${g.members.map(id => `<code>${escapeHtml(id)}</code>`).join(' → ')}</div>`
+          : '';
+        const heading = `<div class="group-card"><div class="group-card-head"><span>${escapeHtml(g.label)}</span><span class="count">${g.projects.length} 个项目</span>${groupActionBtns}</div>${order}</div>`;
         return heading + g.projects.map(renderProjectCard).join('');
       }).join('');
     }
@@ -1774,6 +1827,37 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         alert('停止全部失败：' + e.message);
       } finally {
         fetchProjects();
+      }
+    }
+
+    async function openInCursor(id) {
+      try {
+        await postJson(`/api/projects/${id}/cursor`);
+      } catch (e) {
+        alert('用 Cursor 打开失败：' + e.message);
+      }
+    }
+
+    async function openLogFile(id) {
+      try {
+        await postJson(`/api/projects/${id}/open-log`);
+      } catch (e) {
+        alert('打开日志文件失败：' + e.message);
+      }
+    }
+
+    async function copyStartCommand(id) {
+      const p = lastProjects.find(x => x.id === id);
+      const cmd = (p && p.start_command) ? String(p.start_command) : '';
+      if (!cmd) {
+        alert('没有可复制的启动命令');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(cmd);
+        alert('已复制启动命令');
+      } catch (e) {
+        prompt('复制启动命令', cmd);
       }
     }
 
@@ -2208,6 +2292,11 @@ mod tests {
         assert!(UI_HTML.contains("stopAllProjects"));
         assert!(UI_HTML.contains("stopAllBtn"));
         assert!(UI_HTML.contains("group-actions"));
+        assert!(UI_HTML.contains("group-card"));
+        assert!(UI_HTML.contains("全部启动"));
+        assert!(UI_HTML.contains("openInCursor"));
+        assert!(UI_HTML.contains("openLogFile"));
+        assert!(UI_HTML.contains("copyStartCommand"));
     }
 
     #[test]

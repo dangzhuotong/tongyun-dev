@@ -36,7 +36,7 @@ enum Cmd {
     },
     /// Start a project and wait until the login page / port responds
     Start {
-        /// Project id to start (optional when using --all or --group)
+        /// Project id, or a group key. `start <group>` starts that group's projects in member order and waits until each is ready.
         #[arg(conflicts_with = "all", conflicts_with = "group")]
         id: Option<String>,
         /// Start all registered projects
@@ -49,7 +49,12 @@ enum Cmd {
         #[arg(long)]
         profile: Option<String>,
         /// Open the project page in the browser after starting
-        #[arg(long, conflicts_with = "json", conflicts_with = "all", conflicts_with = "group")]
+        #[arg(
+            long,
+            conflicts_with = "json",
+            conflicts_with = "all",
+            conflicts_with = "group"
+        )]
         open: bool,
         #[arg(long)]
         json: bool,
@@ -71,7 +76,12 @@ enum Cmd {
         /// Profile name to launch with (e.g. dev, prod)
         #[arg(long)]
         profile: Option<String>,
-        #[arg(long, conflicts_with = "json", conflicts_with = "all", conflicts_with = "group")]
+        #[arg(
+            long,
+            conflicts_with = "json",
+            conflicts_with = "all",
+            conflicts_with = "group"
+        )]
         open: bool,
         #[arg(long)]
         json: bool,
@@ -384,9 +394,21 @@ fn parse_web_link_pair(s: &str) -> Result<tongyun_dev_core::WebLink, String> {
 // Existing list/status JSON keeps its original shape. Operations use a stable envelope.
 fn machine_operation(cmd: &Cmd) -> Option<(&str, &str)> {
     match cmd {
-        Cmd::Start { id: Some(id), json: true, .. } => Some(("start", id)),
-        Cmd::Restart { id: Some(id), json: true, .. } => Some(("restart", id)),
-        Cmd::Stop { id: Some(id), json: true, .. } => Some(("stop", id)),
+        Cmd::Start {
+            id: Some(id),
+            json: true,
+            ..
+        } => Some(("start", id)),
+        Cmd::Restart {
+            id: Some(id),
+            json: true,
+            ..
+        } => Some(("restart", id)),
+        Cmd::Stop {
+            id: Some(id),
+            json: true,
+            ..
+        } => Some(("stop", id)),
         Cmd::Install { id, json: true } => Some(("install", id)),
         Cmd::Wait { id, json: true, .. } => Some(("wait", id)),
         Cmd::Logs { id, json: true, .. } => Some(("logs", id)),
@@ -510,7 +532,11 @@ fn run_batch_start_restart(
                 "[{}/{}] {} `{id}` ...",
                 idx + 1,
                 total,
-                if action == "start" { "启动" } else { "重启" }
+                if action == "start" {
+                    "启动"
+                } else {
+                    "重启"
+                }
             );
         }
         let res = if action == "restart" {
@@ -574,12 +600,7 @@ fn run_batch_start_restart(
     Ok(())
 }
 
-fn run_batch_stop(
-    loaded: &Loaded,
-    all: bool,
-    group: Option<&str>,
-    json: bool,
-) -> Result<()> {
+fn run_batch_stop(loaded: &Loaded, all: bool, group: Option<&str>, json: bool) -> Result<()> {
     let target_label = if all {
         "all".to_string()
     } else {
@@ -760,29 +781,55 @@ fn main() -> Result<()> {
             json,
         } => {
             if let Some(id) = id {
-                match loaded.start_with_profile(id, profile.as_deref(), timeout.map(Duration::from_secs)) {
-                    Ok(st) => {
-                        print_status(&st, false)?;
-                        if open {
-                            if let Err(e) = loaded
-                                .page_url(id)
-                                .and_then(|u| tongyun_dev_core::open_url(&u))
-                            {
-                                eprintln!("could not open page: {e:#}");
+                if !loaded.contains_project(id) && loaded.contains_group(id) {
+                    run_batch_start_restart(
+                        &loaded,
+                        "start",
+                        false,
+                        Some(id),
+                        profile.as_deref(),
+                        timeout,
+                        json,
+                    )?;
+                } else if !loaded.contains_project(id) {
+                    anyhow::bail!("找不到项目或分组 `{id}`");
+                } else {
+                    match loaded.start_with_profile(
+                        id,
+                        profile.as_deref(),
+                        timeout.map(Duration::from_secs),
+                    ) {
+                        Ok(st) => {
+                            print_status(&st, false)?;
+                            if open {
+                                if let Err(e) = loaded
+                                    .page_url(id)
+                                    .and_then(|u| tongyun_dev_core::open_url(&u))
+                                {
+                                    eprintln!("could not open page: {e:#}");
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        if let Ok(st) = loaded.status(id) {
-                            print_status(&st, false)?;
+                        Err(e) => {
+                            if let Ok(st) = loaded.status(id) {
+                                print_status(&st, false)?;
+                            }
+                            return Err(e);
                         }
-                        return Err(e);
                     }
                 }
             } else if all || group.is_some() {
-                run_batch_start_restart(&loaded, "start", all, group.as_deref(), profile.as_deref(), timeout, json)?;
+                run_batch_start_restart(
+                    &loaded,
+                    "start",
+                    all,
+                    group.as_deref(),
+                    profile.as_deref(),
+                    timeout,
+                    json,
+                )?;
             } else {
-                anyhow::bail!("请指定项目 ID，或使用 --all / --group <组名>");
+                anyhow::bail!("请指定项目 ID 或分组名，或使用 --all / --group <组名>");
             }
         }
         Cmd::Restart {
@@ -795,7 +842,11 @@ fn main() -> Result<()> {
             json,
         } => {
             if let Some(id) = id {
-                match loaded.restart_with_profile(id, profile.as_deref(), timeout.map(Duration::from_secs)) {
+                match loaded.restart_with_profile(
+                    id,
+                    profile.as_deref(),
+                    timeout.map(Duration::from_secs),
+                ) {
                     Ok(st) => {
                         print_status(&st, false)?;
                         if open {
@@ -815,7 +866,15 @@ fn main() -> Result<()> {
                     }
                 }
             } else if all || group.is_some() {
-                run_batch_start_restart(&loaded, "restart", all, group.as_deref(), profile.as_deref(), timeout, json)?;
+                run_batch_start_restart(
+                    &loaded,
+                    "restart",
+                    all,
+                    group.as_deref(),
+                    profile.as_deref(),
+                    timeout,
+                    json,
+                )?;
             } else {
                 anyhow::bail!("请指定项目 ID，或使用 --all / --group <组名>");
             }
@@ -1290,7 +1349,9 @@ mod tests {
         ));
 
         let cli = Cli::try_parse_from(["tongyun-dev", "start", "my_api", "--open"]).unwrap();
-        assert!(matches!(cli.cmd, Some(Cmd::Start { ref id, open: true, .. }) if id.as_deref() == Some("my_api")));
+        assert!(
+            matches!(cli.cmd, Some(Cmd::Start { ref id, open: true, .. }) if id.as_deref() == Some("my_api"))
+        );
 
         let cli = Cli::try_parse_from(["tongyun-dev", "status", "my_api", "--json"]).unwrap();
         assert!(
@@ -1585,7 +1646,8 @@ mod tests {
         }
 
         // restart with profile
-        let cli = Cli::try_parse_from(["tongyun-dev", "restart", "web", "--profile", "mock"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["tongyun-dev", "restart", "web", "--profile", "mock"]).unwrap();
         match cli.cmd {
             Some(Cmd::Restart { id, profile, .. }) => {
                 assert_eq!(id.as_deref(), Some("web"));
@@ -1609,7 +1671,8 @@ mod tests {
         assert!(Cli::try_parse_from(["tongyun-dev", "open", "web", "--dir", "--all"]).is_err());
 
         // terminal with profile
-        let cli = Cli::try_parse_from(["tongyun-dev", "terminal", "web", "--profile", "dev"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["tongyun-dev", "terminal", "web", "--profile", "dev"]).unwrap();
         match cli.cmd {
             Some(Cmd::Terminal { id, profile }) => {
                 assert_eq!(id, "web");
@@ -1655,9 +1718,15 @@ mod tests {
         }
 
         // stop --group
-        let cli = Cli::try_parse_from(["tongyun-dev", "stop", "--group", "backend", "--json"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["tongyun-dev", "stop", "--group", "backend", "--json"]).unwrap();
         match cli.cmd {
-            Some(Cmd::Stop { id, all, group, json }) => {
+            Some(Cmd::Stop {
+                id,
+                all,
+                group,
+                json,
+            }) => {
                 assert_eq!(id, None);
                 assert!(!all);
                 assert_eq!(group.as_deref(), Some("backend"));
@@ -1670,7 +1739,9 @@ mod tests {
         assert!(Cli::try_parse_from(["tongyun-dev", "start", "web", "--all"]).is_err());
 
         // conflict: --all and --group
-        assert!(Cli::try_parse_from(["tongyun-dev", "stop", "--all", "--group", "backend"]).is_err());
+        assert!(
+            Cli::try_parse_from(["tongyun-dev", "stop", "--all", "--group", "backend"]).is_err()
+        );
     }
 
     #[test]

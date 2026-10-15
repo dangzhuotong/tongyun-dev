@@ -33,7 +33,7 @@ cargo run -p tongyun-dev-cli -- remove demo_web
 - `tongyun-dev scan <dir> [--depth N] [--apply] [--json]`：扫描目录，识别项目并可选写入配置
 - `tongyun-dev list [--json] [--with-groups]`：列出所有已登记项目；`--json` 输出项目数组 `[...]`，搭配 `--with-groups` 输出 `{"projects":[...],"groups":[{key,label,order}]}`
 - `tongyun-dev status [id] [--json]`：查看项目状态（不带 id 为全部项目，返回当前生命周期、端口与 active_profile）
-- `tongyun-dev start [<id>] [--all] [--group 组名] [--profile 名] [--open] [--json]`：启动项目（支持批量 `--all` 或 `--group`，自动按依赖拓扑顺序启动）并等待端口连通/探针就绪；`--open` 就绪后用浏览器打开
+- `tongyun-dev start [<id|组名>] [--all] [--group 组名] [--profile 名] [--open] [--json]`：启动项目，或启动一个分组。`start <组名>`（参数是分组 key、不是项目 id）按 `[group.<组名>].members` 的顺序启动，等前一个就绪后再启下一个；也可用 `--group`。`--open` 只对单个项目生效
 - `tongyun-dev restart [<id>] [--all] [--group 组名] [--profile 名] [--open] [--json]`：停止并重新启动项目或分组（按依赖拓扑顺序）
 - `tongyun-dev terminal <id> [--profile 名]`：在系统原生终端窗口中打开并执行项目的启动命令或测试调试
 - `tongyun-dev stop [<id>] [--all] [--group 组名] [--json]`：停止项目（支持批量 `--all` 或 `--group`，自动按逆依赖拓扑顺序停止）
@@ -77,7 +77,8 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 - **识别类型与推断规则**：
   - **Spring Boot（Maven）**：`pom.xml` 包含 `spring-boot`。启动命令 `mvn spring-boot:run`（存在 `mvnw` 时优先使用 `./mvnw`）。端口优先读取 `src/main/resources/application*.yml/properties` 中的 `server.port`，缺省 8080。Java 版本读取自 `.sdkmanrc` / `.java-version` / `pom.xml`（`java.version` / `maven.compiler.*`）。
   - **Spring Boot（Gradle）**：`build.gradle(.kts)` 使用 `org.springframework.boot`。启动命令 `./gradlew bootRun`。端口同上；Java 版本来自 toolchain / `sourceCompatibility`。
-  - **Tomcat WAR**：`pom.xml` 中 `<packaging>war</packaging>`。启动命令 `mvn package` 并部署运行。端口默认 8080。由于需要指定 Tomcat 路径，扫描添加时默认置为停用（`enabled = false`），需填入 `tomcat` 安装目录后启用。
+  - **Spring 环境预设**：项目下已有 `src/main/resources/application-<名>.yml` / `.yaml` / `.properties` 时，扫描为每个文件名建议一个 profile，并写入 `SPRING_PROFILES_ACTIVE=<名>`。不会凭空添加仓库里不存在的环境名。
+  - **非 Spring Boot 的 pom.xml**：普通 jar / war 不再默认停用。扫描给出 `packaging`、pom 里的 `<mainClass>` 和 `server.port` 候选；有主类时启动命令是 `mvn exec:java -Dexec.mainClass=...`，没有主类时是 `mvn -q -DskipTests package`，说明里列出候选，方便改成可执行启动或外部 Tomcat。
   - **Vite（Vue / React）**：依赖中包含 `vite`。启动命令按锁文件自动选择 `pnpm dev` / `yarn dev` / `npm run dev`。端口从脚本参数 `--port` / `-p` 或 `vite.config.*` 读取，缺省 5173。Node 版本读取自 `.nvmrc` / `.node-version` / `package.json`（`engines.node`）。
   - **Vue CLI**：依赖中包含 `@vue/cli-service`。启动命令 `npm run serve` 等。端口从脚本或 `vue.config.js` 的 `devServer.port` 读取，缺省 8080。
   - **Next.js / Nuxt**：依赖中包含 `next` 或 `nuxt`。启动命令 `pnpm dev` 等。端口从脚本参数或配置文件读取，缺省 3000。
@@ -102,7 +103,7 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
     - `"arg"`：启动时由 tongyun-dev 自动在命令末尾追加端口参数。追加规则：pnpm/yarn 追加 `--port N`；npm run 追加 `-- --port N`（已有 `--` 则不再重复添加）；其他命令直接追加 `--port N`。可通过 `port_arg`（缺省 `"--port"`）自定义参数名（如 `-p`）。若命令中已写了 `--port` / `-p` 则不重复追加。用户手写的 start 命令原样执行，不会无条件改写。
     - `"env"`：启动时给子进程设置环境变量 `PORT=N`。可通过 `port_env`（缺省 `"PORT"`）自定义变量名（如 `VITE_PORT`）。
     - `"config"`：端口配置在项目自身的配置文件（如 `vite.config` 等）中，行为同 `"none"`，便于在 UI 上标注来源。
-    - **启动命令诊断**：若 start 命令写死了 `--port` 且检测为 monorepo 启动脚本，会在 status / detail 中给出警告提示；若启动失败且日志尾部包含 `Unknown option --port`，会在失败原因中给出修改建议。
+    - **启动命令诊断**：若 start 命令写死了 `--port` 且检测为 monorepo 启动脚本，会在 status / detail 中给出警告提示；若启动失败且日志尾部包含 `Unknown option --port`，会在失败原因中给出修改建议。状态变成失败且原因只是「进程已退出」或超时时，会从日志尾部再抽一行：端口被占用、依赖解析失败，或最后一条异常。
 - **Tomcat 项目**：
   - 针对传统 WAR 项目（`demo_legacy`），配置 `tomcat` 字段。`stop` 命令优先执行配置脚本（如 `catalina.sh stop 15 -force`）。
   - 若停止超时后仍需发信号终止，仅针对 Java/Tomcat 进程，不杀占用端口的其他无关程序。
@@ -212,8 +213,8 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 | --- | --- |
 | `label` | 可选。显示名，缺省使用 key |
 | `order` | 可选（如 `1`）。排序序号，数值小的排在前面；未配置 order 的按 label 排序在有 order 的分组之后 |
-| `members` | 预留，后续版本用于一组启停 |
-| `depends_on` | 预留，后续版本用于一组启停 |
+| `members` | 组内项目 id，按启动顺序排列。`tongyun-dev start <组名>` 与网页 / 桌面分组卡片的「全部启动」都按这个顺序，并等前一个就绪后再启下一个。未写入 members、但 `group` 字段指向本组的项目排在后面 |
+| `depends_on` | 可选。分组之间的依赖。项目级 `depends_on` 仍然优先于 members 顺序 |
 
 ## 验收清单
 

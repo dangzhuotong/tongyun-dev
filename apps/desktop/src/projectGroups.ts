@@ -191,6 +191,8 @@ export interface GroupSection<P> {
   name: string;
   /** 排序序号（可选） */
   order?: number | null;
+  /** 组内启动顺序（members） */
+  members: string[];
   /** 是否为未分组 */
   isUngrouped: boolean;
   /** 当前可见的项目列表（经过过滤） */
@@ -238,13 +240,14 @@ export function groupProjects<P extends FilterProject>({
   if (groups !== undefined) {
     const groupKeyMap = new Map<
       string,
-      { label: string; order: number | null; all: P[]; visible: P[] }
+      { label: string; order: number | null; members: string[]; all: P[]; visible: P[] }
     >();
 
     for (const g of groups) {
       groupKeyMap.set(g.key, {
         label: g.label || g.key,
         order: g.order ?? null,
+        members: g.members ?? [],
         all: [],
         visible: [],
       });
@@ -253,7 +256,13 @@ export function groupProjects<P extends FilterProject>({
     for (const cg of customGroups) {
       const trimmed = cg.trim();
       if (trimmed && trimmed !== UNGROUPED_NAME && !groupKeyMap.has(trimmed)) {
-        groupKeyMap.set(trimmed, { label: trimmed, order: null, all: [], visible: [] });
+        groupKeyMap.set(trimmed, {
+          label: trimmed,
+          order: null,
+          members: [],
+          all: [],
+          visible: [],
+        });
       }
     }
 
@@ -266,7 +275,7 @@ export function groupProjects<P extends FilterProject>({
         ungroupedAll.push(p);
       } else {
         if (!groupKeyMap.has(k)) {
-          groupKeyMap.set(k, { label: k, order: null, all: [], visible: [] });
+          groupKeyMap.set(k, { label: k, order: null, members: [], all: [], visible: [] });
         }
         groupKeyMap.get(k)!.all.push(p);
       }
@@ -278,10 +287,22 @@ export function groupProjects<P extends FilterProject>({
         ungroupedVisible.push(p);
       } else {
         if (!groupKeyMap.has(k)) {
-          groupKeyMap.set(k, { label: k, order: null, all: [], visible: [] });
+          groupKeyMap.set(k, { label: k, order: null, members: [], all: [], visible: [] });
         }
         groupKeyMap.get(k)!.visible.push(p);
       }
+    }
+
+    for (const data of groupKeyMap.values()) {
+      const rank = new Map(data.members.map((id, i) => [id, i]));
+      const byOrder = (a: P, b: P) => {
+        const ra = rank.has(a.id) ? (rank.get(a.id) as number) : 1_000_000;
+        const rb = rank.has(b.id) ? (rank.get(b.id) as number) : 1_000_000;
+        if (ra !== rb) return ra - rb;
+        return a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
+      };
+      data.all.sort(byOrder);
+      data.visible.sort(byOrder);
     }
 
     const sections: GroupSection<P>[] = [];
@@ -296,6 +317,7 @@ export function groupProjects<P extends FilterProject>({
         label: data.label,
         name: data.label,
         order: data.order,
+        members: data.members,
         isUngrouped: false,
         visibleProjects: data.visible,
         totalCount: data.all.length,
@@ -312,6 +334,7 @@ export function groupProjects<P extends FilterProject>({
           label: UNGROUPED_NAME,
           name: UNGROUPED_NAME,
           order: null,
+          members: [],
           isUngrouped: true,
           visibleProjects: ungroupedVisible,
           totalCount: ungroupedAll.length,
@@ -364,6 +387,7 @@ export function groupProjects<P extends FilterProject>({
       key: isUngrouped ? UNGROUPED_KEY : name,
       label: name,
       name,
+      members: [],
       isUngrouped,
       visibleProjects: data.visible,
       totalCount: data.all.length,

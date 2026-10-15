@@ -310,6 +310,9 @@ pub struct ProjectRow {
     pub profiles: std::collections::BTreeMap<String, ProfileConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
+    /// Shell line a person can paste to start the project (assembled start command).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub start_command: String,
     /// Set when this row could not be resolved (for example a bad `log_dir`).
     /// The rest of the catalog still loads, so the main window can open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -321,6 +324,9 @@ pub struct GroupInfo {
     pub key: String,
     pub label: String,
     pub order: Option<i64>,
+    /// Project ids in start order (`[group.<key>].members`, then other projects in the group).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
 }
@@ -566,6 +572,7 @@ fn row_from_resolved(
         default_profile,
         profiles,
         depends_on: resolved.depends_on.clone(),
+        start_command: display_command(&resolved.assembled_start()),
         resolve_error: None,
     }
 }
@@ -613,6 +620,7 @@ fn unresolved_row(id: &str, raw: Option<&Project>, err: String) -> ProjectRow {
         default_profile: raw.and_then(|p| p.default_profile.clone()),
         profiles: raw.map(|p| p.profiles.clone()).unwrap_or_default(),
         depends_on: raw.map(|p| p.depends_on.clone()).unwrap_or_default(),
+        start_command: raw.map(|p| display_command(&p.start)).unwrap_or_default(),
         resolve_error: Some(err),
     }
 }
@@ -669,6 +677,7 @@ impl Loaded {
                     key: key.clone(),
                     label,
                     order: cfg.order,
+                    members: Vec::new(),
                     depends_on: cfg.depends_on.clone(),
                 },
             );
@@ -682,9 +691,17 @@ impl Loaded {
                         key: k.to_string(),
                         label: k.to_string(),
                         order: None,
+                        members: Vec::new(),
                         depends_on: Vec::new(),
                     },
                 );
+            }
+        }
+        let keys: Vec<String> = group_map.keys().cloned().collect();
+        for key in keys {
+            let members = self.projects_in_group(&key);
+            if let Some(info) = group_map.get_mut(&key) {
+                info.members = members;
             }
         }
         let mut list: Vec<GroupInfo> = group_map.into_values().collect();
@@ -714,12 +731,53 @@ impl Loaded {
                 }
             }
         }
+        let mut rest = Vec::new();
         for (id, p) in &self.config.projects {
             if p.group.trim() == key_trim && !ids.contains(id) {
-                ids.push(id.clone());
+                rest.push(id.clone());
             }
         }
+        rest.sort();
+        ids.extend(rest);
         ids
+    }
+
+    /// True when `id` is a registered project.
+    pub fn contains_project(&self, id: &str) -> bool {
+        self.config.projects.contains_key(id.trim())
+    }
+
+    /// True when `key` is a declared group or at least one project sets `group = key`.
+    pub fn contains_group(&self, key: &str) -> bool {
+        let key = key.trim();
+        if key.is_empty() {
+            return false;
+        }
+        self.config.group.contains_key(key)
+            || self.config.projects.values().any(|p| p.group.trim() == key)
+    }
+
+    /// Index inside `[group].members` for this project. Missing entries sort last.
+    fn member_index(&self, id: &str) -> usize {
+        let group = self
+            .config
+            .projects
+            .get(id)
+            .map(|p| p.group.trim())
+            .unwrap_or("");
+        if !group.is_empty() {
+            if let Some(cfg) = self.config.group.get(group) {
+                if let Some(i) = cfg.members.iter().position(|m| m == id) {
+                    return i;
+                }
+            }
+        }
+        for cfg in self.config.group.values() {
+            if let Some(i) = cfg.members.iter().position(|m| m == id) {
+                return i;
+            }
+        }
+        usize::MAX
     }
 
     /// Return group keys sorted by dependency order (dependencies first), then by order and label.
@@ -839,9 +897,15 @@ impl Loaded {
                 if ra != rb {
                     ra.cmp(&rb)
                 } else {
-                    let na = pa.map(|p| p.name.as_str()).unwrap_or(a);
-                    let nb = pb.map(|p| p.name.as_str()).unwrap_or(b);
-                    na.cmp(nb).then_with(|| a.cmp(b))
+                    let ma = self.member_index(a);
+                    let mb = self.member_index(b);
+                    if ma != mb {
+                        ma.cmp(&mb)
+                    } else {
+                        let na = pa.map(|p| p.name.as_str()).unwrap_or(a);
+                        let nb = pb.map(|p| p.name.as_str()).unwrap_or(b);
+                        na.cmp(nb).then_with(|| a.cmp(b))
+                    }
                 }
             });
             let next = ready.remove(0);
@@ -1058,7 +1122,10 @@ impl Loaded {
         let active_prof = {
             let pid = read_pid(&base.pid_file);
             let alive = pid.is_some_and(process_alive);
-            if alive || read_start_marker(&base.pid_file).is_some() || install_in_progress(&base.pid_file) {
+            if alive
+                || read_start_marker(&base.pid_file).is_some()
+                || install_in_progress(&base.pid_file)
+            {
                 std::fs::read_to_string(profile_marker_path(&base.pid_file))
                     .ok()
                     .map(|s| s.trim().to_string())
@@ -1527,11 +1594,7 @@ impl Loaded {
     }
 
     /// 批量停止项目（按依赖逆序停止）
-    pub fn stop_batch(
-        &self,
-        group: Option<&str>,
-        ids: Option<&[String]>,
-    ) -> Result<BatchOutput> {
+    pub fn stop_batch(&self, group: Option<&str>, ids: Option<&[String]>) -> Result<BatchOutput> {
         let candidate_ids: Vec<String> = if let Some(ids) = ids {
             ids.iter()
                 .filter(|id| self.config.projects.contains_key(*id))
@@ -2439,7 +2502,8 @@ fn resolve_project_with_profile(
                         project.login_url = project.login_url.replace(&old_port_str, &new_port_str);
                     }
                     if !project.health_url.is_empty() {
-                        project.health_url = project.health_url.replace(&old_port_str, &new_port_str);
+                        project.health_url =
+                            project.health_url.replace(&old_port_str, &new_port_str);
                     }
                     project.port = port;
                 }
@@ -3136,6 +3200,19 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
         }
     }
 
+    if state == LifeState::Failed
+        && failure
+            .as_deref()
+            .map(failure_allows_log_line)
+            .unwrap_or(true)
+    {
+        if let Ok(text) = read_tail(&p.log_file, 120) {
+            if let Some(line) = extract_start_failure_line(&text) {
+                failure = Some(line);
+            }
+        }
+    }
+
     let elapsed_secs = match state {
         LifeState::Installing
         | LifeState::Starting
@@ -3533,6 +3610,130 @@ pub fn diagnose_start_command(root: &Path, start_cmd: &[String]) -> Option<Strin
     } else {
         None
     }
+}
+
+/// Whether a stored failure is generic enough to replace with a log one-liner.
+fn failure_allows_log_line(msg: &str) -> bool {
+    if msg.contains("建议去掉 --port")
+        || msg.contains("缺 Java")
+        || msg.contains("缺 Node")
+        || msg.contains("依赖未安装")
+        || msg.contains("已停用")
+        || msg.contains("disabled")
+    {
+        return false;
+    }
+    msg == "进程已退出"
+        || msg == "启动失败"
+        || msg.starts_with("超过 ")
+        || msg.starts_with("进程已退出")
+}
+
+/// One-line start-failure reason from a log tail.
+/// Prefers port-in-use, then dependency resolution, then the last exception.
+pub fn extract_start_failure_line(log: &str) -> Option<String> {
+    let lines = log_lines(log);
+    if let Some(line) = lines.iter().rev().find(|l| is_port_in_use(l)) {
+        return Some(prefix_failure("端口被占用", line));
+    }
+    if let Some(line) = lines.iter().rev().find(|l| is_dependency_resolve(l)) {
+        return Some(prefix_failure("依赖解析失败", line));
+    }
+    if let Some(line) = lines.iter().rev().find(|l| is_caused_by(l)) {
+        return Some(prefix_failure("异常", line));
+    }
+    if let Some(line) = lines.iter().rev().find(|l| is_exception_line(l)) {
+        return Some(prefix_failure("异常", line));
+    }
+    None
+}
+
+fn log_lines(log: &str) -> Vec<String> {
+    log.lines()
+        .map(|l| collapse_ws(&strip_ansi_line(l)))
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+fn strip_ansi_line(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == 0x1b && i + 1 < b.len() && b[i + 1] == b'[' {
+            i += 2;
+            while i < b.len() && !b[i].is_ascii_alphabetic() && b[i] != b'~' {
+                i += 1;
+            }
+            if i < b.len() {
+                i += 1;
+            }
+            continue;
+        }
+        let ch = s[i..].chars().next().unwrap_or('\u{fffd}');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn prefix_failure(label: &str, line: &str) -> String {
+    let line = if line.chars().count() > 180 {
+        let cut: String = line.chars().take(180).collect();
+        format!("{cut}…")
+    } else {
+        line.to_string()
+    };
+    if line.starts_with(label) {
+        line
+    } else {
+        format!("{label}：{line}")
+    }
+}
+
+fn is_port_in_use(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("address already in use")
+        || lower.contains("port already in use")
+        || lower.contains("was already in use")
+        || lower.contains("eaddrinuse")
+        || lower.contains("bindexception")
+        || lower.contains("failed to bind")
+        || lower.contains("web server failed to start")
+        || line.contains("端口已被占用")
+        || line.contains("地址已在使用")
+}
+
+fn is_dependency_resolve(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("could not resolve dependencies")
+        || lower.contains("could not resolve dependency")
+        || lower.contains("failed to collect dependencies")
+        || lower.contains("non-resolvable")
+        || lower.contains("could not find artifact")
+        || lower.contains("eresolve")
+        || lower.contains("unable to resolve dependency")
+        || lower.contains("cannot find module")
+        || lower.contains("module not found")
+        || lower.contains("failed to resolve")
+        || lower.contains("dependency resolution failed")
+        || line.contains("无法解析依赖")
+}
+
+fn is_caused_by(line: &str) -> bool {
+    line.to_ascii_lowercase().contains("caused by:")
+}
+
+fn is_exception_line(line: &str) -> bool {
+    if line.contains("Exception") {
+        return true;
+    }
+    let lower = line.to_ascii_lowercase();
+    lower.contains("error:") && !lower.starts_with("error ") && line.chars().count() >= 8
 }
 
 pub fn check_log_unknown_port_error(log_path: &Path) -> bool {
@@ -5328,11 +5529,18 @@ impl NewProject {
                 bail!("links[{}]: url cannot be empty", idx);
             }
             if !(u.starts_with("http://") || u.starts_with("https://")) {
-                bail!("links[{}]: url `{u}` must start with http:// or https://", idx);
+                bail!(
+                    "links[{}]: url `{u}` must start with http:// or https://",
+                    idx
+                );
             }
         }
         for (key, prof) in &self.profiles {
-            if key.trim().is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            if key.trim().is_empty()
+                || !key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
                 bail!("profile key `{key}` may only contain letters, digits, `_`, `-`");
             }
             if let Some(p) = prof.port {
@@ -5732,6 +5940,42 @@ pub struct ProjectDetail {
 }
 
 #[allow(clippy::if_same_then_else)]
+/// One shell line for display / copy. `bash -c <script>` becomes the script.
+pub fn display_command(argv: &[String]) -> String {
+    if argv.is_empty() {
+        return String::new();
+    }
+    if argv.len() >= 3
+        && (argv[0] == "bash" || argv[0] == "sh")
+        && (argv[1] == "-c" || argv[1] == "-lc")
+    {
+        let mut line = argv[2].clone();
+        if argv.len() > 3 {
+            line.push(' ');
+            line.push_str(&shell_join(&argv[3..]));
+        }
+        return line;
+    }
+    shell_join(argv)
+}
+
+fn shell_join(argv: &[String]) -> String {
+    argv.iter()
+        .map(|arg| {
+            if arg.is_empty()
+                || arg
+                    .chars()
+                    .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\'))
+            {
+                format!("\"{}\"", arg.replace('\\', "\\\\").replace('"', "\\\""))
+            } else {
+                arg.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn unpack_command(argv: &[String]) -> (String, bool) {
     if argv.is_empty() {
         (String::new(), true)
@@ -6051,7 +6295,14 @@ impl Loaded {
             Ok(())
         }
 
-        dfs(self, target_id, target_id, candidate_deps, &mut visited, &mut stack)
+        dfs(
+            self,
+            target_id,
+            target_id,
+            candidate_deps,
+            &mut visited,
+            &mut stack,
+        )
     }
 
     /// Validate project edit data before modifying any config file or groups.
@@ -6086,14 +6337,21 @@ impl Loaded {
                     bail!("links[{}]: url cannot be empty", idx);
                 }
                 if !(u.starts_with("http://") || u.starts_with("https://")) {
-                    bail!("links[{}]: url `{u}` must start with http:// or https://", idx);
+                    bail!(
+                        "links[{}]: url `{u}` must start with http:// or https://",
+                        idx
+                    );
                 }
             }
         }
 
         let effective_profiles = edit.profiles.as_ref().unwrap_or(&existing.profiles);
         for (key, prof) in effective_profiles {
-            if key.trim().is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            if key.trim().is_empty()
+                || !key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
                 bail!("profile key `{key}` may only contain letters, digits, `_`, `-`");
             }
             if let Some(p) = prof.port {
@@ -6463,11 +6721,7 @@ impl Loaded {
                         arr.push(trimmed);
                     }
                 }
-                set_table_val(
-                    proj_table,
-                    "depends_on",
-                    toml_edit::Value::Array(arr),
-                );
+                set_table_val(proj_table, "depends_on", toml_edit::Value::Array(arr));
             }
         }
 
@@ -6556,6 +6810,7 @@ impl Loaded {
             key: key.to_string(),
             label: label.unwrap_or(key).to_string(),
             order: None,
+            members: Vec::new(),
             depends_on: Vec::new(),
         })
     }
@@ -6594,6 +6849,7 @@ impl Loaded {
             key: key.to_string(),
             label: label.to_string(),
             order: entry.order,
+            members: entry.members.clone(),
             depends_on: entry.depends_on.clone(),
         })
     }
@@ -6702,6 +6958,10 @@ impl Loaded {
     }
 
     /// Absolute project root.
+    pub fn log_file(&self, id: &str) -> Result<PathBuf> {
+        Ok(self.resolve(id)?.log_file)
+    }
+
     pub fn root_dir(&self, id: &str) -> Result<PathBuf> {
         Ok(self.resolve(id)?.root)
     }
@@ -6822,6 +7082,33 @@ pub fn open_url(url: &str) -> Result<()> {
         bail!("url is not usable: {url}");
     }
     open_with_system(url)
+}
+
+/// Open a project directory in Cursor (`cursor <dir>` on PATH).
+pub fn open_in_cursor(path: &Path) -> Result<()> {
+    if !path.is_dir() {
+        bail!("不是目录：{}", path.display());
+    }
+    let bin = if cfg!(windows) {
+        "cursor.cmd"
+    } else {
+        "cursor"
+    };
+    match Command::new(bin)
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "未找到 {bin} 命令。安装 Cursor 后，在命令面板执行 Install 'cursor' command in PATH"
+            );
+        }
+        Err(e) => bail!("无法用 Cursor 打开：{e}"),
+    }
 }
 
 /// Open an existing absolute file or directory with the system default program.
@@ -7758,6 +8045,7 @@ port = 3002
             default_profile: None,
             profiles: Default::default(),
             depends_on: Vec::new(),
+            start_command: String::new(),
             resolve_error: None,
         };
         let json_fs: serde_json::Value =
@@ -7793,6 +8081,7 @@ port = 3002
             default_profile: None,
             profiles: Default::default(),
             depends_on: Vec::new(),
+            start_command: String::new(),
             resolve_error: None,
         };
         let json_none: serde_json::Value =
@@ -8946,7 +9235,10 @@ start = ["bash", "-c", "exec pnpm dev"]
             },
         );
         assert!(bad_link.is_err());
-        assert!(bad_link.unwrap_err().to_string().contains("must start with http:// or https://"));
+        assert!(bad_link
+            .unwrap_err()
+            .to_string()
+            .contains("must start with http:// or https://"));
 
         // Invalid profile key
         let mut bad_profiles = std::collections::BTreeMap::new();
@@ -8967,7 +9259,10 @@ start = ["bash", "-c", "exec pnpm dev"]
             },
         );
         assert!(bad_prof.is_err());
-        assert!(bad_prof.unwrap_err().to_string().contains("profile key `bad key!` may only contain"));
+        assert!(bad_prof
+            .unwrap_err()
+            .to_string()
+            .contains("profile key `bad key!` may only contain"));
 
         // default_profile not in profiles
         let bad_dp = loaded.update_project(
@@ -8978,7 +9273,10 @@ start = ["bash", "-c", "exec pnpm dev"]
             },
         );
         assert!(bad_dp.is_err());
-        assert!(bad_dp.unwrap_err().to_string().contains("default_profile `nonexistent` does not exist in profiles"));
+        assert!(bad_dp
+            .unwrap_err()
+            .to_string()
+            .contains("default_profile `nonexistent` does not exist in profiles"));
     }
 
     #[test]
@@ -9084,7 +9382,9 @@ start = ["echo", "hi"]
         let loaded = load(Some(&path)).unwrap();
         let st = loaded.status("app").unwrap();
         assert!(
-            st.hints.iter().any(|h| h.contains("旧版 PID 文件") && h.contains(&my_pid.to_string())),
+            st.hints
+                .iter()
+                .any(|h| h.contains("旧版 PID 文件") && h.contains(&my_pid.to_string())),
             "hints {:?} should mention legacy pid file migration",
             st.hints
         );
@@ -9139,7 +9439,10 @@ depends_on = ["web"]
             },
         );
         assert!(cycle_edit.is_err());
-        assert!(cycle_edit.unwrap_err().to_string().contains("检测到循环依赖"));
+        assert!(cycle_edit
+            .unwrap_err()
+            .to_string()
+            .contains("检测到循环依赖"));
 
         // 4. Self dependency error
         let self_dep = loaded.update_project(
@@ -9150,7 +9453,10 @@ depends_on = ["web"]
             },
         );
         assert!(self_dep.is_err());
-        assert!(self_dep.unwrap_err().to_string().contains("不能将自身作为依赖项"));
+        assert!(self_dep
+            .unwrap_err()
+            .to_string()
+            .contains("不能将自身作为依赖项"));
 
         // 5. Non-existent dependency error
         let non_exist = loaded.update_project(
@@ -9161,7 +9467,125 @@ depends_on = ["web"]
             },
         );
         assert!(non_exist.is_err());
-        assert!(non_exist.unwrap_err().to_string().contains("依赖的项目 `ghost` 不存在"));
+        assert!(non_exist
+            .unwrap_err()
+            .to_string()
+            .contains("依赖的项目 `ghost` 不存在"));
+    }
+
+    #[test]
+    fn group_members_order_starts_before_name_and_after_depends_on() {
+        let dir = std::env::temp_dir().join(format!("tongyun_dev_members_{}", current_time_secs()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("projects.toml");
+        let toml = r#"
+[group.shop]
+label = "Shop"
+members = ["zeta_api", "alpha_web"]
+
+[projects.alpha_web]
+name = "Alpha Web"
+group = "shop"
+root = "/tmp"
+port = 5173
+start = ["echo", "web"]
+
+[projects.zeta_api]
+name = "Zeta API"
+group = "shop"
+root = "/tmp"
+port = 8080
+start = ["echo", "api"]
+"#;
+        std::fs::write(&path, toml).unwrap();
+        let loaded = load(Some(&path)).unwrap();
+        assert_eq!(
+            loaded.projects_in_group("shop"),
+            vec!["zeta_api".to_string(), "alpha_web".to_string()]
+        );
+        let order = loaded.sorted_projects_for_start(&["alpha_web", "zeta_api"]);
+        assert_eq!(order, vec!["zeta_api".to_string(), "alpha_web".to_string()]);
+        let info = loaded
+            .groups()
+            .into_iter()
+            .find(|g| g.key == "shop")
+            .unwrap();
+        assert_eq!(
+            info.members,
+            vec!["zeta_api".to_string(), "alpha_web".to_string()]
+        );
+
+        let toml = r#"
+[group.shop]
+label = "Shop"
+members = ["alpha_web", "zeta_api"]
+
+[projects.alpha_web]
+name = "Alpha Web"
+group = "shop"
+root = "/tmp"
+port = 5173
+start = ["echo", "web"]
+depends_on = ["zeta_api"]
+
+[projects.zeta_api]
+name = "Zeta API"
+group = "shop"
+root = "/tmp"
+port = 8080
+start = ["echo", "api"]
+"#;
+        std::fs::write(&path, toml).unwrap();
+        let loaded = load(Some(&path)).unwrap();
+        let order = loaded.sorted_projects_for_start(&["alpha_web", "zeta_api"]);
+        assert_eq!(
+            order,
+            vec!["zeta_api".to_string(), "alpha_web".to_string()],
+            "depends_on still starts the backend before the frontend"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_start_failure_line_prefers_port_then_deps_then_exception() {
+        let port = extract_start_failure_line(
+            "Web server failed to start. Port 8080 was already in use.\n",
+        )
+        .unwrap();
+        assert!(port.starts_with("端口被占用"));
+        assert!(port.contains("8080"));
+        assert!(!port.contains('\n'));
+
+        let dep = extract_start_failure_line(
+            "[ERROR] Failed to execute goal\n[ERROR] Could not resolve dependencies for project com.example:demo:jar:1.0\n",
+        )
+        .unwrap();
+        assert!(dep.starts_with("依赖解析失败"));
+        assert!(dep.contains("Could not resolve dependencies"));
+
+        let npm = extract_start_failure_line(
+            "npm ERR! code ERESOLVE\nnpm ERR! ERESOLVE unable to resolve dependency tree\n",
+        )
+        .unwrap();
+        assert!(npm.starts_with("依赖解析失败"));
+
+        let ex = extract_start_failure_line(
+            "INFO started\nException in thread \"main\" java.lang.RuntimeException: wrapper\nCaused by: java.lang.IllegalStateException: boom\n\tat com.example.Demo.main(Demo.java:1)\n",
+        )
+        .unwrap();
+        assert!(ex.starts_with("异常"));
+        assert!(ex.contains("IllegalStateException"));
+        assert!(!ex.contains("RuntimeException"));
+
+        assert!(extract_start_failure_line("ready on port 8080\n").is_none());
+        assert_eq!(
+            display_command(&[
+                "bash".into(),
+                "-c".into(),
+                "exec mvn spring-boot:run".into()
+            ]),
+            "exec mvn spring-boot:run"
+        );
     }
 
     #[test]

@@ -14,6 +14,8 @@ log_dir = "~/.tongyun-dev/logs"
 [group.demo]
 label = "Demo 业务线"
 order = 1
+# 启动顺序：先后端，就绪后再启前端。`tongyun-dev start demo` 按这个顺序等就绪。
+members = ["demo_api", "demo_web"]
 
 [group.legacy]
 label = "历史归档"
@@ -51,6 +53,9 @@ default_profile = "dev"
 [projects.demo_web.profiles.dev]
 label = "开发环境"
 start = "pnpm dev --host 127.0.0.1"
+
+[projects.demo_web.profiles.dev.env]
+APP_ENV = "dev"
 
 [projects.demo_web.profiles.mock]
 label = "Mock 联调"

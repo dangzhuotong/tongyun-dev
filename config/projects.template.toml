@@ -49,7 +49,7 @@
 # [group.<key>]
 #   label       显示名（可选，缺省使用 key）
 #   order       排序序号（可选，小的排在前面；未配置 order 的按 label 排在后面）
-#   members     预留，后续版本用于一组启停
-#   depends_on  预留，后续版本用于一组启停
+#   members     组内项目 id，按启动顺序排列（先后端再前端）。`tongyun-dev start <组名>` 会等前一个就绪再启下一个
+#   depends_on  分组之间的依赖（可选）。项目自己的 depends_on 仍然优先
 
 [projects]

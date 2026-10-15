@@ -1374,8 +1374,8 @@ export function App() {
             </div>
 
             {activeTab === "overview" && (
-              <div className="flex-1 overflow-y-auto">
-                <header className="detail-header">
+              <div className="flex-1 flex flex-col h-full min-h-0 overflow-y-auto">
+                <header className="detail-header shrink-0">
               <div className="title-area">
                 <div className="title-row">
                   <h1>{current.name}</h1>
@@ -1538,10 +1538,19 @@ export function App() {
                   type="button"
                   className="btn btn-secondary btn-terminal-header"
                   onClick={() => handleOpenTerminal()}
-                  title="在系统独立终端中运行项目（支持上下键选择与按键交互）"
+                  title="在系统原生终端 (CMD) 中运行项目"
                 >
                   <TerminalIcon />
-                  终端
+                  打开 CMD
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => reveal("folder")}
+                  title="在系统文件管理器中打开项目目录"
+                >
+                  <FolderIcon />
+                  打开目录
                 </button>
                 <button
                   type="button"
@@ -1771,7 +1780,7 @@ export function App() {
         )}
 
         {activeTab === "logs" && (
-          <div className="flex-1 flex flex-col p-4 h-full min-h-0 overflow-hidden bg-[var(--color-bg)]">
+          <div className="flex-1 flex flex-col h-full min-h-0 overflow-hidden bg-[var(--color-bg)]">
             <LogPanel
               log={log}
               logPath={logPath}

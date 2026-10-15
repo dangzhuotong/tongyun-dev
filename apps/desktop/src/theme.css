@@ -25,11 +25,11 @@
   --color-danger: var(--ty-peach);
   --color-danger-border: var(--ty-peach-soft);
 
-  --log-bg: #2b2620;
-  --log-bar: #332d26;
-  --log-text: #e9dfd0;
-  --log-muted: #a99b88;
-  --log-border: #463e34;
+  --log-bg: #0b0f19;
+  --log-bar: #111827;
+  --log-text: #e5e7eb;
+  --log-muted: #9ca3af;
+  --log-border: #1f2937;
 }
 
 [data-theme="dark"],

@@ -8,11 +8,11 @@
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   --sidebar-w: 312px;
-  --log-bg: #2b2620;
-  --log-bar: #332d26;
-  --log-text: #e9dfd0;
-  --log-muted: #a99b88;
-  --log-border: #463e34;
+  --log-bg: #0b0f19;
+  --log-bar: #111827;
+  --log-text: #e5e7eb;
+  --log-muted: #9ca3af;
+  --log-border: #1f2937;
 }
 
 * {
@@ -1380,8 +1380,8 @@ mark {
 
 .stat {
   min-width: 0;
-  padding: 12px 14px;
-  border-radius: var(--ty-radius-md);
+  padding: 8px 12px;
+  border-radius: var(--ty-radius-sm);
   border: 1px solid var(--ty-border);
   background: var(--ty-surface);
   box-shadow: var(--ty-shadow-card);
@@ -1392,27 +1392,27 @@ mark {
   align-items: center;
   gap: 6px;
   color: var(--ty-text-muted);
-  font-size: var(--ty-font-size-sm);
+  font-size: var(--ty-font-size-xs);
 }
 
 .stat-icon {
   display: grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
   background: var(--ty-surface-raised);
   color: var(--ty-text-muted);
 }
 
 .stat-icon svg {
-  width: 13px;
-  height: 13px;
+  width: 12px;
+  height: 12px;
 }
 
 .stat-value {
-  margin: 8px 0 0;
-  font-size: var(--ty-font-size-lg);
+  margin: 4px 0 0;
+  font-size: 13px;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -1475,12 +1475,12 @@ mark {
 
 .log {
   flex: 1;
-  min-height: 220px;
+  min-height: 240px;
   display: flex;
   flex-direction: column;
   border-radius: var(--ty-radius-md);
   background: var(--log-bg);
-  border: 1px solid #3a332b;
+  border: 1px solid var(--log-border);
   box-shadow: var(--ty-shadow-card);
   overflow: hidden;
   color: var(--log-text);
@@ -1746,103 +1746,63 @@ mark {
   background: var(--ty-matcha-hover);
 }
 
-/* ───────── 日志输入栏 ───────── */
+/* ───────── 日志底栏 ───────── */
 
-.log-input-bar {
+.log-footer-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 8px 12px;
+  gap: 12px;
+  padding: 6px 14px;
   background: var(--log-bar);
   border-top: 1px solid var(--log-border);
+  font-size: 11px;
 }
 
-.log-input-main {
-  position: relative;
-  display: flex;
-  align-items: center;
-  flex: 1;
-  min-width: 0;
-}
-
-.log-terminal-input {
-  width: 100%;
-  height: 30px;
-  padding: 0 10px;
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid var(--log-border);
-  border-radius: var(--ty-radius-xs);
-  color: var(--log-text);
-  font-family: var(--ty-font-mono);
-  font-size: var(--ty-font-size-sm);
-  outline: none;
-  transition: border-color 0.15s, box-shadow 0.15s;
-}
-
-.log-terminal-input:focus {
-  border-color: var(--ty-matcha);
-  box-shadow: var(--ty-focus-ring);
-}
-
-.log-terminal-input::placeholder {
+.log-footer-hint {
   color: var(--log-muted);
-  font-family: var(--ty-font-sans);
-  font-size: var(--ty-font-size-xs);
 }
 
-.log-terminal-input:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  background: rgba(0, 0, 0, 0.18);
+.log-footer-hint kbd {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--log-border);
+  color: var(--log-text);
 }
 
-.log-input-error {
-  position: absolute;
-  right: 10px;
-  color: #f2a48f;
-  font-size: var(--ty-font-size-xs);
-  font-family: var(--ty-font-sans);
-  pointer-events: none;
-  background: rgba(43, 31, 26, 0.95);
-  padding: 2px 6px;
-  border-radius: var(--ty-radius-xs);
-  border: 1px solid rgba(224, 109, 83, 0.4);
-}
-
-.log-quick-buttons {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-}
-
-.log-input-btn {
+.log-footer-cmd-btn {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  height: 28px;
+  gap: 6px;
+  height: 24px;
   padding: 0 8px;
-  border: 1px solid var(--log-border);
   border-radius: var(--ty-radius-xs);
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--log-text);
-  font-family: var(--ty-font-mono);
-  font-size: var(--ty-font-size-xs);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  background: rgba(16, 185, 129, 0.1);
+  color: #34d399;
+  font-size: 11px;
   font-weight: 500;
   cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.12s, border-color 0.12s;
+  transition: all 0.15s;
 }
 
-.log-input-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.12);
-  border-color: #5a4f43;
+.log-footer-cmd-btn:hover {
+  background: rgba(16, 185, 129, 0.2);
+  border-color: rgba(16, 185, 129, 0.6);
+  color: #6ee7b7;
 }
 
-.log-input-btn:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
+.log-btn-cmd {
+  background: rgba(16, 185, 129, 0.1) !important;
+  color: #34d399 !important;
+  border-color: rgba(16, 185, 129, 0.3) !important;
+  font-weight: 500;
+}
+
+.log-btn-cmd:hover {
+  background: rgba(16, 185, 129, 0.2) !important;
+  color: #6ee7b7 !important;
 }
 
 /* ───────── 空状态 ───────── */

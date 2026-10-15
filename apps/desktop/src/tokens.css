@@ -1,53 +1,51 @@
 /*
- * 橦云设计令牌 Tongyun design tokens v1 (2026-10-10)
- * 取自 tongyun-planner（橦云手帐）的配色与质感：暖奶茶底、抹茶绿主操作、蜜桃红强调/危险。
- * 同一份文件同步放在 tongyun-git、tongyun-dev（桌面端 + 网页控制台）。改值时几处一起改，
- * 不要在单个页面里另起一套同义变量。
+ * 橦云设计令牌 Tongyun design tokens v2
+ * 现代化开发者控制台风格：纯净冷灰白底、翡翠绿主操作、高对比度深色模式。
  */
 :root {
-  /* 表面 */
-  --ty-bg: #f6f1e9;            /* 奶茶底：窗口/页面背景 */
-  --ty-surface: #fffdf9;       /* 卡片、面板 */
-  --ty-surface-raised: #f0e9de;/* 工具条、悬停、分段控件底 */
-  --ty-surface-sunken: #efe7da;/* 输入框底、代码/日志区浅色版 */
-  --ty-border: #e6dccb;
-  --ty-border-strong: #d6c8b1;
+  /* 表面：现代干练冷灰白，无泛黄杂色 */
+  --ty-bg: #f8fafc;            /* 窗口背景 (Slate-50) */
+  --ty-surface: #ffffff;       /* 卡片、面板、主内容背景 */
+  --ty-surface-raised: #f1f5f9;/* 工具条、悬停、分段控件底 (Slate-100) */
+  --ty-surface-sunken: #e2e8f0;/* 输入框边线底、分隔条 (Slate-200) */
+  --ty-border: #e2e8f0;        /* 基础边框 (Slate-200) */
+  --ty-border-strong: #cbd5e1; /* 强调边框 (Slate-300) */
 
-  /* 文字 */
-  --ty-text: #2d323a;          /* 暖碳灰正文 */
-  --ty-text-muted: #6b6257;    /* 次要文字（在 --ty-bg 上 ≈5.6:1） */
-  --ty-text-subtle: #978b7c;   /* 占位、元信息，只用于非关键文字 */
+  /* 文字：锐利深炭灰 */
+  --ty-text: #0f172a;          /* 标题/正文 (Slate-900) */
+  --ty-text-muted: #64748b;    /* 次要说明 (Slate-500) */
+  --ty-text-subtle: #94a3b8;   /* 占位/元信息 (Slate-400) */
 
-  /* 抹茶绿：主操作、选中、成功 */
-  --ty-matcha: #4d7c5d;
-  --ty-matcha-hover: #3f684c;
-  --ty-matcha-soft: #c4d7b2;
-  --ty-matcha-tint: #edf3e7;
+  /* 翡翠绿：主操作、选中、就绪 */
+  --ty-matcha: #059669;        /* Emerald-600 */
+  --ty-matcha-hover: #047857;  /* Emerald-700 */
+  --ty-matcha-soft: #d1fae5;   /* Emerald-100 */
+  --ty-matcha-tint: #ecfdf5;   /* Emerald-50 */
   --ty-on-matcha: #ffffff;
 
-  /* 蜜桃红：强调、危险、删除 */
-  --ty-peach: #c2593f;
-  --ty-peach-text: #a34e36;
-  --ty-peach-soft: #f5dfdb;
-  --ty-peach-tint: #fcf2f0;
+  /* 珊瑚红：危险、停止、失败 */
+  --ty-peach: #e11d48;         /* Rose-600 */
+  --ty-peach-text: #be123c;    /* Rose-700 */
+  --ty-peach-soft: #ffe4e6;    /* Rose-100 */
+  --ty-peach-tint: #fff1f2;    /* Rose-50 */
 
   /* 辅助色 */
-  --ty-honey: #8b6e3c;         /* 警告/待处理文字 */
-  --ty-honey-tint: #faf1dd;
-  --ty-sky: #3e6f9e;           /* 信息/修改 */
-  --ty-sky-tint: #eaf1f7;
+  --ty-honey: #d97706;         /* 琥珀黄警告 (Amber-600) */
+  --ty-honey-tint: #fffbeb;
+  --ty-sky: #0284c7;           /* 科技蓝信息 (Sky-600) */
+  --ty-sky-tint: #f0f9ff;
 
-  /* 形状 */
-  --ty-radius-xs: 6px;
-  --ty-radius-sm: 8px;
-  --ty-radius-md: 12px;        /* 卡片、窗口圆角 */
-  --ty-radius-lg: 16px;
+  /* 形状：微圆角更具专业感 */
+  --ty-radius-xs: 5px;
+  --ty-radius-sm: 7px;
+  --ty-radius-md: 9px;
+  --ty-radius-lg: 12px;
   --ty-radius-pill: 999px;
 
-  /* 阴影：暖灰，弱 */
-  --ty-shadow-card: 0 1px 2px rgba(120, 110, 95, 0.06), 0 6px 16px -8px rgba(154, 142, 128, 0.18);
-  --ty-shadow-pop: 0 14px 34px -12px rgba(120, 110, 95, 0.28), 0 2px 6px rgba(120, 110, 95, 0.08);
-  --ty-focus-ring: 0 0 0 3px rgba(77, 124, 93, 0.28);
+  /* 阴影 */
+  --ty-shadow-card: 0 1px 2px 0 rgba(15, 23, 42, 0.05);
+  --ty-shadow-pop: 0 10px 15px -3px rgba(15, 23, 42, 0.08), 0 4px 6px -4px rgba(15, 23, 42, 0.04);
+  --ty-focus-ring: 0 0 0 2px rgba(5, 150, 105, 0.25);
 
   /* 间距 */
   --ty-space-1: 4px;
@@ -57,42 +55,42 @@
   --ty-space-5: 24px;
   --ty-space-6: 32px;
 
-  /* 字体 */
-  --ty-font-sans: "Plus Jakarta Sans", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --ty-font-mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  /* 字体：优先清晰的系统开发字体 */
+  --ty-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --ty-font-mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, "JetBrains Mono", monospace;
   --ty-font-size-xs: 11px;
   --ty-font-size-sm: 12px;
   --ty-font-size-md: 13px;
-  --ty-font-size-lg: 15px;
-  --ty-font-size-xl: 20px;
+  --ty-font-size-lg: 14px;
+  --ty-font-size-xl: 18px;
 }
 
-/* 暗色：只在应用本身支持暗色时使用（取自手帐暗色） */
+/* 暗色：深邃高阶纯色黑灰 (Zinc 风格) */
 :root[data-theme="dark"],
 :root.dark {
-  --ty-bg: #17181b;
-  --ty-surface: #1c1d21;
-  --ty-surface-raised: #23252b;
-  --ty-surface-sunken: #141518;
-  --ty-border: #33353a;
-  --ty-border-strong: #44464d;
-  --ty-text: #ece7e0;
-  --ty-text-muted: #a8a096;
-  --ty-text-subtle: #7d766d;
-  --ty-matcha: #6fad84;
-  --ty-matcha-hover: #7fcc9a;
-  --ty-matcha-soft: #3f684c;
-  --ty-matcha-tint: #1f2b23;
-  --ty-on-matcha: #10140f;
-  --ty-peach: #e06d53;
-  --ty-peach-text: #e8866f;
-  --ty-peach-soft: #4a2c27;
-  --ty-peach-tint: #2d1f1c;
-  --ty-honey: #d9b46a;
-  --ty-honey-tint: #2c2619;
-  --ty-sky: #8fb3d6;
-  --ty-sky-tint: #1d2630;
-  --ty-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 6px 16px -8px rgba(0, 0, 0, 0.5);
-  --ty-shadow-pop: 0 14px 34px -12px rgba(0, 0, 0, 0.6);
-  --ty-focus-ring: 0 0 0 3px rgba(111, 173, 132, 0.35);
+  --ty-bg: #09090b;            /* Zinc-950 */
+  --ty-surface: #121215;       /* Zinc-900 */
+  --ty-surface-raised: #1c1c21;/* Zinc-850 */
+  --ty-surface-sunken: #09090b;
+  --ty-border: #27272a;        /* Zinc-800 */
+  --ty-border-strong: #3f3f46; /* Zinc-700 */
+  --ty-text: #f4f4f5;          /* Zinc-100 */
+  --ty-text-muted: #a1a1aa;    /* Zinc-400 */
+  --ty-text-subtle: #71717a;   /* Zinc-500 */
+  --ty-matcha: #10b981;        /* Emerald-500 */
+  --ty-matcha-hover: #34d399;  /* Emerald-400 */
+  --ty-matcha-soft: #064e3b;   /* Emerald-900 */
+  --ty-matcha-tint: #022c22;   /* Emerald-950 */
+  --ty-on-matcha: #ffffff;
+  --ty-peach: #f43f5e;         /* Rose-500 */
+  --ty-peach-text: #fb7185;
+  --ty-peach-soft: #4c0519;
+  --ty-peach-tint: #2e020d;
+  --ty-honey: #f59e0b;
+  --ty-honey-tint: #451a03;
+  --ty-sky: #38bdf8;
+  --ty-sky-tint: #082f49;
+  --ty-shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.4);
+  --ty-shadow-pop: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+  --ty-focus-ring: 0 0 0 2px rgba(16, 185, 129, 0.35);
 }

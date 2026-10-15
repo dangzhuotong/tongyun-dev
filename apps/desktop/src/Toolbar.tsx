@@ -3,21 +3,15 @@ import type { ConfigInfo, Project, ProjectList, Status } from "./types";
 import logoUrl from "./assets/logo.svg";
 import {
   ChevronDownIcon,
-  ExternalIcon,
   FolderIcon,
   GearIcon,
   MoonIcon,
-  PlayIcon,
   PlusIcon,
   RefreshIcon,
-  RestartIcon,
   SearchIcon,
-  StopIcon,
   SunIcon,
-  TerminalIcon,
   FileIcon,
 } from "./icons";
-import { stopButtonTitle } from "./buttonState";
 
 export interface ToolbarProps {
   projects: ProjectList | null;
@@ -25,17 +19,17 @@ export interface ToolbarProps {
   onSelectProject: (id: string) => void;
   currentProject?: Project;
   status: Status | null;
-  busy: "" | "start" | "stop" | "restart" | "install";
-  canStart: boolean;
-  canStop: boolean;
-  canRestart: boolean;
-  canOpenPage: boolean;
-  onStart: () => void;
-  onStop: () => void;
-  onRestart: () => void;
-  onOpenPage: () => void;
+  busy?: "" | "start" | "stop" | "restart" | "install";
+  canStart?: boolean;
+  canStop?: boolean;
+  canRestart?: boolean;
+  canOpenPage?: boolean;
+  onStart?: () => void;
+  onStop?: () => void;
+  onRestart?: () => void;
+  onOpenPage?: () => void;
   onOpenAllPages?: () => void;
-  onOpenTerminal: () => void;
+  onOpenTerminal?: () => void;
   onOpenCreate: () => void;
   onOpenScan: () => void;
   onOpenEdit: () => void;
@@ -59,17 +53,7 @@ export function Toolbar({
   onSelectProject,
   currentProject,
   status,
-  busy,
-  canStart,
-  canStop,
-  canRestart,
-  canOpenPage,
-  onStart,
-  onStop,
-  onRestart,
-  onOpenPage,
-  onOpenAllPages,
-  onOpenTerminal,
+  busy = "",
   onOpenCreate,
   onOpenScan,
   onRefresh,
@@ -88,11 +72,9 @@ export function Toolbar({
   const [projectDropdownOpen, setProjectDropdownOpen] = useState(false);
   const [projectFilter, setProjectFilter] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [pagesOpen, setPagesOpen] = useState(false);
 
   const projectDropdownRef = useRef<HTMLDivElement>(null);
   const settingsDropdownRef = useRef<HTMLDivElement>(null);
-  const pagesDropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -102,9 +84,6 @@ export function Toolbar({
       }
       if (settingsDropdownRef.current && !settingsDropdownRef.current.contains(target)) {
         setSettingsOpen(false);
-      }
-      if (pagesDropdownRef.current && !pagesDropdownRef.current.contains(target)) {
-        setPagesOpen(false);
       }
     }
     document.addEventListener("mousedown", handleClickOutside);
@@ -235,141 +214,39 @@ export function Toolbar({
         </button>
       </div>
 
-      {/* Center: Running Controls for Selected Project */}
-      {currentProject ? (
-        <div className="flex items-center gap-1.5">
-          <div className="inline-flex rounded-md shadow-xs" role="group">
-            <button
-              type="button"
-              disabled={!canStart}
-              onClick={onStart}
-              className={`flex items-center gap-1 px-3 py-1 rounded-l-md text-xs font-semibold border transition-colors cursor-pointer ${
-                canStart
-                  ? "bg-[var(--color-accent)] text-white border-[var(--color-accent)] hover:opacity-90"
-                  : "bg-[var(--color-surface-raised)] text-[var(--color-text-subtle)] border-[var(--color-border)] opacity-60 cursor-not-allowed"
+      {/* Center: Clean project indicator or status summary */}
+      <div className="hidden md:flex items-center gap-2">
+        {currentProject ? (
+          <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-[var(--color-surface-raised)] border border-[var(--color-border)] text-xs shadow-xs">
+            <span
+              className={`w-2 h-2 rounded-full ${
+                status?.state === "ready"
+                  ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]"
+                  : status?.state === "starting" || status?.state === "installing"
+                  ? "bg-amber-500 animate-pulse"
+                  : status?.state === "failed"
+                  ? "bg-rose-500"
+                  : "bg-slate-400"
               }`}
-              title={busy === "start" ? "启动中..." : "启动服务"}
-            >
-              <PlayIcon width={12} height={12} />
-              <span>{busy === "start" ? "启动中" : "启动"}</span>
-            </button>
-            <button
-              type="button"
-              disabled={!canStop}
-              onClick={onStop}
-              className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium border-y border-r transition-colors cursor-pointer ${
-                canStop
-                  ? "bg-[var(--color-surface)] text-[var(--color-danger)] border-[var(--color-border)] hover:bg-[var(--ty-peach-tint)]"
-                  : "bg-[var(--color-surface-raised)] text-[var(--color-text-subtle)] border-[var(--color-border)] opacity-50 cursor-not-allowed"
-              }`}
-              title={stopButtonTitle(status)}
-            >
-              <StopIcon width={12} height={12} />
-              <span>{busy === "stop" ? "停止中" : "停止"}</span>
-            </button>
-            <button
-              type="button"
-              disabled={!canRestart}
-              onClick={onRestart}
-              className={`flex items-center gap-1 px-2 py-1 rounded-r-md text-xs font-medium border-y border-r transition-colors cursor-pointer ${
-                canRestart
-                  ? "bg-[var(--color-surface)] text-[var(--color-text)] border-[var(--color-border)] hover:bg-[var(--color-surface-raised)]"
-                  : "bg-[var(--color-surface-raised)] text-[var(--color-text-subtle)] border-[var(--color-border)] opacity-50 cursor-not-allowed"
-              }`}
-              title={busy === "restart" ? "重启中..." : "重启服务"}
-            >
-              <RestartIcon width={12} height={12} />
-            </button>
+            />
+            <span className="font-semibold text-[var(--color-text)]">{currentProject.name}</span>
+            {currentProject.port ? (
+              <span className="font-mono text-[11px] text-[var(--color-text-muted)]">
+                :{currentProject.port}
+              </span>
+            ) : null}
+            {currentProject.group && (
+              <span className="text-[10px] px-1.5 py-0.2 rounded bg-[var(--color-surface)] text-[var(--color-text-muted)] border border-[var(--color-border)]">
+                {currentProject.group}
+              </span>
+            )}
           </div>
-
-          <div className="h-3.5 w-px bg-[var(--color-border)] mx-1 shrink-0" />
-
-          {/* Web page link(s) */}
-          {currentProject.links && currentProject.links.length > 1 ? (
-            <div className="relative inline-flex" ref={pagesDropdownRef}>
-              <button
-                type="button"
-                disabled={!canOpenPage}
-                onClick={onOpenPage}
-                className="flex items-center gap-1 px-2 py-1 rounded-l-md border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-raised)] disabled:opacity-50 transition-colors text-xs cursor-pointer"
-                title={currentProject.links[0].url}
-              >
-                <ExternalIcon width={13} height={13} />
-                <span className="max-w-[80px] truncate">{currentProject.links[0].title || "网页"}</span>
-              </button>
-              <button
-                type="button"
-                disabled={!canOpenPage}
-                onClick={() => setPagesOpen(!pagesOpen)}
-                className="px-1.5 py-1 rounded-r-md border-y border-r border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-raised)] disabled:opacity-50 transition-colors text-xs cursor-pointer"
-                title="展开全部链接"
-              >
-                <ChevronDownIcon width={11} height={11} />
-              </button>
-              {pagesOpen && (
-                <div className="absolute left-0 mt-8 w-56 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] shadow-lg z-50 py-1 text-xs">
-                  {currentProject.links.map((link, idx) => (
-                    <button
-                      key={idx}
-                      type="button"
-                      onClick={() => {
-                        setPagesOpen(false);
-                        window.open(link.url, "_blank");
-                      }}
-                      className="w-full text-left px-3 py-1.5 flex items-center gap-2 hover:bg-[var(--color-surface-raised)] truncate"
-                      title={link.url}
-                    >
-                      <ExternalIcon width={12} height={12} />
-                      <span className="truncate">{link.title || link.url}</span>
-                    </button>
-                  ))}
-                  {onOpenAllPages && (
-                    <>
-                      <div className="my-1 border-t border-[var(--color-border)]/60" />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setPagesOpen(false);
-                          onOpenAllPages();
-                        }}
-                        className="w-full text-left px-3 py-1.5 text-[var(--color-accent)] font-medium hover:bg-[var(--color-surface-raised)]"
-                      >
-                        全部打开 ({currentProject.links.length})
-                      </button>
-                    </>
-                  )}
-                </div>
-              )}
-            </div>
-          ) : (
-            <button
-              type="button"
-              disabled={!canOpenPage}
-              onClick={onOpenPage}
-              className="flex items-center gap-1 px-2.5 py-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-raised)] disabled:opacity-50 transition-colors text-xs font-medium cursor-pointer"
-              title={currentProject.links?.[0]?.url || "打开网页"}
-            >
-              <ExternalIcon width={13} height={13} />
-              <span>{currentProject.links?.[0]?.title || "打开网页"}</span>
-            </button>
-          )}
-
-          {/* Terminal button */}
-          <button
-            type="button"
-            onClick={onOpenTerminal}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-raised)] transition-colors text-xs font-medium cursor-pointer"
-            title="在系统独立终端中交互运行项目"
-          >
-            <TerminalIcon width={13} height={13} />
-            <span>终端</span>
-          </button>
-        </div>
-      ) : (
-        <div className="text-xs text-[var(--color-text-muted)] hidden md:block">
-          选择左侧项目进行启停控制与日志监控
-        </div>
-      )}
+        ) : (
+          <span className="text-xs text-[var(--color-text-muted)]">
+            选择左侧项目进行启停控制与日志监控
+          </span>
+        )}
+      </div>
 
       {/* Right: Environment, Batch Tools, Theme, Settings */}
       <div className="flex items-center gap-2">

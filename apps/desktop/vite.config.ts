@@ -1,6 +1,10 @@
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 export default defineConfig({
   plugins: [tailwindcss(), react()],
@@ -9,6 +13,10 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
     host: "127.0.0.1",
+    // Tests import the workspace Cargo.toml and workflow files above this package.
+    fs: {
+      allow: [repoRoot],
+    },
   },
   envPrefix: ["VITE_", "TAURI_"],
   build: {

@@ -1,11 +1,10 @@
 name: Desktop build
 
-# Manual runs, plus every push to main. Pull requests stay on check.yml.
+# Optional unsigned artifact build. Does not create a GitHub Release and does
+# not write latest.json. Official installers are published by release.yml on
+# tags v*. Pushes to main stay on check.yml and do not package installers.
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 permissions:
   contents: read

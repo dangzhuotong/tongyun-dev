@@ -45,6 +45,9 @@ export interface ToolbarProps {
   onPickConfig: () => void;
   onOpenConfigFile: () => void;
   onReloadConfig: () => void;
+  appVersion: string;
+  checkingUpdate?: boolean;
+  onCheckUpdate: () => void;
 }
 
 export function Toolbar({
@@ -68,6 +71,9 @@ export function Toolbar({
   onPickConfig,
   onOpenConfigFile,
   onReloadConfig,
+  appVersion,
+  checkingUpdate = false,
+  onCheckUpdate,
 }: ToolbarProps) {
   const [projectDropdownOpen, setProjectDropdownOpen] = useState(false);
   const [projectFilter, setProjectFilter] = useState("");
@@ -330,6 +336,23 @@ export function Toolbar({
 
           {settingsOpen && (
             <div className="absolute right-0 mt-1 w-64 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-xl z-50 py-1.5 text-xs animate-in fade-in zoom-in-95 duration-100">
+              <div className="px-3 py-2 border-b border-[var(--color-border)]/60 flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <span className="text-[10px] uppercase font-bold text-[var(--color-text-muted)]">当前版本</span>
+                  <p className="font-mono text-[11px] text-[var(--color-text)] mt-0.5">v{appVersion}</p>
+                </div>
+                <button
+                  type="button"
+                  disabled={checkingUpdate}
+                  onClick={() => {
+                    setSettingsOpen(false);
+                    onCheckUpdate();
+                  }}
+                  className="shrink-0 px-2 py-1 rounded-md text-[11px] font-medium bg-[var(--color-accent)] text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  {checkingUpdate ? "正在检查…" : "检查更新"}
+                </button>
+              </div>
               <div className="px-3 py-1.5 border-b border-[var(--color-border)]/60">
                 <span className="text-[10px] uppercase font-bold text-[var(--color-text-muted)]">配置文件</span>
                 <p className="font-mono text-[11px] text-[var(--color-text)] truncate mt-0.5" title={configInfo?.path || ""}>

@@ -7,13 +7,17 @@ export interface AboutModalProps {
   onClose: () => void;
   version?: string;
   configPath?: string;
+  checkingUpdate?: boolean;
+  onCheckUpdate?: () => void;
 }
 
 export function AboutModal({
   isOpen,
   onClose,
-  version = "0.1.0",
+  version = "0.2.0",
   configPath,
+  checkingUpdate = false,
+  onCheckUpdate,
 }: AboutModalProps) {
   useEffect(() => {
     if (!isOpen) return;
@@ -64,7 +68,7 @@ export function AboutModal({
               本机微服务与多项目协同开发管理工具 · 服务 AI 与人
             </p>
             <div className="inline-block mt-2 px-2.5 py-0.5 rounded-full bg-[var(--color-accent)]/10 border border-[var(--color-accent)]/20 text-[var(--color-accent)] text-xs font-mono font-medium">
-              v{version}
+              当前版本 v{version}
             </div>
           </div>
 
@@ -92,7 +96,17 @@ export function AboutModal({
         </div>
 
         {/* Footer */}
-        <div className="px-4 py-2.5 bg-[var(--color-surface-raised)] border-t border-[var(--color-border)] flex justify-end">
+        <div className="px-4 py-2.5 bg-[var(--color-surface-raised)] border-t border-[var(--color-border)] flex justify-end gap-2">
+          {onCheckUpdate && (
+            <button
+              type="button"
+              onClick={onCheckUpdate}
+              disabled={checkingUpdate}
+              className="px-4 py-1.5 rounded-md text-xs font-medium border border-[var(--color-border)] text-[var(--color-text)] hover:bg-[var(--color-surface)] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {checkingUpdate ? "正在检查更新…" : "检查更新"}
+            </button>
+          )}
           <button
             type="button"
             onClick={onClose}

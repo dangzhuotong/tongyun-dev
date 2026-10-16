@@ -391,3 +391,227 @@ fn status_without_id_continues_past_bad_log_dir() {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn status_json_single_object_has_stable_shape() {
+    let f = Fixture::new(r#"["echo", "ok"]"#, "");
+    let expected = f.loaded.status("demo").unwrap();
+    let output = f.cli(&["status", "demo", "--json"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("status --json is one object");
+    assert!(value.is_object());
+
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec![
+            "deps_missing",
+            "elapsed_secs",
+            "failure",
+            "id",
+            "install_command",
+            "log_path",
+            "login_probe",
+            "name",
+            "pid",
+            "pid_path",
+            "port",
+            "port_conflict",
+            "port_holder",
+            "port_open",
+            "root",
+            "running",
+            "state",
+            "timeout_secs",
+        ],
+        "unexpected status JSON keys: {value}"
+    );
+
+    assert_eq!(value["id"], "demo");
+    assert_eq!(value["name"], "demo");
+    assert_eq!(value["running"], false);
+    assert_eq!(value["state"], "stopped");
+    assert!(value["elapsed_secs"].is_null());
+    assert_eq!(
+        value["timeout_secs"].as_u64().unwrap(),
+        expected.timeout_secs
+    );
+    assert!(value["failure"].is_null());
+    assert!(value["pid"].is_null());
+    assert_eq!(value["port"].as_u64().unwrap(), u64::from(expected.port));
+    assert_eq!(value["port_open"], false);
+    assert_eq!(value["port_conflict"], false);
+    assert_eq!(value["port_holder"], "");
+    assert_eq!(value["deps_missing"], false);
+    assert_eq!(value["install_command"], "");
+    assert_eq!(value["log_path"], expected.log_path);
+    assert_eq!(value["pid_path"], expected.pid_path);
+    assert_eq!(value["root"], f.root.display().to_string());
+
+    let probe = &value["login_probe"];
+    let mut probe_keys: Vec<&str> = probe
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    probe_keys.sort_unstable();
+    assert_eq!(probe_keys, vec!["http_code", "ok", "url"]);
+    assert_eq!(probe["url"], "");
+    assert!(probe["http_code"].is_null());
+    assert_eq!(probe["ok"], false);
+
+    // Optional diagnostics stay absent when they carry no information.
+    assert!(value.get("hints").is_none());
+    assert!(value.get("active_profile").is_none());
+    assert!(value.get("resolve_error").is_none());
+
+    // The same record is what `status --json` (no id) wraps in an array.
+    let all: Value =
+        serde_json::from_slice(&f.cli(&["status", "--json"]).stdout).expect("status --json array");
+    assert!(all.is_array());
+    let rows = all.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0], value);
+
+    // Plain output mirrors the machine-readable state.
+    let text = f.cli(&["status", "demo"]);
+    assert!(text.status.success());
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains("state=stopped"), "{text}");
+    assert!(text.contains("running=false"), "{text}");
+}
+
+#[test]
+fn status_json_reports_probe_url_and_unknown_project_error() {
+    let f = Fixture::new(
+        r#"["echo", "ok"]"#,
+        "health_url = \"http://127.0.0.1:9/health\"\n",
+    );
+    let value: Value =
+        serde_json::from_slice(&f.cli(&["status", "demo", "--json"]).stdout).unwrap();
+    assert_eq!(value["login_probe"]["url"], "http://127.0.0.1:9/health");
+    assert_eq!(value["login_probe"]["ok"], false);
+    assert!(value["login_probe"]["http_code"].is_null());
+
+    let missing = f.cli(&["status", "nope", "--json"]);
+    assert!(!missing.status.success());
+    assert!(missing.stdout.is_empty(), "no JSON for an unknown project");
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("unknown project"));
+}
+
+#[test]
+fn group_add_rejects_invalid_keys_and_keeps_config_untouched() {
+    let f = Fixture::new(r#"["echo", "ok"]"#, "[group.fe]\nlabel = \"前端\"\n");
+    let before = fs::read_to_string(&f.config).unwrap();
+
+    let cases: Vec<(String, &str)> = vec![
+        ("BadKey".to_string(), "只能包含小写字母"),
+        ("has space".to_string(), "只能包含小写字母"),
+        (String::new(), "不能为空"),
+        ("a".repeat(41), "长度不能超过 40"),
+    ];
+    for (key, needle) in &cases {
+        let out = f.cli(&["group-add", key]);
+        assert!(
+            !out.status.success(),
+            "group-add `{key}` should fail, stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(needle), "key `{key}`: {stderr}");
+    }
+
+    // Duplicate key is refused even with a fresh label.
+    let dup = f.cli(&["group-add", "fe", "--label", "重复"]);
+    assert!(!dup.status.success());
+    assert!(String::from_utf8_lossy(&dup.stderr).contains("已存在"));
+
+    // No failed call may have rewritten the config.
+    assert_eq!(fs::read_to_string(&f.config).unwrap(), before);
+
+    // A valid key is written with its label.
+    let ok = f.cli(&["group-add", "backend", "--label", "后端服务"]);
+    assert!(
+        ok.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    let text = fs::read_to_string(&f.config).unwrap();
+    assert!(text.contains("[group.backend]"), "{text}");
+    assert!(text.contains("label = \"后端服务\""), "{text}");
+}
+
+#[test]
+fn group_command_validates_key_and_targets_existing_or_new_groups() {
+    let f = Fixture::new(r#"["echo", "ok"]"#, "[group.fe]\nlabel = \"前端\"\n");
+
+    // Unknown label is rejected and points at group-add.
+    let unknown = f.cli(&["group", "demo", "未知分组"]);
+    assert!(!unknown.status.success());
+    let stderr = String::from_utf8_lossy(&unknown.stderr);
+    assert!(stderr.contains("未找到分组 `未知分组`"), "{stderr}");
+    assert!(
+        stderr.contains("tongyun-dev group-add <key> --label 未知分组"),
+        "{stderr}"
+    );
+
+    // A key that is not an existing group and is not a legal key is rejected too.
+    let bad_key = f.cli(&["group", "demo", "BadKey"]);
+    assert!(!bad_key.status.success());
+    assert!(
+        String::from_utf8_lossy(&bad_key.stderr).contains("未找到分组 `BadKey`"),
+        "{}",
+        String::from_utf8_lossy(&bad_key.stderr)
+    );
+
+    // Neither key nor --clear is a usage error.
+    let no_arg = f.cli(&["group", "demo"]);
+    assert!(!no_arg.status.success());
+    assert!(String::from_utf8_lossy(&no_arg.stderr).contains("请指定分组 key"));
+
+    // Unknown project is reported by core, before any group is created.
+    let before = fs::read_to_string(&f.config).unwrap();
+    let no_proj = f.cli(&["group", "nope", "backend"]);
+    assert!(!no_proj.status.success());
+    assert!(String::from_utf8_lossy(&no_proj.stderr).contains("unknown project"));
+    assert_eq!(fs::read_to_string(&f.config).unwrap(), before);
+
+    // Existing label resolves to its key.
+    let by_label = f.cli(&["group", "demo", "前端"]);
+    assert!(
+        by_label.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&by_label.stderr)
+    );
+    assert!(String::from_utf8_lossy(&by_label.stdout).contains("分组设置为 `fe`"));
+
+    // A legal new key is accepted and registers the group.
+    let new_key = f.cli(&["group", "demo", "backend"]);
+    assert!(
+        new_key.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&new_key.stderr)
+    );
+    let text = fs::read_to_string(&f.config).unwrap();
+    assert!(text.contains("group = \"backend\""), "{text}");
+    assert!(text.contains("[group.backend]"), "{text}");
+
+    // --clear drops the project grouping but leaves the groups table intact.
+    let cleared = f.cli(&["group", "demo", "--clear"]);
+    assert!(cleared.status.success());
+    let text = fs::read_to_string(&f.config).unwrap();
+    assert!(!text.contains("group = \"backend\""), "{text}");
+    assert!(text.contains("[group.fe]"), "{text}");
+    assert!(text.contains("[group.backend]"), "{text}");
+}

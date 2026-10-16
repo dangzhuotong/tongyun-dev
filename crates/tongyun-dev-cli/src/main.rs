@@ -2,12 +2,13 @@
 //! console (`ui`) and the desktop shell call the same core.
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 use tongyun_dev_cli::server::{start_ui_server, DEFAULT_UI_PORT};
 use tongyun_dev_core::{
     unresolved_status, Loaded, NewProject, ScanReport, StatusJson, DEFAULT_ADD_PORT,
-    DEFAULT_SCAN_DEPTH,
+    DEFAULT_SCAN_DEPTH, DEP_START_SKIPPED,
 };
 
 #[derive(Parser, Debug)]
@@ -420,6 +421,30 @@ fn machine_operation(cmd: &Cmd) -> Option<(&str, &str)> {
 fn run_machine_operation(config: Option<&std::path::Path>, cmd: &Cmd) -> Result<()> {
     let (action, id) = machine_operation(cmd).expect("JSON operation");
     let loaded = tongyun_dev_core::load(config);
+    // `start <组名> --json` is a batch, same as without --json. The machine
+    // wrapper only knows a positional id, so a group key must be dispatched
+    // before it is treated as a missing project.
+    if action == "start" {
+        if let Ok(ref loaded) = loaded {
+            if !loaded.contains_project(id) && loaded.contains_group(id) {
+                let (profile, timeout) = match cmd {
+                    Cmd::Start {
+                        profile, timeout, ..
+                    } => (profile.as_deref(), *timeout),
+                    _ => (None, None),
+                };
+                return run_batch_start_restart(
+                    loaded,
+                    action,
+                    false,
+                    Some(id),
+                    profile,
+                    timeout,
+                    true,
+                );
+            }
+        }
+    }
     let mut status = None;
     let mut logs = None;
     let result: Result<()> = (|| {
@@ -525,6 +550,7 @@ fn run_batch_start_restart(
 
     let mut results = Vec::with_capacity(total);
     let mut any_err = false;
+    let mut failed_ids = HashSet::new();
 
     for (idx, id) in ordered_ids.iter().enumerate() {
         if !json {
@@ -538,6 +564,24 @@ fn run_batch_start_restart(
                     "重启"
                 }
             );
+        }
+        if loaded
+            .depends_on_of(id)
+            .iter()
+            .any(|dep| failed_ids.contains(dep))
+        {
+            any_err = true;
+            failed_ids.insert(id.clone());
+            if !json {
+                eprintln!("  跳过: {DEP_START_SKIPPED}");
+            }
+            results.push(serde_json::json!({
+                "id": id,
+                "ok": false,
+                "status": loaded.status(id).ok(),
+                "error": DEP_START_SKIPPED,
+            }));
+            continue;
         }
         let res = if action == "restart" {
             loaded.restart_with_profile(id, profile, timeout.map(Duration::from_secs))
@@ -558,6 +602,7 @@ fn run_batch_start_restart(
             }
             Err(e) => {
                 any_err = true;
+                failed_ids.insert(id.clone());
                 let err_msg = format!("{e:#}");
                 if !json {
                     eprintln!("  失败: {err_msg}");

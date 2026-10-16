@@ -1566,3 +1566,62 @@ port = 8080
         "config should NOT contain ghost_patch_grp after failed patch: {toml_content_after_patch}"
     );
 }
+
+#[test]
+fn group_restart_waits_and_skips_downstream_when_dependency_exits() {
+    let dir = temp_dir("grp_restart_skip");
+    let d = dir.to_string_lossy().replace('\\', "/");
+    let cfg = dir.join("projects.toml");
+    let web_hits = dir.join("web.hits");
+    let web_s = web_hits.to_string_lossy().replace('\\', "/");
+    fs::write(
+        &cfg,
+        format!(
+            r#"
+[group.shop]
+members = ["demo_api", "demo_web"]
+
+[projects.demo_api]
+name = "Demo API"
+group = "shop"
+root = "{d}"
+port = 8080
+log_dir = "{d}/logs"
+start_timeout_secs = 5
+start = ["sh", "-c", "exit 1"]
+
+[projects.demo_web]
+name = "Demo Web"
+group = "shop"
+root = "{d}"
+port = 5173
+log_dir = "{d}/logs"
+start_timeout_secs = 5
+depends_on = ["demo_api"]
+start = ["sh", "-c", "echo ran >> '{web_s}'"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let ui_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let ui_port = ui_listener.local_addr().unwrap().port();
+    let cfg_clone = cfg.clone();
+    thread::spawn(move || {
+        let _ = tongyun_dev_cli::server::serve(ui_listener, cfg_clone, ui_port);
+    });
+
+    let resp = post_json(ui_port, "/api/groups/shop/restart", "{}", None);
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
+    let value: serde_json::Value = serde_json::from_str(body).expect(body);
+    assert_eq!(value["ok"], false, "{value}");
+    assert_eq!(value["results"][0]["id"], "demo_api");
+    assert_eq!(value["results"][0]["ok"], false);
+    assert_eq!(value["results"][1]["id"], "demo_web");
+    assert_eq!(value["results"][1]["error"], "依赖服务启动失败，已跳过");
+    assert!(
+        !web_hits.exists(),
+        "group restart started demo_web before demo_api failed"
+    );
+}

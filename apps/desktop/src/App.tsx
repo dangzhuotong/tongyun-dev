@@ -16,6 +16,7 @@ import { ProjectForm } from "./ProjectForm";
 import { ScanDialog } from "./ScanDialog";
 import { countByFilter, filterProjects, STATUS_FILTERS, type StatusFilter } from "./projectFilter";
 import { canStopProject, stopButtonTitle } from "./buttonState";
+import { effectiveStartCommand } from "./startCommand";
 import logoUrl from "./assets/logo.svg";
 import {
   AlertIcon,
@@ -712,7 +713,7 @@ export function App() {
   }
 
   async function copyStartCommand() {
-    const cmd = current?.start_command?.trim() || "";
+    const cmd = effectiveStartCommand(current, selectedProfile);
     if (!cmd) {
       setError("没有可复制的启动命令");
       return;
@@ -1503,7 +1504,7 @@ export function App() {
                     type="button"
                     className="btn btn-secondary btn-xs"
                     onClick={copyStartCommand}
-                    title={current.start_command || "复制启动命令"}
+                    title={effectiveStartCommand(current, selectedProfile) || "复制启动命令"}
                   >
                     {copiedCmd ? "已复制" : "复制启动命令"}
                   </button>

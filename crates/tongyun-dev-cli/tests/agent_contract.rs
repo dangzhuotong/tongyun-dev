@@ -615,3 +615,82 @@ fn group_command_validates_key_and_targets_existing_or_new_groups() {
     assert!(text.contains("[group.fe]"), "{text}");
     assert!(text.contains("[group.backend]"), "{text}");
 }
+
+#[test]
+fn group_start_skips_downstream_without_retrying_failed_dependency() {
+    let root = std::env::temp_dir().join(format!(
+        "tongyun_group_skip_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(root.join("logs")).unwrap();
+    let hits = root.join("api.hits");
+    let web_hits = root.join("web.hits");
+    let root_s = root.display().to_string();
+    let hits_s = hits.display().to_string();
+    let web_s = web_hits.display().to_string();
+    let config = root.join("projects.toml");
+    fs::write(
+        &config,
+        format!(
+            r#"
+[group.shop]
+members = ["demo_api", "demo_web"]
+
+[projects.demo_api]
+name = "Demo API"
+group = "shop"
+root = "{root_s}"
+port = 8080
+log_dir = "{root_s}/logs"
+start_timeout_secs = 5
+start = ["sh", "-c", "echo x >> '{hits_s}'; exit 1"]
+
+[projects.demo_web]
+name = "Demo Web"
+group = "shop"
+root = "{root_s}"
+port = 5173
+log_dir = "{root_s}/logs"
+start_timeout_secs = 5
+depends_on = ["demo_api"]
+start = ["sh", "-c", "echo ran >> '{web_s}'"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_tongyun-dev"))
+        .arg("--config")
+        .arg(&config)
+        .args(["start", "shop", "--json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let value: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|err| {
+        panic!(
+            "stdout is not JSON ({err}): {stdout}\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    assert_eq!(value["ok"], false, "{value}");
+    assert_eq!(value["results"][0]["id"], "demo_api");
+    assert_eq!(value["results"][0]["ok"], false);
+    assert_eq!(value["results"][1]["id"], "demo_web");
+    assert_eq!(value["results"][1]["error"], "依赖服务启动失败，已跳过");
+    let api_hits = fs::read_to_string(&hits).unwrap_or_default();
+    assert_eq!(
+        api_hits.lines().count(),
+        1,
+        "failed dependency was started {api_hits:?}"
+    );
+    assert!(
+        !web_hits.exists(),
+        "downstream command ran: {}",
+        fs::read_to_string(&web_hits).unwrap_or_default()
+    );
+    let _ = fs::remove_dir_all(&root);
+}

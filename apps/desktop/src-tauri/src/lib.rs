@@ -121,9 +121,15 @@ async fn restart_batch(
 ) -> Result<BatchOutput, String> {
     blocking(move || {
         let loaded = tongyun_dev_core::load(None).map_err(report)?;
-        loaded
-            .restart_batch_detached(group.as_deref(), ids.as_deref())
-            .map_err(report)
+        if group.is_some() {
+            loaded
+                .restart_batch(group.as_deref(), ids.as_deref(), None)
+                .map_err(report)
+        } else {
+            loaded
+                .restart_batch_detached(group.as_deref(), ids.as_deref())
+                .map_err(report)
+        }
     })
     .await
 }

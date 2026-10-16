@@ -22,6 +22,8 @@ pub use toolchain::{
 const START_READY_DEFAULT_SECS: u64 = 180;
 /// 有启动标记、进程却找不到时，先等这么多秒再判定「进程已退出」。
 const START_EXIT_GRACE_SECS: u64 = 3;
+/// Batch start/restart records this instead of launching a project whose dependency failed.
+pub const DEP_START_SKIPPED: &str = "依赖服务启动失败，已跳过";
 /// Where logs / pid files go when a project sets no `log_dir`.
 pub const DEFAULT_LOG_DIR: &str = "~/.tongyun-dev/logs";
 const LOG_TAIL_MAX_LINES: usize = 500;
@@ -313,6 +315,9 @@ pub struct ProjectRow {
     /// Shell line a person can paste to start the project (assembled start command).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub start_command: String,
+    /// Assembled start line for each profile name. Copy uses the selected profile.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub profile_start_commands: std::collections::BTreeMap<String, String>,
     /// Set when this row could not be resolved (for example a bad `log_dir`).
     /// The rest of the catalog still loads, so the main window can open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -540,6 +545,7 @@ fn row_from_resolved(
     configured: bool,
     default_profile: Option<String>,
     profiles: std::collections::BTreeMap<String, ProfileConfig>,
+    profile_start_commands: std::collections::BTreeMap<String, String>,
 ) -> ProjectRow {
     ProjectRow {
         id: resolved.id.clone(),
@@ -573,6 +579,7 @@ fn row_from_resolved(
         profiles,
         depends_on: resolved.depends_on.clone(),
         start_command: display_command(&resolved.assembled_start()),
+        profile_start_commands,
         resolve_error: None,
     }
 }
@@ -621,6 +628,7 @@ fn unresolved_row(id: &str, raw: Option<&Project>, err: String) -> ProjectRow {
         profiles: raw.map(|p| p.profiles.clone()).unwrap_or_default(),
         depends_on: raw.map(|p| p.depends_on.clone()).unwrap_or_default(),
         start_command: raw.map(|p| display_command(&p.start)).unwrap_or_default(),
+        profile_start_commands: std::collections::BTreeMap::new(),
         resolve_error: Some(err),
     }
 }
@@ -639,13 +647,7 @@ impl Loaded {
                 Ok(resolved) => {
                     let configured = resolved.port > 0
                         && (!resolved.active_start().is_empty() || resolved.tomcat.is_some());
-                    let raw = self.config.projects.get(&id);
-                    projects.push(row_from_resolved(
-                        &resolved,
-                        configured,
-                        raw.and_then(|p| p.default_profile.clone()),
-                        raw.map(|p| p.profiles.clone()).unwrap_or_default(),
-                    ));
+                    projects.push(self.finish_row(&resolved, configured));
                 }
                 Err(err) => {
                     let raw = self.config.projects.get(&id);
@@ -745,6 +747,42 @@ impl Loaded {
     /// True when `id` is a registered project.
     pub fn contains_project(&self, id: &str) -> bool {
         self.config.projects.contains_key(id.trim())
+    }
+
+    /// Direct `depends_on` ids for a project. Empty when the id is unknown.
+    pub fn depends_on_of(&self, id: &str) -> Vec<String> {
+        self.config
+            .projects
+            .get(id.trim())
+            .map(|p| p.depends_on.clone())
+            .unwrap_or_default()
+    }
+
+    fn profile_start_commands(&self, id: &str) -> std::collections::BTreeMap<String, String> {
+        let Some(raw) = self.config.projects.get(id) else {
+            return std::collections::BTreeMap::new();
+        };
+        let mut out = std::collections::BTreeMap::new();
+        for name in raw.profiles.keys() {
+            if let Ok(resolved) = self.resolve_with_profile(id, Some(name.as_str())) {
+                let line = display_command(&resolved.assembled_start());
+                if !line.is_empty() {
+                    out.insert(name.clone(), line);
+                }
+            }
+        }
+        out
+    }
+
+    fn finish_row(&self, resolved: &Resolved, configured: bool) -> ProjectRow {
+        let raw = self.config.projects.get(&resolved.id);
+        row_from_resolved(
+            resolved,
+            configured,
+            raw.and_then(|p| p.default_profile.clone()),
+            raw.map(|p| p.profiles.clone()).unwrap_or_default(),
+            self.profile_start_commands(&resolved.id),
+        )
     }
 
     /// True when `key` is a declared group or at least one project sets `group = key`.
@@ -1480,17 +1518,10 @@ impl Loaded {
                 Some(p) => p,
                 None => continue,
             };
-            let has_failed_dep = p.depends_on.iter().any(|d| failed_ids.contains(d));
-            if has_failed_dep {
+            if p.depends_on.iter().any(|d| failed_ids.contains(d)) {
                 failed += 1;
                 failed_ids.insert(id.clone());
-                results.push(BatchItemResult {
-                    id: id.clone(),
-                    success: false,
-                    ok: false,
-                    status: self.status(id).ok(),
-                    error: Some("依赖服务启动失败，已跳过".to_string()),
-                });
+                results.push(self.skipped_dep_item(id));
                 continue;
             }
 
@@ -1557,11 +1588,36 @@ impl Loaded {
 
         let sorted = self.sorted_projects_for_start(&to_run);
         let mut results = Vec::new();
+        let mut failed_ids = std::collections::HashSet::new();
         let mut succeeded = 0;
         let mut failed = 0;
 
         for id in &sorted {
+            let depends_on = self
+                .config
+                .projects
+                .get(id)
+                .map(|p| p.depends_on.clone())
+                .unwrap_or_default();
+            if depends_on.iter().any(|d| failed_ids.contains(d)) {
+                failed += 1;
+                failed_ids.insert(id.clone());
+                results.push(self.skipped_dep_item(id));
+                continue;
+            }
             match self.start_detached_with_profile(id, None) {
+                Ok(st) if st.state == LifeState::Failed => {
+                    failed += 1;
+                    failed_ids.insert(id.clone());
+                    let error = st.failure.clone().unwrap_or_else(|| "启动失败".to_string());
+                    results.push(BatchItemResult {
+                        id: id.clone(),
+                        success: false,
+                        ok: false,
+                        status: Some(st),
+                        error: Some(error),
+                    });
+                }
                 Ok(st) => {
                     succeeded += 1;
                     results.push(BatchItemResult {
@@ -1574,6 +1630,7 @@ impl Loaded {
                 }
                 Err(err) => {
                     failed += 1;
+                    failed_ids.insert(id.clone());
                     results.push(BatchItemResult {
                         id: id.clone(),
                         success: false,
@@ -1651,6 +1708,16 @@ impl Loaded {
             failed,
             results,
         })
+    }
+
+    fn skipped_dep_item(&self, id: &str) -> BatchItemResult {
+        BatchItemResult {
+            id: id.to_string(),
+            success: false,
+            ok: false,
+            status: self.status(id).ok(),
+            error: Some(DEP_START_SKIPPED.to_string()),
+        }
     }
 
     /// 批量重启项目（先逆序全部停止，再正序启动）
@@ -3663,6 +3730,9 @@ pub fn extract_start_failure_line(log: &str) -> Option<String> {
     if let Some(line) = lines.iter().rev().find(|l| is_port_in_use(l)) {
         return Some(prefix_failure("端口被占用", line));
     }
+    if let Some(line) = lines.iter().rev().find_map(|l| maven_auth_failure_line(l)) {
+        return Some(line);
+    }
     if let Some(line) = lines.iter().rev().find(|l| is_dependency_resolve(l)) {
         return Some(prefix_failure("依赖解析失败", line));
     }
@@ -3733,6 +3803,46 @@ fn is_port_in_use(line: &str) -> bool {
         || lower.contains("web server failed to start")
         || line.contains("端口已被占用")
         || line.contains("地址已在使用")
+}
+
+/// Maven/Nexus 401/403 is a fixed failure even when the line is too long to keep the code.
+fn maven_auth_failure_line(line: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let code = if contains_http_code(&lower, "401") {
+        "401"
+    } else if contains_http_code(&lower, "403") {
+        "403"
+    } else {
+        return None;
+    };
+    let auth = lower.contains("unauthorized")
+        || lower.contains("forbidden")
+        || lower.contains("authentication failed")
+        || lower.contains("status:")
+        || lower.contains("status code")
+        || lower.contains("return code is:");
+    if !auth {
+        return None;
+    }
+    Some(format!("认证失败：Maven 仓库返回 {code}"))
+}
+
+fn contains_http_code(lower: &str, code: &str) -> bool {
+    let mut rest = lower;
+    while let Some(i) = rest.find(code) {
+        let before_ok = i == 0 || !rest.as_bytes()[i - 1].is_ascii_digit();
+        let after = i + code.len();
+        let after_ok = after >= rest.len() || !rest.as_bytes()[after].is_ascii_digit();
+        if before_ok && after_ok {
+            return true;
+        }
+        let next = i + code.len();
+        if next >= rest.len() {
+            break;
+        }
+        rest = &rest[next..];
+    }
+    false
 }
 
 fn is_dependency_resolve(line: &str) -> bool {
@@ -6121,13 +6231,7 @@ impl Loaded {
         self.config.projects.insert(id.clone(), project);
         let r = self.resolve(&id)?;
         let configured = r.port > 0 && (!r.active_start().is_empty() || r.tomcat.is_some());
-        let raw = self.config.projects.get(&id);
-        Ok(row_from_resolved(
-            &r,
-            configured,
-            raw.and_then(|p| p.default_profile.clone()),
-            raw.map(|p| p.profiles.clone()).unwrap_or_default(),
-        ))
+        Ok(self.finish_row(&r, configured))
     }
 
     /// Remove a project from the config file. Does not touch the project's files.
@@ -6788,13 +6892,7 @@ impl Loaded {
 
         let r = self.resolve(id)?;
         let configured = r.port > 0 && (!r.active_start().is_empty() || r.tomcat.is_some());
-        let raw = self.config.projects.get(id);
-        Ok(row_from_resolved(
-            &r,
-            configured,
-            raw.and_then(|p| p.default_profile.clone()),
-            raw.map(|p| p.profiles.clone()).unwrap_or_default(),
-        ))
+        Ok(self.finish_row(&r, configured))
     }
 
     /// Create a new group, writing `[group.<key>]` (with optional label) to config preserving comments.
@@ -8073,6 +8171,7 @@ port = 3002
             profiles: Default::default(),
             depends_on: Vec::new(),
             start_command: String::new(),
+            profile_start_commands: Default::default(),
             resolve_error: None,
         };
         let json_fs: serde_json::Value =
@@ -8109,6 +8208,7 @@ port = 3002
             profiles: Default::default(),
             depends_on: Vec::new(),
             start_command: String::new(),
+            profile_start_commands: Default::default(),
             resolve_error: None,
         };
         let json_none: serde_json::Value =
@@ -9668,6 +9768,141 @@ start = ["echo", "disabled"]
         assert_eq!(stop_res.results[0].id, "web");
         assert_eq!(stop_res.results[1].id, "api");
     }
+
+    #[test]
+    fn batch_start_skips_downstream_when_dependency_fails() {
+        let dir = std::env::temp_dir().join(format!(
+            "tongyun_dev_skip_{}_{}",
+            std::process::id(),
+            current_time_secs()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let root = dir.display().to_string().replace('\\', "/");
+        let path = dir.join("projects.toml");
+        let toml = format!(
+            r#"
+[group.shop]
+label = "Shop"
+members = ["demo_api", "demo_web", "demo_ui"]
+
+[projects.demo_api]
+name = "Demo API"
+group = "shop"
+root = "{root}"
+port = 8080
+log_dir = "{root}/logs"
+start = ["{root}/missing-api.sh"]
+
+[projects.demo_web]
+name = "Demo Web"
+group = "shop"
+root = "{root}"
+port = 5173
+log_dir = "{root}/logs"
+start = ["{root}/missing-web.sh"]
+depends_on = ["demo_api"]
+
+[projects.demo_ui]
+name = "Demo UI"
+group = "shop"
+root = "{root}"
+port = 5174
+log_dir = "{root}/logs"
+start = ["{root}/missing-ui.sh"]
+depends_on = ["demo_web"]
+"#
+        );
+        std::fs::write(&path, toml).unwrap();
+        let loaded = load(Some(&path)).unwrap();
+
+        let batch = loaded.start_batch(Some("shop"), None, None).unwrap();
+        assert_eq!(
+            batch
+                .results
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["demo_api", "demo_web", "demo_ui"]
+        );
+        assert!(!batch.results[0].ok);
+        assert_eq!(batch.results[1].error.as_deref(), Some(DEP_START_SKIPPED));
+        assert_eq!(batch.results[2].error.as_deref(), Some(DEP_START_SKIPPED));
+        assert!(start_marker_path(&dir.join("logs/demo_api.pid")).is_file());
+        assert!(!start_marker_path(&dir.join("logs/demo_web.pid")).exists());
+        assert!(!start_marker_path(&dir.join("logs/demo_ui.pid")).exists());
+
+        let detached = loaded.start_batch_detached(Some("shop"), None).unwrap();
+        assert_eq!(
+            detached.results[1].error.as_deref(),
+            Some(DEP_START_SKIPPED)
+        );
+        assert!(!detached.results[1].ok);
+        assert!(!start_marker_path(&dir.join("logs/demo_web.pid")).exists());
+
+        let restarted = loaded.restart_batch(Some("shop"), None, None).unwrap();
+        assert_eq!(
+            restarted.results[1].error.as_deref(),
+            Some(DEP_START_SKIPPED)
+        );
+        assert!(!start_marker_path(&dir.join("logs/demo_web.pid")).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn profile_start_commands_use_that_profiles_start_and_port() {
+        let dir = std::env::temp_dir().join(format!(
+            "tongyun_dev_pcmd_{}_{}",
+            std::process::id(),
+            current_time_secs()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let root = dir.display().to_string().replace('\\', "/");
+        let path = dir.join("projects.toml");
+        let toml = format!(
+            r#"
+[projects.demo_web]
+name = "Demo Web"
+root = "{root}"
+port = 5173
+port_mode = "arg"
+log_dir = "{root}/logs"
+start = ["bash", "-c", "exec pnpm dev"]
+default_profile = "dev"
+
+[projects.demo_web.profiles.dev]
+label = "Dev"
+start = "pnpm dev --host 127.0.0.1"
+
+[projects.demo_web.profiles.mock]
+label = "Mock"
+start = "pnpm dev:mock"
+port = 5174
+"#
+        );
+        std::fs::write(&path, toml).unwrap();
+        let loaded = load(Some(&path)).unwrap();
+        let row = loaded
+            .list()
+            .unwrap()
+            .projects
+            .into_iter()
+            .find(|p| p.id == "demo_web")
+            .unwrap();
+        assert!(
+            row.start_command.contains("pnpm dev --host 127.0.0.1"),
+            "{}",
+            row.start_command
+        );
+        assert!(row.start_command.contains("5173"), "{}", row.start_command);
+        let dev = row.profile_start_commands.get("dev").unwrap();
+        let mock = row.profile_start_commands.get("mock").unwrap();
+        assert!(dev.contains("pnpm dev --host 127.0.0.1"), "{dev}");
+        assert!(dev.contains("5173"), "{dev}");
+        assert!(mock.contains("pnpm dev:mock"), "{mock}");
+        assert!(mock.contains("5174"), "{mock}");
+        assert!(!mock.contains("5173"), "{mock}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
@@ -11078,6 +11313,7 @@ start = ["echo", "solo"]
             profiles: Default::default(),
             depends_on: Vec::new(),
             start_command: String::new(),
+            profile_start_commands: Default::default(),
             resolve_error: Some("failed to parse log_dir".into()),
         };
         let st = unresolved_status(&row, "Cannot resolve log dir");
@@ -11315,6 +11551,27 @@ start = ["echo", "solo"]
         // "error:" style lines need at least 8 chars.
         assert_eq!(extract_start_failure_line("error:a\n"), None);
         assert!(extract_start_failure_line("error: boom\n").is_some());
+
+        // Maven 401/403 stays visible even when the transfer line is huge.
+        let auth = format!(
+            "[ERROR] Could not resolve dependencies for project demo: authentication failed, status: 401 Unauthorized {}\n",
+            "z".repeat(400)
+        );
+        assert_eq!(
+            extract_start_failure_line(&auth).as_deref(),
+            Some("认证失败：Maven 仓库返回 401")
+        );
+        assert_eq!(
+            extract_start_failure_line("Return code is: 403, ReasonPhrase: Forbidden.\n")
+                .as_deref(),
+            Some("认证失败：Maven 仓库返回 403")
+        );
+        assert_eq!(extract_start_failure_line("status: 4010 extra\n"), None);
+        assert_eq!(extract_start_failure_line("elapsed 401 ms\n"), None);
+        let port_wins =
+            extract_start_failure_line("status: 401 Unauthorized\nAddress already in use\n")
+                .unwrap();
+        assert!(port_wins.starts_with("端口被占用"));
     }
 
     #[test]
@@ -11397,6 +11654,7 @@ start = ["echo", "solo"]
             profiles: Default::default(),
             depends_on: Vec::new(),
             start_command: String::new(),
+            profile_start_commands: Default::default(),
             resolve_error: None,
         };
         let st = unresolved_status(&row, String::new());

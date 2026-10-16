@@ -293,6 +293,10 @@ pub fn overview(loaded: &Loaded) -> Result<Vec<Value>> {
             m.insert("profiles".into(), json!(row.profiles));
             m.insert("depends_on".into(), json!(row.depends_on));
             m.insert("start_command".into(), json!(row.start_command));
+            m.insert(
+                "profile_start_commands".into(),
+                json!(row.profile_start_commands),
+            );
             if let Some(err) = &row.resolve_error {
                 m.insert("resolve_error".into(), json!(err));
                 m.insert("configured".into(), json!(false));
@@ -585,7 +589,10 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
             }
             if let Some(raw_key) = group_route(path, "restart") {
                 let key = url_decode(raw_key);
-                let out = match loaded.restart_batch_detached(Some(&key), None) {
+                // Same as group start: wait until each project is ready, and skip
+                // downstream when a dependency failed. Detached restart launched
+                // the next project before the previous one had failed or become ready.
+                let out = match loaded.restart_batch(Some(&key), None, None) {
                     Ok(out) => out,
                     Err(e) => return err_json(500, format!("{e:#}")),
                 };
@@ -1848,7 +1855,9 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
 
     async function copyStartCommand(id) {
       const p = lastProjects.find(x => x.id === id);
-      const cmd = (p && p.start_command) ? String(p.start_command) : '';
+      const prof = getSelectedProfile(id);
+      const fromProfile = prof && p && p.profile_start_commands && p.profile_start_commands[prof];
+      const cmd = fromProfile ? String(fromProfile) : ((p && p.start_command) ? String(p.start_command) : '');
       if (!cmd) {
         alert('没有可复制的启动命令');
         return;
@@ -2303,6 +2312,11 @@ mod tests {
     fn tests_group_route_and_url_decode() {
         assert_eq!(group_route("/api/groups/demo/start", "start"), Some("demo"));
         assert_eq!(group_route("/api/groups/demo/stop", "stop"), Some("demo"));
+        assert_eq!(
+            group_route("/api/groups/demo/restart", "restart"),
+            Some("demo")
+        );
+        assert_eq!(group_route("/api/groups/demo/restart", "start"), None);
         assert_eq!(group_route("/api/groups/demo/start", "stop"), None);
         assert_eq!(group_route("/api/groups/demo", ""), Some("demo"));
         assert_eq!(url_decode("hello%20world"), "hello world");

@@ -43,6 +43,8 @@ export type Project = {
   depends_on?: string[];
   /** Assembled start command, safe to copy into a terminal. */
   start_command?: string;
+  /** Assembled start line keyed by profile name. */
+  profile_start_commands?: Record<string, string>;
   /** 这一条解析失败（例如 log_dir 展不开）。列表里的其他项目仍然显示。 */
   resolve_error?: string | null;
 };

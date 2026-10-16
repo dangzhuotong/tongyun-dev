@@ -872,6 +872,7 @@ fn test_unresolved_status_construction() {
         profiles: BTreeMap::new(),
         depends_on: Vec::new(),
         start_command: String::new(),
+        profile_start_commands: Default::default(),
         resolve_error: Some("log_dir resolution failed".to_string()),
     };
 

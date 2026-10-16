@@ -53,21 +53,28 @@ Maven 父工程（有 `<modules>`）、npm workspaces 根、Gradle 多项目根�
 ## CLI
 
 ```bash
-tongyun-dev list [--json]
+tongyun-dev list [--json] [--with-groups]
 tongyun-dev status [id] [--json]       # 不带 id：全部项目
-tongyun-dev start <id> [--open]        # 等到端口通 / 探针成功；--open 就绪后打开页面
-tongyun-dev stop <id>
+tongyun-dev start <id|组名> [--profile 名] [--timeout N] [--open]
+tongyun-dev start --all | --group <组名> [--profile 名] [--timeout N] [--json]
+tongyun-dev restart <id> [--profile 名] [--timeout N] [--open]
+tongyun-dev stop <id> | --all | --group <组名> [--json]
+tongyun-dev wait <id> [--timeout N] [--json]   # 只等已有服务，不启停
 tongyun-dev logs <id> [--follow] [--lines N]
-tongyun-dev open <id> [--dir]          # 打开页面（login_url / health_url / http://127.0.0.1:<port>/）或目录
+tongyun-dev open <id> [--dir] [--all]  # 打开页面（login_url / health_url / http://127.0.0.1:<port>/）、目录或全部链接
 tongyun-dev install <id>               # 装前端依赖（按锁文件选 pnpm / yarn / npm）
 tongyun-dev scan <dir> [--depth N] [--apply] [--json]
 tongyun-dev add my_web --root ~/code/my-web --start "pnpm dev" --port 5173 --node 20
 tongyun-dev add my_api --root ~/code/my-api --start "mvn spring-boot:run" --port 8081 --java 17
+tongyun-dev group <id> <key>           # 设置项目分组（`--clear` 清空）
+tongyun-dev group-add <key> [--label 名]
 tongyun-dev remove my_web              # 只删登记，不动项目文件
 tongyun-dev ui [--port 9099] [--no-open]
 ```
 
-`status --json` 稳定包含 `running`、`state`（`stopped` / `installing` / `starting` / `port_open` / `ready` / `failed`）、`elapsed_secs`、`failure`、`pid`、`port`、`login_probe`、`log_path`、`port_conflict`、`port_holder`。
+`start` / `restart` 的命令行参数是分组 key 时按组启动；`--all` / `--group <组名>` 用于批量。批量分组的 `--json` 输出用 `--group <组名> --json`；位置参数是分组 key 时不要加 `--json`。`--open` 只对单个项目生效。
+
+`status --json` 稳定包含 `running`、`state`（`stopped` / `installing` / `starting` / `port_open` / `ready` / `failed`）、`elapsed_secs`、`failure`、`pid`、`port`、`login_probe`、`log_path`、`port_conflict`、`port_holder`；运行中指定了环境预设时还含 `active_profile`。
 
 配置查找顺序：1) `--config`；2) 环境变量 `TONGYUN_DEV_CONFIG`；3) `~/.config/tongyun-dev/settings.json` 记住的路径（App 里「换一个配置文件」）；4) `~/.config/tongyun-dev/projects.toml`；5) 从当前目录往上找 `config/projects.toml`（只给开发调试用，已被 `.gitignore`）。
 
@@ -76,6 +83,13 @@ tongyun-dev ui [--port 9099] [--no-open]
 **前端依赖**：根目录有 `package.json` 但没有 `node_modules` 时，`start` 会先按锁文件装依赖（状态「安装依赖中」），装好接着启动。不想自动装就写 `auto_install = false`。
 
 **端口参数**：pnpm 直接带参数（`pnpm dev --port 5173`）；不要写 `pnpm dev -- --port`，旧配置里这样写的启动时会自动去掉 `--`。npm 才需要 `npm run dev -- --port 5173`。
+
+## 分组、依赖顺序与环境预设
+
+- **分组**：顶层 `[group.<key>]`，key 只能用小写字母、数字、`_`、`-`，长度 1-40。`group-add <key> [--label 名]` 新建分组；`group <id> <key>` 把项目归组（key 优先匹配已有分组的 label 或 key），`group <id> --clear` 清空。
+- **组启动**：`tongyun-dev start <组名>`（位置参数是分组 key，不是项目 id），或 `start --group <组名>`。启动前先按项目级 `depends_on` 拓扑排序，再按 `[group.<组名>].members` 顺序，等前一个就绪后再启下一个；网页 / 桌面分组卡片的「全部启动」同样。`stop --all` / `stop --group <组名>` 按逆序停止。
+- **依赖顺序**：项目 `depends_on = ["demo_db"]` 会先启动依赖项再启动本项目；分组 `depends_on` 用于分组之间的先后。检测到环路直接报错，依赖项失败时依赖它的项目也会失败。
+- **环境预设**：项目可写 `default_profile = "dev"` 和 `[projects.<id>.profiles.<name>]`（`label`、`start`、`port`、`env`）。`--profile <名>` 选择环境，不传时用 `default_profile`；选中的 `start` 覆盖启动命令，`port` 同时改写探针与打开页面 URL，`env` 合并进项目环境变量。生效时 `status --json` 给出 `active_profile`。
 
 ## Java / Node 版本
 
@@ -135,7 +149,7 @@ MIT
 
 ## 重启与网页项目设置
 
-- `tongyun-dev restart <id> [--open]`：停止成功后重新启动并等待就绪。桌面和网页的重启使用相同 core；停止未成功时返回错误，不继续启动。
+- `tongyun-dev restart <id> [--profile 名] [--timeout N] [--open]`（或 `restart --all` / `--group <组名>`）：停止成功后重新启动并等待就绪。桌面和网页的重启使用相同 core；停止未成功时返回错误，不继续启动。
 - 网页卡片的「设置」支持名称、目录、命令、端口、探针、日志、Java/Node 版本、启用/停用和超时。数组形式的复杂命令保持只读，避免保存时改变参数含义。清空版本或探针会移除该配置字段；原有注释保留。
 - HTTP：`GET /api/projects/<id>` 读取详情，`PATCH /api/projects/<id>` 提交部分更新，`POST /api/projects/<id>/restart` 重启。修改接口沿用 Host / Origin 检查。
 - 重复启动不会替换仍存活的已追踪进程；停止未成功时保留 PID 与启动标记，便于重试和排查。

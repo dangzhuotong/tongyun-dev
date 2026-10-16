@@ -10817,11 +10817,7 @@ start = ["echo", "solo"]
         ]);
         assert_eq!(
             mem_order,
-            vec![
-                "proj_second_in_name",
-                "proj_first_in_name",
-                "proj_unlisted"
-            ]
+            vec!["proj_second_in_name", "proj_first_in_name", "proj_unlisted"]
         );
 
         // 4. Dependency on a project not in the ids slice
@@ -10893,7 +10889,10 @@ start = ["echo", "solo"]
             resolve_error: None,
         };
         let min_json = serde_json::to_string(&minimal_st).unwrap();
-        assert!(!min_json.contains("\"hints\""), "empty hints must be omitted");
+        assert!(
+            !min_json.contains("\"hints\""),
+            "empty hints must be omitted"
+        );
         assert!(
             !min_json.contains("\"active_profile\""),
             "None active_profile must be omitted"
@@ -11002,10 +11001,7 @@ start = ["echo", "solo"]
         assert_eq!(st.state, LifeState::Stopped);
         assert!(!st.running);
         assert_eq!(st.failure.as_deref(), Some("Cannot resolve log dir"));
-        assert_eq!(
-            st.resolve_error.as_deref(),
-            Some("failed to parse log_dir")
-        );
+        assert_eq!(st.resolve_error.as_deref(), Some("failed to parse log_dir"));
         assert_eq!(st.port, 9090);
         assert!(!st.port_conflict);
         assert!(st.hints.is_empty());

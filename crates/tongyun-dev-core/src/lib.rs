@@ -10629,3 +10629,522 @@ mod input_helpers_tests {
         assert!(err_empty2.to_string().contains("empty input"));
     }
 }
+
+#[cfg(test)]
+mod ordering_and_status_edge_cases_tests {
+    use super::*;
+
+    fn temp_test_config(tag: &str, toml_str: &str) -> (PathBuf, Loaded) {
+        let dir = std::env::temp_dir().join(format!(
+            "tongyun_test_edge_{tag}_{}_{}",
+            std::process::id(),
+            current_time_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("projects.toml");
+        std::fs::write(&path, toml_str).unwrap();
+        let loaded = load(Some(&path)).unwrap();
+        (dir, loaded)
+    }
+
+    #[test]
+    fn test_group_start_order_multi_tier_and_cycle_fallback() {
+        let toml_str = r#"
+[group.frontend]
+label = "Frontend Layer"
+order = 1
+depends_on = ["gateway"]
+
+[group.gateway]
+label = "API Gateway"
+order = 5
+depends_on = ["backend"]
+
+[group.backend]
+label = "Backend Services"
+order = 10
+depends_on = ["database"]
+
+[group.database]
+label = "Database Layer"
+order = 20
+
+[group.cycle_b]
+label = "Cycle B"
+order = 50
+depends_on = ["cycle_a"]
+
+[group.cycle_a]
+label = "Cycle A"
+order = 40
+depends_on = ["cycle_b"]
+
+[group.orphan_dep]
+label = "Orphan Dep Group"
+order = 30
+depends_on = ["non_existent_group"]
+
+[projects.p_fe]
+name = "Frontend Project"
+group = "frontend"
+root = "/tmp"
+port = 3000
+start = ["echo", "fe"]
+
+[projects.p_db]
+name = "DB Project"
+group = "database"
+root = "/tmp"
+port = 5432
+start = ["echo", "db"]
+"#;
+        let (dir, loaded) = temp_test_config("grp_order", toml_str);
+        let order = loaded.group_start_order();
+        assert_eq!(
+            order,
+            vec![
+                "database",
+                "backend",
+                "gateway",
+                "frontend",
+                "orphan_dep",
+                "cycle_a",
+                "cycle_b"
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_group_tie_breaking_order_and_inferred_groups() {
+        let toml_str = r#"
+[group.g_same_b]
+label = "Beta Label"
+order = 10
+
+[group.g_same_a]
+label = "Alpha Label"
+order = 10
+
+[group.g_same_a2]
+label = "Alpha Label"
+order = 10
+
+[group.g_no_order_b]
+label = "Beta None"
+
+[group.g_no_order_a]
+label = "Alpha None"
+
+[projects.p_implicit]
+name = "Implicit Project"
+group = "inferred_group"
+root = "/tmp"
+port = 8000
+start = ["echo", "hi"]
+"#;
+        let (dir, loaded) = temp_test_config("tie_break", toml_str);
+        let groups = loaded.groups();
+        let group_keys: Vec<String> = groups.into_iter().map(|g| g.key).collect();
+        assert_eq!(
+            group_keys,
+            vec![
+                "g_same_a",
+                "g_same_a2",
+                "g_same_b",
+                "g_no_order_a",
+                "g_no_order_b",
+                "inferred_group"
+            ]
+        );
+
+        let start_order = loaded.group_start_order();
+        assert_eq!(
+            start_order,
+            vec![
+                "g_same_a",
+                "g_same_a2",
+                "g_same_b",
+                "g_no_order_a",
+                "g_no_order_b",
+                "inferred_group"
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_sorted_projects_for_start_and_stop_edge_cases() {
+        let toml_str = r#"
+[group.g_early]
+label = "Early Group"
+order = 1
+
+[group.g_late]
+label = "Late Group"
+order = 2
+
+[group.grp_ordered]
+label = "Ordered Members"
+order = 3
+members = ["proj_second_in_name", "proj_first_in_name"]
+
+# Cross group dependency overriding group order
+[projects.p_high]
+name = "P High"
+group = "g_early"
+root = "/tmp"
+port = 3000
+start = ["echo", "high"]
+depends_on = ["p_dep"]
+
+[projects.p_dep]
+name = "P Dep"
+group = "g_late"
+root = "/tmp"
+port = 3001
+start = ["echo", "dep"]
+
+# Diamond dependency: base -> (mid1, mid2) -> top
+[projects.p_base]
+name = "Base"
+root = "/tmp"
+port = 3002
+start = ["echo", "base"]
+
+[projects.p_mid1]
+name = "Mid 1"
+root = "/tmp"
+port = 3003
+start = ["echo", "mid1"]
+depends_on = ["p_base"]
+
+[projects.p_mid2]
+name = "Mid 2"
+root = "/tmp"
+port = 3004
+start = ["echo", "mid2"]
+depends_on = ["p_base"]
+
+[projects.p_top]
+name = "Top"
+root = "/tmp"
+port = 3005
+start = ["echo", "top"]
+depends_on = ["p_mid1", "p_mid2"]
+
+# Members order in group
+[projects.proj_first_in_name]
+name = "Alpha Member"
+group = "grp_ordered"
+root = "/tmp"
+port = 3006
+start = ["echo", "alpha"]
+
+[projects.proj_second_in_name]
+name = "Beta Member"
+group = "grp_ordered"
+root = "/tmp"
+port = 3007
+start = ["echo", "beta"]
+
+[projects.proj_unlisted]
+name = "Gamma Unlisted"
+group = "grp_ordered"
+root = "/tmp"
+port = 3008
+start = ["echo", "gamma"]
+
+# Project cycle
+[projects.p_c1]
+name = "Cycle 1"
+root = "/tmp"
+port = 3009
+start = ["echo", "c1"]
+depends_on = ["p_c2"]
+
+[projects.p_c2]
+name = "Cycle 2"
+root = "/tmp"
+port = 3010
+start = ["echo", "c2"]
+depends_on = ["p_c1"]
+
+[projects.p_solo]
+name = "Solo"
+root = "/tmp"
+port = 3011
+start = ["echo", "solo"]
+"#;
+        let (dir, loaded) = temp_test_config("proj_order", toml_str);
+
+        // 1. Cross-group dependency: p_dep (in late group) must start before p_high (in early group)
+        let cross_order = loaded.sorted_projects_for_start(&["p_high", "p_dep"]);
+        assert_eq!(cross_order, vec!["p_dep", "p_high"]);
+        let cross_stop = loaded.sorted_projects_for_stop(&["p_high", "p_dep"]);
+        assert_eq!(cross_stop, vec!["p_high", "p_dep"]);
+
+        // 2. Diamond dependency
+        let diamond_order =
+            loaded.sorted_projects_for_start(&["p_top", "p_mid2", "p_mid1", "p_base"]);
+        assert_eq!(diamond_order, vec!["p_base", "p_mid1", "p_mid2", "p_top"]);
+        let diamond_stop =
+            loaded.sorted_projects_for_stop(&["p_top", "p_mid2", "p_mid1", "p_base"]);
+        assert_eq!(diamond_stop, vec!["p_top", "p_mid2", "p_mid1", "p_base"]);
+
+        // 3. Member index priority in group members
+        let mem_order = loaded.sorted_projects_for_start(&[
+            "proj_first_in_name",
+            "proj_unlisted",
+            "proj_second_in_name",
+        ]);
+        assert_eq!(
+            mem_order,
+            vec!["proj_second_in_name", "proj_first_in_name", "proj_unlisted"]
+        );
+
+        // 4. Dependency on a project not in the ids slice
+        let partial_order = loaded.sorted_projects_for_start(&["p_top"]);
+        assert_eq!(partial_order, vec!["p_top"]);
+
+        // 5. Project cycle fallback preserves slice input order for cyclic nodes
+        let cycle_order = loaded.sorted_projects_for_start(&["p_c1", "p_solo", "p_c2"]);
+        assert_eq!(cycle_order, vec!["p_solo", "p_c1", "p_c2"]);
+        let cycle_stop = loaded.sorted_projects_for_stop(&["p_c1", "p_solo", "p_c2"]);
+        assert_eq!(cycle_stop, vec!["p_c2", "p_c1", "p_solo"]);
+
+        // 6. Ungrouped vs grouped project
+        let grp_vs_none = loaded.sorted_projects_for_start(&["p_base", "p_dep"]);
+        assert_eq!(grp_vs_none, vec!["p_dep", "p_base"]);
+
+        // 7. Unknown project ID in ids slice
+        let unknown_order = loaded.sorted_projects_for_start(&["p_dep", "non_existent_project"]);
+        assert_eq!(unknown_order, vec!["p_dep", "non_existent_project"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_status_json_serialization_all_lifestates_and_fields() {
+        // 1. LifeState serialization and deserialization
+        let states = [
+            (LifeState::Stopped, "stopped"),
+            (LifeState::Installing, "installing"),
+            (LifeState::Starting, "starting"),
+            (LifeState::PortOpen, "port_open"),
+            (LifeState::Ready, "ready"),
+            (LifeState::Failed, "failed"),
+        ];
+        for (state, expected) in states {
+            let serialized = serde_json::to_string(&state).unwrap();
+            assert_eq!(serialized, format!("\"{expected}\""));
+            let deserialized: LifeState = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, state);
+            assert_eq!(format!("{state}"), expected);
+        }
+
+        // 2. StatusJson field omission (skip_serializing_if)
+        let minimal_st = StatusJson {
+            id: "demo_app".into(),
+            name: "Demo App".into(),
+            running: false,
+            state: LifeState::Stopped,
+            elapsed_secs: None,
+            timeout_secs: 180,
+            failure: None,
+            pid: None,
+            port: 8080,
+            port_open: false,
+            login_probe: LoginProbe {
+                url: String::new(),
+                http_code: None,
+                ok: false,
+            },
+            log_path: "/tmp/logs/demo.out".into(),
+            pid_path: "/tmp/logs/demo.pid".into(),
+            root: "/tmp/demo".into(),
+            port_conflict: false,
+            port_holder: String::new(),
+            deps_missing: false,
+            install_command: String::new(),
+            hints: Vec::new(),
+            active_profile: None,
+            resolve_error: None,
+        };
+        let min_json = serde_json::to_string(&minimal_st).unwrap();
+        assert!(
+            !min_json.contains("\"hints\""),
+            "empty hints must be omitted"
+        );
+        assert!(
+            !min_json.contains("\"active_profile\""),
+            "None active_profile must be omitted"
+        );
+        assert!(
+            !min_json.contains("\"resolve_error\""),
+            "None resolve_error must be omitted"
+        );
+        assert!(min_json.contains("\"elapsed_secs\":null"));
+        assert!(min_json.contains("\"failure\":null"));
+        assert!(min_json.contains("\"pid\":null"));
+        assert!(min_json.contains("\"http_code\":null"));
+
+        // 3. StatusJson populated fields inclusion
+        let mut populated_st = minimal_st.clone();
+        populated_st.running = true;
+        populated_st.state = LifeState::Ready;
+        populated_st.elapsed_secs = Some(42);
+        populated_st.failure = Some("warning test".into());
+        populated_st.pid = Some(12345);
+        populated_st.login_probe = LoginProbe {
+            url: "http://127.0.0.1:8080/health".into(),
+            http_code: Some(200),
+            ok: true,
+        };
+        populated_st.hints = vec!["Check firewall".into()];
+        populated_st.active_profile = Some("dev".into());
+        populated_st.resolve_error = Some("test warning".into());
+
+        let pop_json = serde_json::to_string(&populated_st).unwrap();
+        assert!(pop_json.contains("\"hints\":[\"Check firewall\"]"));
+        assert!(pop_json.contains("\"active_profile\":\"dev\""));
+        assert!(pop_json.contains("\"resolve_error\":\"test warning\""));
+        assert!(pop_json.contains("\"elapsed_secs\":42"));
+        assert!(pop_json.contains("\"pid\":12345"));
+        assert!(pop_json.contains("\"http_code\":200"));
+        assert!(pop_json.contains("\"ok\":true"));
+
+        // 4. Backward-compatible deserialization of legacy JSON missing newer fields
+        let legacy_json = r#"{
+            "id": "legacy_service",
+            "name": "Legacy Service",
+            "running": false,
+            "state": "stopped",
+            "elapsed_secs": null,
+            "timeout_secs": 60,
+            "failure": null,
+            "pid": null,
+            "port": 3000,
+            "port_open": false,
+            "login_probe": {
+                "url": "",
+                "http_code": null,
+                "ok": false
+            },
+            "log_path": "/tmp/legacy.log",
+            "pid_path": "/tmp/legacy.pid",
+            "root": "/tmp/legacy",
+            "port_conflict": false,
+            "port_holder": ""
+        }"#;
+        let parsed_legacy: StatusJson = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(parsed_legacy.id, "legacy_service");
+        assert_eq!(parsed_legacy.deps_missing, false);
+        assert_eq!(parsed_legacy.install_command, "");
+        assert!(parsed_legacy.hints.is_empty());
+        assert_eq!(parsed_legacy.active_profile, None);
+        assert_eq!(parsed_legacy.resolve_error, None);
+    }
+
+    #[test]
+    fn test_unresolved_status_and_batch_serialization() {
+        // 1. unresolved_status helper
+        let row = ProjectRow {
+            id: "broken_app".into(),
+            name: "Broken App".into(),
+            group: None,
+            root: "/tmp/broken".into(),
+            enabled: false,
+            port: 9090,
+            reason: "syntax error".into(),
+            configured: false,
+            start_timeout_secs: None,
+            stop_grace_secs: None,
+            node: None,
+            java: None,
+            java_home: None,
+            node_home: None,
+            shell: None,
+            auto_install: true,
+            port_mode: "none".into(),
+            port_arg: None,
+            port_env: None,
+            env: Default::default(),
+            pty: false,
+            auto_answers: Vec::new(),
+            links: Vec::new(),
+            default_profile: None,
+            profiles: Default::default(),
+            depends_on: Vec::new(),
+            start_command: String::new(),
+            resolve_error: Some("failed to parse log_dir".into()),
+        };
+        let st = unresolved_status(&row, "Cannot resolve log dir");
+        assert_eq!(st.id, "broken_app");
+        assert_eq!(st.state, LifeState::Stopped);
+        assert!(!st.running);
+        assert_eq!(st.failure.as_deref(), Some("Cannot resolve log dir"));
+        assert_eq!(st.resolve_error.as_deref(), Some("failed to parse log_dir"));
+        assert_eq!(st.port, 9090);
+        assert!(!st.port_conflict);
+        assert!(st.hints.is_empty());
+
+        let st_json = serde_json::to_string(&st).unwrap();
+        assert!(st_json.contains("\"failure\":\"Cannot resolve log dir\""));
+        assert!(st_json.contains("\"resolve_error\":\"failed to parse log_dir\""));
+        assert!(!st_json.contains("\"hints\""));
+
+        // 2. BatchItemResult serialization & deserialization
+        let item_empty = BatchItemResult {
+            id: "svc_a".into(),
+            success: true,
+            ok: true,
+            status: None,
+            error: None,
+        };
+        let item_empty_json = serde_json::to_string(&item_empty).unwrap();
+        assert!(!item_empty_json.contains("\"status\""));
+        assert!(!item_empty_json.contains("\"error\""));
+
+        let item_with_status = BatchItemResult {
+            id: "svc_b".into(),
+            success: false,
+            ok: false,
+            status: Some(st.clone()),
+            error: Some("failed execution".into()),
+        };
+        let item_with_status_json = serde_json::to_string(&item_with_status).unwrap();
+        assert!(item_with_status_json.contains("\"status\":{"));
+        assert!(item_with_status_json.contains("\"error\":\"failed execution\""));
+
+        // 3. BatchOutput serialization round-trip
+        let batch_out = BatchOutput {
+            total: 2,
+            succeeded: 1,
+            failed: 1,
+            results: vec![item_empty, item_with_status],
+        };
+        let batch_json = serde_json::to_string(&batch_out).unwrap();
+        let parsed_batch: BatchOutput = serde_json::from_str(&batch_json).unwrap();
+        assert_eq!(parsed_batch.total, 2);
+        assert_eq!(parsed_batch.succeeded, 1);
+        assert_eq!(parsed_batch.failed, 1);
+        assert_eq!(parsed_batch.results.len(), 2);
+        assert_eq!(parsed_batch.results[0].id, "svc_a");
+        assert_eq!(parsed_batch.results[1].id, "svc_b");
+
+        // 4. GroupInfo serialization omission of empty members/depends_on
+        let group_info = GroupInfo {
+            key: "test_grp".into(),
+            label: "Test Group".into(),
+            order: None,
+            members: Vec::new(),
+            depends_on: Vec::new(),
+        };
+        let grp_json = serde_json::to_string(&group_info).unwrap();
+        assert!(!grp_json.contains("\"members\""));
+        assert!(!grp_json.contains("\"depends_on\""));
+        assert!(grp_json.contains("\"order\":null"));
+    }
+}

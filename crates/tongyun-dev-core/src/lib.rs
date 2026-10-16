@@ -10594,10 +10594,7 @@ mod input_helpers_tests {
         );
 
         // resolve_input_data: enter only (no text, no key)
-        assert_eq!(
-            resolve_input_data(None, true, None).unwrap(),
-            "\n"
-        );
+        assert_eq!(resolve_input_data(None, true, None).unwrap(), "\n");
 
         // resolve_input_data: key only
         assert_eq!(
@@ -10632,4 +10629,3 @@ mod input_helpers_tests {
         assert!(err_empty2.to_string().contains("empty input"));
     }
 }
-

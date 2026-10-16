@@ -1180,7 +1180,11 @@ mod tests {
         assert!(win_java_matches("Zulu", "zulu8", "1.8"));
         assert!(win_java_matches("Zulu", "zulu-17.0.9-win_x64", "17"));
         assert!(!win_java_matches("Zulu", "zulu-21", "17"));
-        assert!(win_java_matches("Eclipse Adoptium", "jdk-17.0.9.9-hotspot", "17"));
+        assert!(win_java_matches(
+            "Eclipse Adoptium",
+            "jdk-17.0.9.9-hotspot",
+            "17"
+        ));
         assert!(win_java_matches("Eclipse Adoptium", "jdk-8.0.392", "8"));
         assert!(win_java_matches("Java", "jdk1.8.0_392", "8"));
         assert!(!win_java_matches("OtherVendor", "jdk-17", "17"));
@@ -1191,13 +1195,24 @@ mod tests {
         assert!(k2 > k1);
         let k_ver9 = parse_version_key("17.0.9");
         let k_ver10 = parse_version_key("17.0.10");
-        assert!(k_ver10 > k_ver9, "numeric components must sort numerically, not lexicographically");
+        assert!(
+            k_ver10 > k_ver9,
+            "numeric components must sort numerically, not lexicographically"
+        );
 
         // format_home
-        assert_eq!(format_home(Path::new("/home/user/code"), Some(Path::new("/home/user"))), "~/code");
-        assert_eq!(format_home(Path::new("/home/user"), Some(Path::new("/home/user"))), "~");
-        assert_eq!(format_home(Path::new("/opt/bin"), Some(Path::new("/home/user"))), "/opt/bin");
+        assert_eq!(
+            format_home(Path::new("/home/user/code"), Some(Path::new("/home/user"))),
+            "~/code"
+        );
+        assert_eq!(
+            format_home(Path::new("/home/user"), Some(Path::new("/home/user"))),
+            "~"
+        );
+        assert_eq!(
+            format_home(Path::new("/opt/bin"), Some(Path::new("/home/user"))),
+            "/opt/bin"
+        );
         assert_eq!(format_home(Path::new("/opt/bin"), None), "/opt/bin");
     }
 }
-

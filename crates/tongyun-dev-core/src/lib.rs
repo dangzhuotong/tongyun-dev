@@ -10545,3 +10545,443 @@ background = true
         let _ = std::fs::remove_dir_all(&d);
     }
 }
+
+#[cfg(test)]
+mod group_and_state_coverage_tests {
+    use super::*;
+
+    #[test]
+    fn validate_group_key_comprehensive_cases() {
+        // Valid single-character and boundary keys
+        for valid in ["a", "z", "0", "9", "_", "-"] {
+            assert!(
+                validate_group_key(valid).is_ok(),
+                "single valid char `{valid}` should be accepted"
+            );
+        }
+
+        // Valid mixed character keys
+        for valid in [
+            "demo",
+            "api-service",
+            "worker_01",
+            "web_app-frontend",
+            "123",
+            "_leading-underscore",
+            "trailing-hyphen-",
+        ] {
+            assert!(
+                validate_group_key(valid).is_ok(),
+                "valid key `{valid}` should be accepted"
+            );
+        }
+
+        // Exactly 40 characters (max allowed)
+        let exact_40 = "a".repeat(40);
+        assert!(
+            validate_group_key(&exact_40).is_ok(),
+            "40-char key should be accepted"
+        );
+
+        // Empty key failure message
+        let err_empty = validate_group_key("").unwrap_err().to_string();
+        assert_eq!(err_empty, "分组 key 不能为空");
+
+        // Over 40 characters failure message
+        let len_41 = "a".repeat(41);
+        let err_41 = validate_group_key(&len_41).unwrap_err().to_string();
+        assert_eq!(err_41, "分组 key 长度不能超过 40 个字符");
+
+        let len_60 = "x".repeat(60);
+        let err_60 = validate_group_key(&len_60).unwrap_err().to_string();
+        assert_eq!(err_60, "分组 key 长度不能超过 40 个字符");
+
+        // Illegal characters: uppercase, spaces, symbols, and non-ASCII
+        let invalid_cases = [
+            ("Upper", "Upper"),
+            ("group a", "group a"),
+            ("group.name", "group.name"),
+            ("group:1", "group:1"),
+            ("group/sub", "group/sub"),
+            ("group@host", "group@host"),
+            ("分组", "分组"),
+            ("组_1", "组_1"),
+        ];
+        for (key, repr) in invalid_cases {
+            let err = validate_group_key(key).unwrap_err().to_string();
+            assert!(
+                err.contains("分组 key 只能包含小写字母、数字、下划线和连字符"),
+                "expected character restriction error for `{key}`, got `{err}`"
+            );
+            assert!(
+                err.contains(&format!("`{repr}`")),
+                "error message should contain invalid key name, got `{err}`"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_group_key_comprehensive_cases() {
+        // Truncation to 40 chars
+        let long_label = "a".repeat(50);
+        let gen_long = generate_group_key(&long_label, &[] as &[&str]);
+        assert_eq!(gen_long, "a".repeat(40));
+        assert_eq!(gen_long.len(), 40);
+        assert!(validate_group_key(&gen_long).is_ok());
+
+        // Truncation trims trailing hyphen produced at boundary
+        // Position 39 is 'a', position 40 is '!' (replaced with '-'), then 'extra'
+        let boundary_label = format!("{}!extra", "a".repeat(39));
+        let gen_boundary = generate_group_key(&boundary_label, &[] as &[&str]);
+        assert_eq!(gen_boundary, "a".repeat(39));
+        assert_eq!(gen_boundary.len(), 39);
+
+        // Consecutive symbols collapsed and leading/trailing hyphens stripped
+        let messy_label = "  @@@My   Awesome Group###  ";
+        assert_eq!(
+            generate_group_key(messy_label, &[] as &[&str]),
+            "my-awesome-group"
+        );
+
+        // Underscores and numbers preserved
+        assert_eq!(
+            generate_group_key("_Private_Api_99_", &[] as &[&str]),
+            "_private_api_99_"
+        );
+
+        // Label with only symbols / whitespace falls back to g1, g2...
+        assert_eq!(generate_group_key("   ###$$$***   ", &[] as &[&str]), "g1");
+        assert_eq!(generate_group_key("---", &[] as &[&str]), "g1");
+        assert_eq!(generate_group_key("   ", &[] as &[&str]), "g1");
+        assert_eq!(generate_group_key("   ", &["g1"]), "g2");
+
+        // Non-ASCII label with existing g1 and g2 falls back to next available index
+        assert_eq!(
+            generate_group_key("微服务集群", &["g1", "g2", "g3"]),
+            "g4"
+        );
+
+        // Generated candidate already in existing_keys falls back to gN avoiding taken keys
+        assert_eq!(
+            generate_group_key("demo", &["demo", "g1"]),
+            "g2"
+        );
+        assert_eq!(
+            generate_group_key("service", &["service", "g1", "g2"]),
+            "g3"
+        );
+    }
+
+    #[test]
+    fn groups_listing_comprehensive_cases() {
+        let toml_content = r#"
+[group.g_neg]
+label = "Zeta Service"
+order = -10
+
+[group.g_zero]
+label = "Middle Service"
+order = 0
+
+[group.g_one_b]
+label = "Beta Worker"
+order = 1
+depends_on = ["g_zero"]
+
+[group.g_one_a]
+label = "Alpha Worker"
+order = 1
+
+[group.g_same_label_2]
+label = "Same Label"
+order = 2
+
+[group.g_same_label_1]
+label = "Same Label"
+order = 2
+
+[group.g_none_b]
+label = "Beta None"
+
+[group.g_none_a]
+label = "Alpha None"
+
+[group.g_fallback_none]
+# label is absent, should fallback to key
+
+[group.g_fallback_blank]
+label = "   "
+# whitespace-only label, should fallback to key
+
+[group.g_trimmed_label]
+label = "  Spaced Label  "
+
+[group.g_with_members]
+label = "Explicit Members"
+members = ["p_three", "nonexistent_p", "p_one"]
+
+# Projects
+[projects.p_one]
+root = "/tmp"
+group = "g_with_members"
+
+[projects.p_two]
+root = "/tmp"
+group = "g_with_members"
+
+[projects.p_three]
+root = "/tmp"
+group = "g_with_members"
+
+[projects.p_auto]
+root = "/tmp"
+group = "implicit_auto_group"
+"#;
+        let dir = std::env::temp_dir().join(format!(
+            "tongyun_dev_grp_cov_{}_{}",
+            std::process::id(),
+            current_time_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("projects.toml");
+        std::fs::write(&cfg_path, toml_content).unwrap();
+
+        let loaded = load(Some(&cfg_path)).unwrap();
+        let groups = loaded.groups();
+
+        // 1. Check ordering rules:
+        // Some(order) sorted numerically: -10, 0, 1, 2.
+        // For equal order: sorted by label, then key.
+        // None order sorted after Some(order), then by label, then key.
+        let keys_in_order: Vec<&str> = groups.iter().map(|g| g.key.as_str()).collect();
+
+        // -10: g_neg
+        assert_eq!(keys_in_order[0], "g_neg");
+        // 0: g_zero
+        assert_eq!(keys_in_order[1], "g_zero");
+        // 1: "Alpha Worker" (g_one_a) before "Beta Worker" (g_one_b)
+        assert_eq!(keys_in_order[2], "g_one_a");
+        assert_eq!(keys_in_order[3], "g_one_b");
+        // 2: Same label "Same Label", sorted by key: g_same_label_1 before g_same_label_2
+        assert_eq!(keys_in_order[4], "g_same_label_1");
+        assert_eq!(keys_in_order[5], "g_same_label_2");
+
+        // Groups with order = None:
+        // All None order groups are placed after Some order groups
+        assert_eq!(groups.iter().position(|g| g.order.is_none()), Some(6));
+
+        // 2. Check label fallback logic:
+        let g_fallback_none = groups.iter().find(|g| g.key == "g_fallback_none").unwrap();
+        assert_eq!(g_fallback_none.label, "g_fallback_none");
+
+        let g_fallback_blank = groups.iter().find(|g| g.key == "g_fallback_blank").unwrap();
+        assert_eq!(g_fallback_blank.label, "g_fallback_blank");
+
+        let g_trimmed = groups.iter().find(|g| g.key == "g_trimmed_label").unwrap();
+        assert_eq!(g_trimmed.label, "Spaced Label");
+
+        // 3. Implicit auto-discovered group from project.group:
+        let g_implicit = groups.iter().find(|g| g.key == "implicit_auto_group").unwrap();
+        assert_eq!(g_implicit.label, "implicit_auto_group");
+        assert_eq!(g_implicit.order, None);
+        assert!(g_implicit.depends_on.is_empty());
+        assert_eq!(g_implicit.members, vec!["p_auto".to_string()]);
+
+        // 4. Group members resolution:
+        // "g_with_members" declared members: ["p_three", "nonexistent_p", "p_one"]
+        // Projects in group: p_one, p_two, p_three.
+        // "nonexistent_p" should be omitted.
+        // "p_two" was not declared in members, so appended in sorted order after declared members.
+        // "p_three" and "p_one" deduplicated.
+        let g_members = groups.iter().find(|g| g.key == "g_with_members").unwrap();
+        assert_eq!(
+            g_members.members,
+            vec!["p_three".to_string(), "p_one".to_string(), "p_two".to_string()]
+        );
+
+        // 5. Depends on preserved:
+        let g_dep = groups.iter().find(|g| g.key == "g_one_b").unwrap();
+        assert_eq!(g_dep.depends_on, vec!["g_zero".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn derive_state_uncovered_failure_messages_and_boundaries() {
+        // 1. Process not alive but within START_EXIT_GRACE_SECS grace period (< 3s):
+        // Returns (LifeState::Starting, None) instead of Failed
+        let (state_grace_0, fail_grace_0) = derive_state(StateInput {
+            process_alive: false,
+            port_open: false,
+            port_conflict: false,
+            has_probe: false,
+            probe_ok: false,
+            started_at: Some(100),
+            now: 100, // elapsed = 0 < 3
+            timeout_secs: 10,
+            start_error: None,
+        });
+        assert_eq!(state_grace_0, LifeState::Starting);
+        assert_eq!(fail_grace_0, None);
+
+        let (state_grace_2, fail_grace_2) = derive_state(StateInput {
+            process_alive: false,
+            port_open: false,
+            port_conflict: false,
+            has_probe: false,
+            probe_ok: false,
+            started_at: Some(100),
+            now: 102, // elapsed = 2 < 3
+            timeout_secs: 10,
+            start_error: None,
+        });
+        assert_eq!(state_grace_2, LifeState::Starting);
+        assert_eq!(fail_grace_2, None);
+
+        // At exactly START_EXIT_GRACE_SECS (3s): returns Failed with "进程已退出"
+        let (state_grace_3, fail_grace_3) = derive_state(StateInput {
+            process_alive: false,
+            port_open: false,
+            port_conflict: false,
+            has_probe: false,
+            probe_ok: false,
+            started_at: Some(100),
+            now: 103, // elapsed = 3 >= 3
+            timeout_secs: 10,
+            start_error: None,
+        });
+        assert_eq!(state_grace_3, LifeState::Failed);
+        assert_eq!(fail_grace_3.as_deref(), Some("进程已退出"));
+
+        // 2. Process exited AND timeout exceeded:
+        // "进程已退出" has higher priority than timeout message
+        let (state_both, fail_both) = derive_state(StateInput {
+            process_alive: false,
+            port_open: false,
+            port_conflict: false,
+            has_probe: false,
+            probe_ok: false,
+            started_at: Some(100),
+            now: 120, // elapsed = 20 >= timeout (10) and >= grace (3)
+            timeout_secs: 10,
+            start_error: None,
+        });
+        assert_eq!(state_both, LifeState::Failed);
+        assert_eq!(fail_both.as_deref(), Some("进程已退出"));
+
+        // 3. Exact timeout boundary:
+        // elapsed == timeout_secs - 1 -> Starting
+        let (state_just_before, fail_just_before) = derive_state(StateInput {
+            process_alive: true,
+            port_open: false,
+            port_conflict: false,
+            has_probe: false,
+            probe_ok: false,
+            started_at: Some(100),
+            now: 109, // elapsed = 9 < 10
+            timeout_secs: 10,
+            start_error: None,
+        });
+        assert_eq!(state_just_before, LifeState::Starting);
+        assert_eq!(fail_just_before, None);
+
+        // elapsed == timeout_secs -> Failed with "超过 10 秒仍未就绪"
+        let (state_exact_timeout, fail_exact_timeout) = derive_state(StateInput {
+            process_alive: true,
+            port_open: false,
+            port_conflict: false,
+            has_probe: false,
+            probe_ok: false,
+            started_at: Some(100),
+            now: 110, // elapsed = 10 >= 10
+            timeout_secs: 10,
+            start_error: None,
+        });
+        assert_eq!(state_exact_timeout, LifeState::Failed);
+        assert_eq!(fail_exact_timeout.as_deref(), Some("超过 10 秒仍未就绪"));
+
+        // 4. Timeout failure formatting with various timeout values
+        for timeout in [0u64, 1, 60, 180] {
+            let (state_t, fail_t) = derive_state(StateInput {
+                process_alive: true,
+                port_open: false,
+                port_conflict: false,
+                has_probe: false,
+                probe_ok: false,
+                started_at: Some(100),
+                now: 100 + timeout + 5,
+                timeout_secs: timeout,
+                start_error: None,
+            });
+            assert_eq!(state_t, LifeState::Failed);
+            let expected_msg = format!("超过 {timeout} 秒仍未就绪");
+            assert_eq!(fail_t.as_deref(), Some(expected_msg.as_str()));
+        }
+
+        // 5. Clock skew (now < started_at): saturating_sub yields 0 elapsed
+        let (state_skew, fail_skew) = derive_state(StateInput {
+            process_alive: true,
+            port_open: false,
+            port_conflict: false,
+            has_probe: false,
+            probe_ok: false,
+            started_at: Some(100),
+            now: 80, // clock moved backwards
+            timeout_secs: 10,
+            start_error: None,
+        });
+        assert_eq!(state_skew, LifeState::Starting);
+        assert_eq!(fail_skew, None);
+
+        // 6. Port conflict combined with timeout:
+        let (state_conflict_timeout, fail_conflict_timeout) = derive_state(StateInput {
+            process_alive: true,
+            port_open: true,
+            port_conflict: true,
+            has_probe: false,
+            probe_ok: false,
+            started_at: Some(100),
+            now: 120, // elapsed = 20 >= 10
+            timeout_secs: 10,
+            start_error: None,
+        });
+        assert_eq!(state_conflict_timeout, LifeState::Failed);
+        assert_eq!(
+            fail_conflict_timeout.as_deref(),
+            Some("超过 10 秒仍未就绪")
+        );
+
+        // 7. Probe failed and process died after grace period:
+        let (state_probe_died, fail_probe_died) = derive_state(StateInput {
+            process_alive: false,
+            port_open: true,
+            port_conflict: false,
+            has_probe: true,
+            probe_ok: false,
+            started_at: Some(100),
+            now: 105, // elapsed = 5 >= 3
+            timeout_secs: 10,
+            start_error: None,
+        });
+        assert_eq!(state_probe_died, LifeState::Failed);
+        assert_eq!(fail_probe_died.as_deref(), Some("进程已退出"));
+
+        // 8. start_error takes precedence over port_open / probe_ok / process_alive
+        let custom_err = "failed to bind socket: permission denied".to_string();
+        let (state_err_priority, fail_err_priority) = derive_state(StateInput {
+            process_alive: true,
+            port_open: true,
+            port_conflict: false,
+            has_probe: true,
+            probe_ok: true,
+            started_at: Some(100),
+            now: 101,
+            timeout_secs: 10,
+            start_error: Some(custom_err.clone()),
+        });
+        assert_eq!(state_err_priority, LifeState::Failed);
+        assert_eq!(fail_err_priority, Some(custom_err));
+    }
+}
+

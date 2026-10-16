@@ -11147,4 +11147,264 @@ start = ["echo", "solo"]
         assert!(!grp_json.contains("\"depends_on\""));
         assert!(grp_json.contains("\"order\":null"));
     }
+
+    #[test]
+    fn derive_state_failure_edge_cases() {
+        let base = StateInput {
+            process_alive: false,
+            port_open: false,
+            port_conflict: false,
+            has_probe: false,
+            probe_ok: false,
+            started_at: None,
+            now: 100,
+            timeout_secs: 10,
+            start_error: None,
+        };
+
+        // Empty start_error still wins and is surfaced verbatim.
+        let empty = derive_state(StateInput {
+            start_error: Some(String::new()),
+            ..base.clone()
+        });
+        assert_eq!(empty, (LifeState::Failed, Some(String::new())));
+
+        // Whitespace-only start_error is not trimmed.
+        let blank = derive_state(StateInput {
+            start_error: Some("   ".to_string()),
+            ..base.clone()
+        });
+        assert_eq!(blank, (LifeState::Failed, Some("   ".to_string())));
+
+        // start_error beats an otherwise-Ready input.
+        let err_over_ready = derive_state(StateInput {
+            process_alive: true,
+            port_open: true,
+            probe_ok: true,
+            has_probe: true,
+            started_at: Some(100),
+            start_error: Some("启动失败".to_string()),
+            ..base.clone()
+        });
+        assert_eq!(
+            err_over_ready,
+            (LifeState::Failed, Some("启动失败".to_string()))
+        );
+
+        // Process exit inside the grace window is not yet a failure.
+        let in_grace = derive_state(StateInput {
+            started_at: Some(100),
+            now: 100 + START_EXIT_GRACE_SECS - 1,
+            ..base.clone()
+        });
+        assert_eq!(in_grace, (LifeState::Starting, None));
+
+        // Process exit exactly at the grace boundary fails.
+        let at_grace = derive_state(StateInput {
+            started_at: Some(100),
+            now: 100 + START_EXIT_GRACE_SECS,
+            ..base.clone()
+        });
+        assert_eq!(
+            at_grace,
+            (LifeState::Failed, Some("进程已退出".to_string()))
+        );
+
+        // Timeout wording carries the configured budget.
+        let timeout = derive_state(StateInput {
+            process_alive: true,
+            started_at: Some(100),
+            now: 100 + 45,
+            timeout_secs: 45,
+            ..base.clone()
+        });
+        assert_eq!(
+            timeout,
+            (LifeState::Failed, Some("超过 45 秒仍未就绪".to_string()))
+        );
+
+        // timeout_secs = 0 fails immediately with the zero wording.
+        let zero_timeout = derive_state(StateInput {
+            process_alive: true,
+            started_at: Some(100),
+            now: 100,
+            timeout_secs: 0,
+            ..base.clone()
+        });
+        assert_eq!(
+            zero_timeout,
+            (LifeState::Failed, Some("超过 0 秒仍未就绪".to_string()))
+        );
+
+        // Port conflict suppresses PortOpen; alive process stays Starting.
+        let conflict_no_marker = derive_state(StateInput {
+            process_alive: true,
+            port_open: true,
+            port_conflict: true,
+            has_probe: true,
+            probe_ok: true,
+            ..base.clone()
+        });
+        assert_eq!(conflict_no_marker, (LifeState::Starting, None));
+
+        // Port open, no marker, probe configured but failing -> PortOpen.
+        let no_marker_probe_fail = derive_state(StateInput {
+            port_open: true,
+            has_probe: true,
+            probe_ok: false,
+            ..base.clone()
+        });
+        assert_eq!(no_marker_probe_fail, (LifeState::PortOpen, None));
+
+        // Port open, no marker, no probe -> Ready.
+        let no_marker_no_probe = derive_state(StateInput {
+            port_open: true,
+            ..base.clone()
+        });
+        assert_eq!(no_marker_no_probe, (LifeState::Ready, None));
+    }
+
+    #[test]
+    fn extract_start_failure_line_edge_cases() {
+        // Empty / whitespace-only / non-failure logs produce no reason.
+        assert_eq!(extract_start_failure_line(""), None);
+        assert_eq!(extract_start_failure_line("\n  \n\t\n"), None);
+        assert_eq!(extract_start_failure_line("ready on port 8080\n"), None);
+
+        // Last port-in-use line wins and whitespace is collapsed.
+        let port = extract_start_failure_line(
+            "Address already in use: 3000\nPort   8080   was already in use\n",
+        )
+        .unwrap();
+        assert!(port.starts_with("端口被占用"));
+        assert!(port.contains("Port 8080 was already in use"));
+        assert!(!port.contains("3000"));
+
+        // Chinese port phrase is recognised and prefixed once.
+        let zh = extract_start_failure_line("端口已被占用\n").unwrap();
+        assert_eq!(zh, "端口被占用：端口已被占用");
+
+        // Dependency resolution outranks an exception even when it appears earlier.
+        let dep_beats_ex = extract_start_failure_line(
+            "Exception in thread \"main\"\nCould not resolve dependencies for project a:b:1\n",
+        )
+        .unwrap();
+        assert!(dep_beats_ex.starts_with("依赖解析失败"));
+
+        // "failed to resolve" is treated as a dependency problem.
+        let resolve = extract_start_failure_line("failed to resolve module foo\n").unwrap();
+        assert!(resolve.starts_with("依赖解析失败"));
+
+        // ANSI escapes are stripped before matching.
+        let ansi =
+            extract_start_failure_line("\u{1b}[31mAddress already in use\u{1b}[0m\n").unwrap();
+        assert!(ansi.starts_with("端口被占用"));
+        assert!(!ansi.contains('\u{1b}'));
+
+        // A bare "Caused by:" line is surfaced as 异常.
+        let caused = extract_start_failure_line("Caused by: java.io.IOException\n").unwrap();
+        assert_eq!(caused, "异常：Caused by: java.io.IOException");
+
+        // Over-long reasons are truncated to 180 chars plus an ellipsis.
+        let long = format!("Exception {}", "x".repeat(240));
+        let truncated = extract_start_failure_line(&long).unwrap();
+        assert!(truncated.starts_with("异常："));
+        assert!(truncated.ends_with('…'));
+        assert_eq!(truncated.chars().count(), "异常：".chars().count() + 181);
+
+        // "error:" style lines need at least 8 chars.
+        assert_eq!(extract_start_failure_line("error:a\n"), None);
+        assert!(extract_start_failure_line("error: boom\n").is_some());
+    }
+
+    #[test]
+    fn prefix_failure_and_log_helpers_edge_cases() {
+        assert_eq!(
+            prefix_failure("异常", "java.lang.Exception"),
+            "异常：java.lang.Exception"
+        );
+        // Already-prefixed content is returned unchanged.
+        assert_eq!(prefix_failure("端口被占用", "端口被占用"), "端口被占用");
+        // Truncation applies before prefixing.
+        let long = "y".repeat(200);
+        let out = prefix_failure("异常", &long);
+        assert!(out.starts_with("异常："));
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().count(), "异常：".chars().count() + 181);
+
+        assert_eq!(collapse_ws("  a \t b\n c "), "a b c");
+        assert_eq!(collapse_ws(""), "");
+        assert_eq!(strip_ansi_line("\u{1b}[32mok\u{1b}[0m"), "ok");
+        assert_eq!(strip_ansi_line("plain"), "plain");
+        assert_eq!(
+            log_lines(" a \n\n b \n"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn failure_allows_log_line_edge_cases() {
+        assert!(failure_allows_log_line("进程已退出"));
+        assert!(failure_allows_log_line("进程已退出：some tail"));
+        assert!(failure_allows_log_line("启动失败"));
+        assert!(failure_allows_log_line("超过 10 秒仍未就绪"));
+        assert!(failure_allows_log_line("超过 0 秒仍未就绪"));
+
+        assert!(!failure_allows_log_line(
+            "端口被占用：Address already in use"
+        ));
+        assert!(!failure_allows_log_line("依赖解析失败：Could not resolve"));
+        assert!(!failure_allows_log_line(
+            "缺 Java 8：未在 ~/.sdkman 找到 8.*"
+        ));
+        assert!(!failure_allows_log_line("缺 Node 18：未找到 node"));
+        assert!(!failure_allows_log_line("依赖未安装：node_modules missing"));
+        assert!(!failure_allows_log_line("已停用：disabled"));
+        assert!(!failure_allows_log_line("project disabled"));
+        assert!(!failure_allows_log_line(
+            "建议去掉 --port，端口传递方式选「不传」"
+        ));
+        assert!(!failure_allows_log_line(""));
+    }
+
+    #[test]
+    fn unresolved_status_empty_failure() {
+        let row = ProjectRow {
+            id: "demo_api".into(),
+            name: "Demo API".into(),
+            group: None,
+            root: "~/code/demo/api".into(),
+            enabled: true,
+            port: 3000,
+            reason: String::new(),
+            configured: true,
+            start_timeout_secs: None,
+            stop_grace_secs: None,
+            node: None,
+            java: None,
+            java_home: None,
+            node_home: None,
+            shell: None,
+            auto_install: true,
+            port_mode: "none".into(),
+            port_arg: None,
+            port_env: None,
+            env: Default::default(),
+            pty: false,
+            auto_answers: Vec::new(),
+            links: Vec::new(),
+            default_profile: None,
+            profiles: Default::default(),
+            depends_on: Vec::new(),
+            start_command: String::new(),
+            resolve_error: None,
+        };
+        let st = unresolved_status(&row, String::new());
+        assert_eq!(st.state, LifeState::Stopped);
+        assert!(!st.running);
+        assert_eq!(st.failure.as_deref(), Some(""));
+        assert_eq!(st.port, 3000);
+        let json = serde_json::to_string(&st).unwrap();
+        assert!(json.contains("\"failure\":\"\""));
+    }
 }

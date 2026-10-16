@@ -10547,6 +10547,90 @@ background = true
 }
 
 #[cfg(test)]
+mod input_helpers_tests {
+    use super::*;
+
+    #[test]
+    fn pure_unit_test_map_key_and_resolve_input_data() {
+        // map_key tests for arrows
+        assert_eq!(map_key("up"), Some("\x1b[A"));
+        assert_eq!(map_key("UP"), Some("\x1b[A"));
+        assert_eq!(map_key("down"), Some("\x1b[B"));
+        assert_eq!(map_key("Down"), Some("\x1b[B"));
+        assert_eq!(map_key("right"), Some("\x1b[C"));
+        assert_eq!(map_key("RIGHT"), Some("\x1b[C"));
+        assert_eq!(map_key("left"), Some("\x1b[D"));
+        assert_eq!(map_key("Left"), Some("\x1b[D"));
+
+        // Whitespace and escape keys
+        assert_eq!(map_key("enter"), Some("\n"));
+        assert_eq!(map_key("Enter"), Some("\n"));
+        assert_eq!(map_key("tab"), Some("\t"));
+        assert_eq!(map_key("TAB"), Some("\t"));
+        assert_eq!(map_key("esc"), Some("\x1b"));
+        assert_eq!(map_key("escape"), Some("\x1b"));
+        assert_eq!(map_key("ESCAPE"), Some("\x1b"));
+
+        // Control-C variants
+        assert_eq!(map_key("ctrl-c"), Some("\x03"));
+        assert_eq!(map_key("ctrl_c"), Some("\x03"));
+        assert_eq!(map_key("ctrlc"), Some("\x03"));
+        assert_eq!(map_key("CTRL-C"), Some("\x03"));
+
+        // Unknown keys
+        assert_eq!(map_key("unknown"), None);
+        assert_eq!(map_key(""), None);
+        assert_eq!(map_key("backspace"), None);
+        assert_eq!(map_key("ctrl-d"), None);
+
+        // resolve_input_data: text only
+        assert_eq!(
+            resolve_input_data(Some("hello"), false, None).unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            resolve_input_data(Some("hello"), true, None).unwrap(),
+            "hello\n"
+        );
+
+        // resolve_input_data: enter only (no text, no key)
+        assert_eq!(resolve_input_data(None, true, None).unwrap(), "\n");
+
+        // resolve_input_data: key only
+        assert_eq!(
+            resolve_input_data(None, false, Some("up")).unwrap(),
+            "\x1b[A"
+        );
+        // when key is specified, enter = true does not add extra \n (has_key is true)
+        assert_eq!(
+            resolve_input_data(None, true, Some("ctrl-c")).unwrap(),
+            "\x03"
+        );
+
+        // resolve_input_data: text and key combined
+        assert_eq!(
+            resolve_input_data(Some("select option"), false, Some("enter")).unwrap(),
+            "select option\n"
+        );
+        assert_eq!(
+            resolve_input_data(Some("item"), true, Some("tab")).unwrap(),
+            "item\t"
+        );
+
+        // resolve_input_data: unknown key error
+        let err_bad_key = resolve_input_data(None, false, Some("foo_bar")).unwrap_err();
+        assert!(err_bad_key.to_string().contains("未知按键: foo_bar"));
+
+        // resolve_input_data: empty input error
+        let err_empty1 = resolve_input_data(None, false, None).unwrap_err();
+        assert!(err_empty1.to_string().contains("empty input"));
+
+        let err_empty2 = resolve_input_data(Some(""), false, None).unwrap_err();
+        assert!(err_empty2.to_string().contains("empty input"));
+    }
+}
+
+#[cfg(test)]
 mod ordering_and_status_edge_cases_tests {
     use super::*;
 

@@ -1139,4 +1139,80 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn toolchain_version_matcher_helpers() {
+        // java_version_matches
+        assert!(!java_version_matches("current", "8"));
+        assert!(!java_version_matches(".hidden", "8"));
+        assert!(java_version_matches("8", "8"));
+        assert!(java_version_matches("8", "1.8"));
+        assert!(java_version_matches("1.8", "8"));
+        assert!(java_version_matches("8.0.392-zulu", "8"));
+        assert!(java_version_matches("8.0.504+1-zulu", "1.8"));
+        assert!(java_version_matches("1.8.0_392", "8"));
+        assert!(java_version_matches("1.8.0-tem", "1.8"));
+        assert!(java_version_matches("17.0.9-tem", "17"));
+        assert!(java_version_matches("17+35", "17"));
+        assert!(java_version_matches("17_35", "17"));
+        assert!(!java_version_matches("170", "17"));
+        assert!(!java_version_matches("7.0.1", "17"));
+        assert!(!java_version_matches("11.0.2", "17"));
+
+        // node_version_matches
+        assert!(node_version_matches("v20.10.0", "20"));
+        assert!(node_version_matches("v20.10.0", "v20"));
+        assert!(node_version_matches("20.10.0", "20.10"));
+        assert!(node_version_matches("v22.11.0", "22"));
+        assert!(node_version_matches("v20-nightly", "20"));
+        assert!(node_version_matches("v20+build", "20"));
+        assert!(!node_version_matches("v200.0.0", "20"));
+        assert!(!node_version_matches("v18.0.0", "20"));
+
+        // mac_jvm_matches & win_java_matches
+        assert!(mac_jvm_matches("jdk-8.jdk", "8"));
+        assert!(mac_jvm_matches("zulu-8.jdk", "1.8"));
+        assert!(mac_jvm_matches("jdk-17.jdk", "17"));
+        assert!(mac_jvm_matches("jdk17.0.9.jdk", "17"));
+        assert!(!mac_jvm_matches("jdk-11.jdk", "17"));
+
+        assert!(win_java_matches("Zulu", "zulu-8.0.392-win_x64", "8"));
+        assert!(win_java_matches("Zulu", "zulu8", "1.8"));
+        assert!(win_java_matches("Zulu", "zulu-17.0.9-win_x64", "17"));
+        assert!(!win_java_matches("Zulu", "zulu-21", "17"));
+        assert!(win_java_matches(
+            "Eclipse Adoptium",
+            "jdk-17.0.9.9-hotspot",
+            "17"
+        ));
+        assert!(win_java_matches("Eclipse Adoptium", "jdk-8.0.392", "8"));
+        assert!(win_java_matches("Java", "jdk1.8.0_392", "8"));
+        assert!(!win_java_matches("OtherVendor", "jdk-17", "17"));
+
+        // parse_version_key ordering
+        let k1 = parse_version_key("8.0.392");
+        let k2 = parse_version_key("8.0.504");
+        assert!(k2 > k1);
+        let k_ver9 = parse_version_key("17.0.9");
+        let k_ver10 = parse_version_key("17.0.10");
+        assert!(
+            k_ver10 > k_ver9,
+            "numeric components must sort numerically, not lexicographically"
+        );
+
+        // format_home
+        assert_eq!(
+            format_home(Path::new("/home/user/code"), Some(Path::new("/home/user"))),
+            "~/code"
+        );
+        assert_eq!(
+            format_home(Path::new("/home/user"), Some(Path::new("/home/user"))),
+            "~"
+        );
+        assert_eq!(
+            format_home(Path::new("/opt/bin"), Some(Path::new("/home/user"))),
+            "/opt/bin"
+        );
+        assert_eq!(format_home(Path::new("/opt/bin"), None), "/opt/bin");
+    }
 }

@@ -95,3 +95,5 @@ Unix 上 `pty = true` 的后台进程不走系统 `script`。macOS 与 Linux 同
 - 不把真实项目路径、内网地址、密钥写进仓库或本 skill。
 - 不 source sdkman/fnm 初始化脚本启项目；版本由 core 注入 `JAVA_HOME`/`PATH`。
 - 本 skill 不是 MCP；外部 Agent 靠 CLI/`--json` 或本机 HTTP。
+
+2026-10-16：CLI 全局 --task/--actor、operations 与持久化审计见 [Agent 安全与追溯](../../../docs/agent-safety.md)。

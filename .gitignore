@@ -11,3 +11,6 @@ apps/desktop/src-tauri/target
 
 # Local project registry (examples and template remain tracked)
 /config/projects.toml
+
+# Local durable operation metadata
+audit/

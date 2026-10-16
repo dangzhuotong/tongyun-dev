@@ -30,3 +30,5 @@
 ## 验收（短）
 
 见 [docs/development.md](development.md)「验收清单」。
+
+2026-10-16：共享核心的持久化操作记录、CLI 关联字段和配置备份见 [Agent 安全与追溯](agent-safety.md)。

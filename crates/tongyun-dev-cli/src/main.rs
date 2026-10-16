@@ -19,6 +19,11 @@ struct Cli {
     /// Config file path (lookup order: --config -> $TONGYUN_DEV_CONFIG -> ~/.config/tongyun-dev/settings.json -> ~/.config/tongyun-dev/projects.toml -> ./config/projects.toml)
     #[arg(long, global = true)]
     config: Option<PathBuf>,
+    /// Trace correlation across local tools; labels identify the caller, not an authenticated person.
+    #[arg(long, global = true, default_value = "cli:local")]
+    actor: String,
+    #[arg(long, global = true, default_value = "cli-session")]
+    task: String,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -26,6 +31,8 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 #[allow(clippy::large_enum_variant)]
 enum Cmd {
+    /// Durable metadata for operations across CLI, Web and desktop
+    Operations {},
     /// List registered projects
     List {
         #[arg(long)]
@@ -420,6 +427,24 @@ fn machine_operation(cmd: &Cmd) -> Option<(&str, &str)> {
 fn run_machine_operation(config: Option<&std::path::Path>, cmd: &Cmd) -> Result<()> {
     let (action, id) = machine_operation(cmd).expect("JSON operation");
     let loaded = tongyun_dev_core::load(config);
+    let (actor, task) = tongyun_dev_core::audit::context();
+    let operation = loaded
+        .as_ref()
+        .ok()
+        .map(|loaded| {
+            tongyun_dev_core::audit::Operation::begin(
+                &loaded.audit_dir(),
+                "dev",
+                action,
+                id,
+                &actor,
+                &task,
+            )
+        })
+        .transpose()?;
+    let operation_id = operation
+        .as_ref()
+        .map(|operation| operation.id().to_string());
     let mut status = None;
     let mut logs = None;
     let result: Result<()> = (|| {
@@ -468,9 +493,17 @@ fn run_machine_operation(config: Option<&std::path::Path>, cmd: &Cmd) -> Result<
     if status.is_none() {
         status = loaded.as_ref().ok().and_then(|l| l.status(id).ok());
     }
+    if let Some(operation) = operation {
+        operation.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed_or_unknown"
+        })?;
+    }
     println!(
         "{}",
         serde_json::to_string(&serde_json::json!({
+            "schemaVersion":1,"operationId":operation_id,"taskId":task,
             "ok": result.is_ok(), "action": action, "id": id,
             "status": status, "logs": logs,
             "error": result.as_ref().err().map(|e| format!("{e:#}")),
@@ -743,6 +776,7 @@ fn print_status(st: &StatusJson, json: bool) -> Result<()> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let _trace_context = tongyun_dev_core::audit::enter(&cli.actor, &cli.task);
     let cmd = cli.cmd.unwrap_or(Cmd::Ui {
         port: DEFAULT_UI_PORT,
         no_open: false,
@@ -770,6 +804,7 @@ fn main() -> Result<()> {
         }
     };
     match cmd {
+        Cmd::Operations {} => println!("{}", serde_json::to_string(&loaded.operation_history()?)?),
         Cmd::List { json, with_groups } => print_list(&loaded, json, with_groups)?,
         Cmd::Start {
             ref id,

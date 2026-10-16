@@ -917,8 +917,8 @@ log_dir = "{d}/logs"
     )
     .unwrap();
 
-    let ui_port = free_port();
-    let ui_listener = TcpListener::bind(("127.0.0.1", ui_port)).unwrap();
+    let ui_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let ui_port = ui_listener.local_addr().unwrap().port();
     let cfg_clone = cfg.clone();
     thread::spawn(move || {
         let _ = tongyun_dev_cli::server::serve(ui_listener, cfg_clone, ui_port);
@@ -1493,8 +1493,8 @@ port = 8080
     )
     .unwrap();
 
-    let ui_port = free_port();
-    let ui_listener = TcpListener::bind(("127.0.0.1", ui_port)).unwrap();
+    let ui_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let ui_port = ui_listener.local_addr().unwrap().port();
     let cfg_clone = cfg.clone();
     thread::spawn(move || {
         let _ = tongyun_dev_cli::server::serve(ui_listener, cfg_clone, ui_port);
@@ -1565,4 +1565,102 @@ port = 8080
         !toml_content_after_patch.contains("ghost_patch_grp"),
         "config should NOT contain ghost_patch_grp after failed patch: {toml_content_after_patch}"
     );
+}
+
+#[test]
+fn durable_operations_survive_reload_and_config_backups_are_private() {
+    let dir = temp_dir("audit");
+    let cfg = write_config(&dir, free_port());
+    let original = fs::read(&cfg).unwrap();
+    let _context = tongyun_dev_core::audit::enter("agent:fixture", "task-fixture");
+    let mut loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    loaded.create_group("fixture", Some("Fixture")).unwrap();
+    assert!(loaded.stop("missing-fixture").is_err());
+    let reopened = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    let events = reopened.operation_history().unwrap();
+    assert!(events.iter().any(|e| e.action == "create_group"
+        && e.phase == "finished"
+        && e.task_id == "task-fixture"));
+    assert!(events
+        .iter()
+        .any(|e| e.action == "stop" && e.outcome.as_deref() == Some("failed_or_unknown")));
+    let backup = fs::read_dir(loaded.audit_dir())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with(".before.toml"))
+        .unwrap();
+    assert_eq!(fs::read(&backup).unwrap(), original);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let config = cfg.clone();
+    thread::spawn(move || {
+        let _ = tongyun_dev_cli::server::serve(listener, config, port);
+    });
+    let response = http(
+        port,
+        &format!(
+            "GET /api/operations HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(response.starts_with("HTTP/1.1 200"));
+    assert!(response.contains("task-fixture"));
+    assert!(!response.contains("# test config"));
+}
+
+#[test]
+fn journal_unavailable_blocks_configuration_changes() {
+    let dir = temp_dir("audit_failure");
+    let cfg = write_config(&dir, free_port());
+    let original = fs::read(&cfg).unwrap();
+    fs::write(dir.join("audit"), "not directory").unwrap();
+    let mut loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    assert!(loaded.create_group("fixture", None).is_err());
+    assert_eq!(fs::read(cfg).unwrap(), original);
+}
+
+#[test]
+fn cli_operation_returns_task_and_operation_id_persisted_across_processes() {
+    let dir = temp_dir("cli_trace");
+    let cfg = write_config(&dir, free_port());
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_tongyun-dev"))
+        .arg("--config")
+        .arg(&cfg)
+        .args([
+            "--task",
+            "task-fixture",
+            "--actor",
+            "agent:fixture",
+            "stop",
+            "missing-fixture",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["taskId"], "task-fixture");
+    let id = value["operationId"].as_str().unwrap();
+    let history = std::process::Command::new(env!("CARGO_BIN_EXE_tongyun-dev"))
+        .arg("--config")
+        .arg(&cfg)
+        .arg("operations")
+        .output()
+        .unwrap();
+    assert!(history.status.success());
+    let events: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
+    assert!(events
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["operationId"] == id
+            && e["phase"] == "finished"
+            && e["actor"] == "agent:fixture"));
 }

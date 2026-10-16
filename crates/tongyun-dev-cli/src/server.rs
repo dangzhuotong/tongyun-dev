@@ -178,6 +178,7 @@ fn trusted(req: &Request, port: u16) -> bool {
 }
 
 fn handle_connection(mut stream: TcpStream, state: &AppState) -> Result<()> {
+    let _trace_context = tongyun_dev_core::audit::enter("web:local", "web-session");
     let Some(req) = read_request(&mut stream)? else {
         return Ok(());
     };
@@ -314,6 +315,10 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
         Err(e) => return err_json(500, format!("{e:#}")),
     };
     match method {
+        "GET" if path == "/api/operations" => match loaded.operation_history() {
+            Ok(events) => json_body(200, json!({"ok":true,"events":events})),
+            Err(_) => err_json(503, "AUDIT_UNAVAILABLE"),
+        },
         "GET" if path == "/api/projects" => match overview(&loaded) {
             Ok(list) => json_body(200, Value::Array(list)),
             Err(e) => err_json(500, format!("{e:#}")),

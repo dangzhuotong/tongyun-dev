@@ -10,6 +10,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub mod audit;
 pub mod scan;
 pub mod toolchain;
 
@@ -626,6 +627,13 @@ fn unresolved_row(id: &str, raw: Option<&Project>, err: String) -> ProjectRow {
 }
 
 impl Loaded {
+    pub fn audit_dir(&self) -> PathBuf {
+        self.path.with_file_name("audit")
+    }
+    pub fn operation_history(&self) -> Result<Vec<audit::Event>> {
+        Ok(audit::read(&self.audit_dir())?)
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -1173,94 +1181,112 @@ impl Loaded {
         id: &str,
         profile_name: Option<&str>,
     ) -> Result<StatusJson> {
-        let project = self.resolve_with_profile(id, profile_name)?;
-        if !project.enabled {
-            let why = if project.reason.is_empty() {
-                "disabled"
-            } else {
-                project.reason.as_str()
-            };
-            bail!("project `{}` is disabled: {why}", project.id);
-        }
+        let (actor, task) = audit::context();
+        let op = audit::Operation::begin(
+            &self.audit_dir(),
+            "dev",
+            "start_detached_with_profile",
+            id,
+            &actor,
+            &task,
+        )?;
+        let result = (|| {
+            let project = self.resolve_with_profile(id, profile_name)?;
+            if !project.enabled {
+                let why = if project.reason.is_empty() {
+                    "disabled"
+                } else {
+                    project.reason.as_str()
+                };
+                bail!("project `{}` is disabled: {why}", project.id);
+            }
 
-        if !project.depends_on.is_empty() {
-            for dep_id in &project.depends_on {
-                let dep_proj = self
-                    .config
-                    .projects
-                    .get(dep_id)
-                    .with_context(|| format!("项目 `{id}` 的依赖项 `{dep_id}` 不存在"))?;
-                if !dep_proj.enabled {
-                    bail!("项目 `{id}` 的依赖项 `{dep_id}` 已停用，无法启动");
-                }
-                let st = self.status(dep_id)?;
-                if !matches!(st.state, LifeState::Ready | LifeState::PortOpen) {
-                    let _ = self.start_detached_with_profile(dep_id, None)?;
+            if !project.depends_on.is_empty() {
+                for dep_id in &project.depends_on {
+                    let dep_proj = self
+                        .config
+                        .projects
+                        .get(dep_id)
+                        .with_context(|| format!("项目 `{id}` 的依赖项 `{dep_id}` 不存在"))?;
+                    if !dep_proj.enabled {
+                        bail!("项目 `{id}` 的依赖项 `{dep_id}` 已停用，无法启动");
+                    }
+                    let st = self.status(dep_id)?;
+                    if !matches!(st.state, LifeState::Ready | LifeState::PortOpen) {
+                        let _ = self.start_detached_with_profile(dep_id, None)?;
+                    }
                 }
             }
-        }
 
-        // Do not reinstall dependencies or replace markers for an existing process.
-        if !tracked_pids(&project).is_empty() {
-            return self.status(id);
-        }
-        let current = self.status(id)?;
-        if current.port_conflict {
-            bail!(
-                "端口 {} 被其他进程占用：{}",
-                current.port,
-                current.port_holder
-            );
-        }
-        // 正在装依赖：装完会自己接着启动，不重复起。
-        if install_in_progress(&project.pid_file) {
-            return self.status(id);
-        }
-        if deps_missing(&project.root) && !(project.background && is_ready(&project)) {
-            if project.auto_install {
-                let _ = std::fs::remove_file(start_marker_path(&project.pid_file));
-                begin_install(&project, true);
+            // Do not reinstall dependencies or replace markers for an existing process.
+            if !tracked_pids(&project).is_empty() {
+                return self.status(id);
+            }
+            let current = self.status(id)?;
+            if current.port_conflict {
+                bail!(
+                    "端口 {} 被其他进程占用：{}",
+                    current.port,
+                    current.port_holder
+                );
+            }
+            // 正在装依赖：装完会自己接着启动，不重复起。
+            if install_in_progress(&project.pid_file) {
+                return self.status(id);
+            }
+            if deps_missing(&project.root) && !(project.background && is_ready(&project)) {
+                if project.auto_install {
+                    let _ = std::fs::remove_file(start_marker_path(&project.pid_file));
+                    begin_install(&project, true);
+                    return self.status(id);
+                }
+                let _ = clear_install_marker(&project.pid_file);
+                let marker = StartMarker {
+                    started_at: current_time_secs(),
+                    timeout_secs: start_ready_timeout_secs(&project),
+                    error: Some(DEPS_MISSING_MSG.to_string()),
+                };
+                let _ = write_start_marker(&project.pid_file, &marker);
                 return self.status(id);
             }
             let _ = clear_install_marker(&project.pid_file);
-            let marker = StartMarker {
-                started_at: current_time_secs(),
-                timeout_secs: start_ready_timeout_secs(&project),
-                error: Some(DEPS_MISSING_MSG.to_string()),
-            };
-            let _ = write_start_marker(&project.pid_file, &marker);
-            return self.status(id);
-        }
-        let _ = clear_install_marker(&project.pid_file);
 
-        let prof_marker = profile_marker_path(&project.pid_file);
-        let effective_prof = profile_name.or(self
-            .config
-            .projects
-            .get(id)
-            .and_then(|p| p.default_profile.as_deref()));
-        if let Some(prof) = effective_prof {
-            let _ = std::fs::write(&prof_marker, prof);
-        } else {
-            let _ = std::fs::remove_file(&prof_marker);
-        }
-
-        if let Err(e) = cmd_start_detached(&project) {
-            let err_msg = format!("{e:#}");
-            let marker = StartMarker {
-                started_at: current_time_secs(),
-                timeout_secs: start_ready_timeout_secs(&project),
-                error: Some(err_msg.clone()),
-            };
-            let _ = write_start_marker(&project.pid_file, &marker);
-            let mut st = self.status(id)?;
-            if st.state != LifeState::Failed {
-                st.state = LifeState::Failed;
-                st.failure = Some(err_msg);
+            let prof_marker = profile_marker_path(&project.pid_file);
+            let effective_prof = profile_name.or(self
+                .config
+                .projects
+                .get(id)
+                .and_then(|p| p.default_profile.as_deref()));
+            if let Some(prof) = effective_prof {
+                let _ = std::fs::write(&prof_marker, prof);
+            } else {
+                let _ = std::fs::remove_file(&prof_marker);
             }
-            return Ok(st);
-        }
-        self.status(id)
+
+            if let Err(e) = cmd_start_detached(&project) {
+                let err_msg = format!("{e:#}");
+                let marker = StartMarker {
+                    started_at: current_time_secs(),
+                    timeout_secs: start_ready_timeout_secs(&project),
+                    error: Some(err_msg.clone()),
+                };
+                let _ = write_start_marker(&project.pid_file, &marker);
+                let mut st = self.status(id)?;
+                if st.state != LifeState::Failed {
+                    st.state = LifeState::Failed;
+                    st.failure = Some(err_msg);
+                }
+                return Ok(st);
+            }
+            self.status(id)
+        })();
+        op.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed_or_unknown"
+        })
+        .context("audit completion failed; inspect started operation before retry")?;
+        result
     }
 
     pub fn start(&self, id: &str) -> Result<StatusJson> {
@@ -1278,8 +1304,26 @@ impl Loaded {
         profile_name: Option<&str>,
         timeout: Option<Duration>,
     ) -> Result<StatusJson> {
-        let mut visited = Vec::new();
-        self.start_with_profile_internal(id, profile_name, timeout, &mut visited)
+        let (actor, task) = audit::context();
+        let op = audit::Operation::begin(
+            &self.audit_dir(),
+            "dev",
+            "start_with_profile",
+            id,
+            &actor,
+            &task,
+        )?;
+        let result = (|| {
+            let mut visited = Vec::new();
+            self.start_with_profile_internal(id, profile_name, timeout, &mut visited)
+        })();
+        op.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed_or_unknown"
+        })
+        .context("audit completion failed; inspect started operation before retry")?;
+        result
     }
 
     fn start_with_profile_internal(
@@ -1403,12 +1447,30 @@ impl Loaded {
         id: &str,
         profile_name: Option<&str>,
     ) -> Result<StatusJson> {
-        let project = self.resolve_with_profile(id, profile_name)?;
-        if !project.enabled {
-            bail!("project `{id}` is disabled: {}", project.reason);
-        }
-        self.stop(id)?;
-        self.start_detached_with_profile(id, profile_name)
+        let (actor, task) = audit::context();
+        let op = audit::Operation::begin(
+            &self.audit_dir(),
+            "dev",
+            "restart_detached_with_profile",
+            id,
+            &actor,
+            &task,
+        )?;
+        let result = (|| {
+            let project = self.resolve_with_profile(id, profile_name)?;
+            if !project.enabled {
+                bail!("project `{id}` is disabled: {}", project.reason);
+            }
+            self.stop(id)?;
+            self.start_detached_with_profile(id, profile_name)
+        })();
+        op.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed_or_unknown"
+        })
+        .context("audit completion failed; inspect started operation before retry")?;
+        result
     }
 
     /// Restart and wait for readiness, as with `start`.
@@ -1417,7 +1479,23 @@ impl Loaded {
     }
 
     pub fn restart_with_timeout(&self, id: &str, timeout: Option<Duration>) -> Result<StatusJson> {
-        self.restart_with_profile(id, None, timeout)
+        let (actor, task) = audit::context();
+        let op = audit::Operation::begin(
+            &self.audit_dir(),
+            "dev",
+            "restart_with_timeout",
+            id,
+            &actor,
+            &task,
+        )?;
+        let result = (|| self.restart_with_profile(id, None, timeout))();
+        op.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed_or_unknown"
+        })
+        .context("audit completion failed; inspect started operation before retry")?;
+        result
     }
 
     pub fn restart_with_profile(
@@ -1432,12 +1510,23 @@ impl Loaded {
     }
 
     pub fn stop(&self, id: &str) -> Result<StatusJson> {
-        let project = self.resolve(id)?;
-        cancel_install(&project)?;
-        let _ = std::fs::remove_file(profile_marker_path(&project.pid_file));
-        cmd_stop(&project)?;
-        let peers = self.peer_pids(&project.id);
-        Ok(status_of(&project, &peers))
+        let (actor, task) = audit::context();
+        let op = audit::Operation::begin(&self.audit_dir(), "dev", "stop", id, &actor, &task)?;
+        let result = (|| {
+            let project = self.resolve(id)?;
+            cancel_install(&project)?;
+            let _ = std::fs::remove_file(profile_marker_path(&project.pid_file));
+            cmd_stop(&project)?;
+            let peers = self.peer_pids(&project.id);
+            Ok(status_of(&project, &peers))
+        })();
+        op.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed_or_unknown"
+        })
+        .context("audit completion failed; inspect started operation before retry")?;
+        result
     }
 
     /// 批量启动项目（阻塞等待就绪）
@@ -1676,44 +1765,74 @@ impl Loaded {
 
     /// 后台装前端依赖（按锁文件选 pnpm / yarn / npm），日志追加到项目日志，立刻返回（状态 installing）。
     pub fn install_deps(&self, id: &str) -> Result<StatusJson> {
-        let project = self.resolve(id)?;
-        if detect_package_manager(&project.root).is_none() {
-            bail!(
-                "不是前端项目：{} 下没有 package.json",
-                project.root.display()
-            );
-        }
-        if !install_in_progress(&project.pid_file) {
-            begin_install(&project, false);
-        }
-        self.status(id)
+        let (actor, task) = audit::context();
+        let op =
+            audit::Operation::begin(&self.audit_dir(), "dev", "install_deps", id, &actor, &task)?;
+        let result = (|| {
+            let project = self.resolve(id)?;
+            if detect_package_manager(&project.root).is_none() {
+                bail!(
+                    "不是前端项目：{} 下没有 package.json",
+                    project.root.display()
+                );
+            }
+            if !install_in_progress(&project.pid_file) {
+                begin_install(&project, false);
+            }
+            self.status(id)
+        })();
+        op.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed_or_unknown"
+        })
+        .context("audit completion failed; inspect started operation before retry")?;
+        result
     }
 
     /// CLI 用：装完才返回。失败时返回错误（原因同 App 里显示的）。
     pub fn install_deps_blocking(&self, id: &str) -> Result<StatusJson> {
-        let project = self.resolve(id)?;
-        if detect_package_manager(&project.root).is_none() {
-            bail!(
-                "不是前端项目：{} 下没有 package.json",
-                project.root.display()
-            );
-        }
-        if install_in_progress(&project.pid_file) {
-            bail!("{} 正在装依赖，稍后再试", project.id);
-        }
-        match spawn_install(&project, false) {
-            Ok(handle) => {
-                let _ = handle.join();
+        let (actor, task) = audit::context();
+        let op = audit::Operation::begin(
+            &self.audit_dir(),
+            "dev",
+            "install_deps_blocking",
+            id,
+            &actor,
+            &task,
+        )?;
+        let result = (|| {
+            let project = self.resolve(id)?;
+            if detect_package_manager(&project.root).is_none() {
+                bail!(
+                    "不是前端项目：{} 下没有 package.json",
+                    project.root.display()
+                );
             }
-            Err(e) => {
-                write_install_failure(&project, &format!("{e:#}"));
+            if install_in_progress(&project.pid_file) {
+                bail!("{} 正在装依赖，稍后再试", project.id);
             }
-        }
-        let st = self.status(id)?;
-        if st.state == LifeState::Failed {
-            bail!("{}", st.failure.unwrap_or_else(|| "依赖安装失败".into()));
-        }
-        Ok(st)
+            match spawn_install(&project, false) {
+                Ok(handle) => {
+                    let _ = handle.join();
+                }
+                Err(e) => {
+                    write_install_failure(&project, &format!("{e:#}"));
+                }
+            }
+            let st = self.status(id)?;
+            if st.state == LifeState::Failed {
+                bail!("{}", st.failure.unwrap_or_else(|| "依赖安装失败".into()));
+            }
+            Ok(st)
+        })();
+        op.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed_or_unknown"
+        })
+        .context("audit completion failed; inspect started operation before retry")?;
+        result
     }
 
     /// Last lines of the catalina log. `missing` is true when the file is not there yet.
@@ -1762,7 +1881,17 @@ impl Loaded {
 
     /// 向运行中的项目标准输入管道写入数据。
     pub fn send_input(&self, id: &str, data: &str) -> Result<()> {
-        self.send_input_internal(id, data, None)
+        let (actor, task) = audit::context();
+        let op =
+            audit::Operation::begin(&self.audit_dir(), "dev", "send_input", id, &actor, &task)?;
+        let result = (|| self.send_input_internal(id, data, None))();
+        op.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed_or_unknown"
+        })
+        .context("audit completion failed; inspect started operation before retry")?;
+        result
     }
 
     pub(crate) fn send_input_internal(
@@ -6049,9 +6178,27 @@ fn write_doc(path: &Path, doc: &toml_edit::DocumentMut) -> Result<()> {
     let text = doc.to_string();
     // Refuse to write something the loader cannot read back.
     parse_config(&text)?;
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, &text).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
+    let dir = path.with_file_name("audit");
+    let (actor, task) = audit::context();
+    let op = audit::Operation::begin(
+        &dir,
+        "dev",
+        "configuration.write",
+        "projects.toml",
+        &actor,
+        &task,
+    )?;
+    let id = op.id().to_string();
+    let old = std::fs::read(path)?;
+    // Recovery bytes are private files, never included in the public event JSON.
+    audit::private_write(&dir.join(format!("{id}.before.toml")), &old)?;
+    let tmp = path.with_file_name(format!(".projects-{id}.tmp"));
+    audit::private_write(&tmp, text.as_bytes())?;
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error.into());
+    }
+    op.finish("completed")?;
     Ok(())
 }
 
@@ -6073,79 +6220,115 @@ impl Loaded {
 
     /// Register a project and write it to the config file. Existing ids are refused.
     pub fn add_project(&mut self, req: NewProject) -> Result<ProjectRow> {
-        let (id, project) = req.into_project()?;
-        if self.config.projects.contains_key(&id) {
-            bail!("project `{id}` already exists; remove it first or pick another id");
-        }
-        // Same validation as loading: absolute root, templates resolve, etc.
-        resolve_project_with_log_default(
-            &id,
-            &project,
-            current_home().as_deref(),
-            &self.config.log_dir,
+        let (actor, task) = audit::context();
+        let op = audit::Operation::begin(
+            &self.audit_dir(),
+            "dev",
+            "add_project",
+            "configuration",
+            &actor,
+            &task,
         )?;
-        let mut doc = read_doc(&self.path)?;
-        if !project.group.is_empty() {
-            validate_group_key(&project.group)?;
-            let groups = doc
-                .entry("group")
+        let result = (|| {
+            let (id, project) = req.into_project()?;
+            if self.config.projects.contains_key(&id) {
+                bail!("project `{id}` already exists; remove it first or pick another id");
+            }
+            // Same validation as loading: absolute root, templates resolve, etc.
+            resolve_project_with_log_default(
+                &id,
+                &project,
+                current_home().as_deref(),
+                &self.config.log_dir,
+            )?;
+            let mut doc = read_doc(&self.path)?;
+            if !project.group.is_empty() {
+                validate_group_key(&project.group)?;
+                let groups = doc
+                    .entry("group")
+                    .or_insert_with(|| {
+                        let mut t = toml_edit::Table::new();
+                        t.set_implicit(true);
+                        toml_edit::Item::Table(t)
+                    })
+                    .as_table_mut()
+                    .context("`group` in config is not a table")?;
+                if !groups.contains_key(&project.group) {
+                    let t = toml_edit::Table::new();
+                    groups.insert(&project.group, toml_edit::Item::Table(t));
+                    self.config
+                        .group
+                        .insert(project.group.clone(), GroupConfig::default());
+                }
+            }
+            let projects = doc
+                .entry("projects")
                 .or_insert_with(|| {
                     let mut t = toml_edit::Table::new();
                     t.set_implicit(true);
                     toml_edit::Item::Table(t)
                 })
                 .as_table_mut()
-                .context("`group` in config is not a table")?;
-            if !groups.contains_key(&project.group) {
-                let t = toml_edit::Table::new();
-                groups.insert(&project.group, toml_edit::Item::Table(t));
-                self.config
-                    .group
-                    .insert(project.group.clone(), GroupConfig::default());
+                .context("`projects` in config is not a table")?;
+            if projects.contains_key(&id) {
+                bail!("project `{id}` already exists in {}", self.path.display());
             }
-        }
-        let projects = doc
-            .entry("projects")
-            .or_insert_with(|| {
-                let mut t = toml_edit::Table::new();
-                t.set_implicit(true);
-                toml_edit::Item::Table(t)
-            })
-            .as_table_mut()
-            .context("`projects` in config is not a table")?;
-        if projects.contains_key(&id) {
-            bail!("project `{id}` already exists in {}", self.path.display());
-        }
-        projects.insert(&id, toml_edit::Item::Table(project_table(&project)));
-        write_doc(&self.path, &doc)?;
-        self.config.projects.insert(id.clone(), project);
-        let r = self.resolve(&id)?;
-        let configured = r.port > 0 && (!r.active_start().is_empty() || r.tomcat.is_some());
-        let raw = self.config.projects.get(&id);
-        Ok(row_from_resolved(
-            &r,
-            configured,
-            raw.and_then(|p| p.default_profile.clone()),
-            raw.map(|p| p.profiles.clone()).unwrap_or_default(),
-        ))
+            projects.insert(&id, toml_edit::Item::Table(project_table(&project)));
+            write_doc(&self.path, &doc)?;
+            self.config.projects.insert(id.clone(), project);
+            let r = self.resolve(&id)?;
+            let configured = r.port > 0 && (!r.active_start().is_empty() || r.tomcat.is_some());
+            let raw = self.config.projects.get(&id);
+            Ok(row_from_resolved(
+                &r,
+                configured,
+                raw.and_then(|p| p.default_profile.clone()),
+                raw.map(|p| p.profiles.clone()).unwrap_or_default(),
+            ))
+        })();
+        op.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed_or_unknown"
+        })
+        .context("audit completion failed; inspect started operation before retry")?;
+        result
     }
 
     /// Remove a project from the config file. Does not touch the project's files.
     pub fn remove_project(&mut self, id: &str) -> Result<()> {
-        if !self.config.projects.contains_key(id) {
-            bail!("unknown project id `{id}`; try `tongyun-dev list`");
-        }
-        let mut doc = read_doc(&self.path)?;
-        let removed = doc
-            .get_mut("projects")
-            .and_then(|p| p.as_table_mut())
-            .and_then(|t| t.remove(id));
-        if removed.is_none() {
-            bail!("project `{id}` not found in {}", self.path.display());
-        }
-        write_doc(&self.path, &doc)?;
-        self.config.projects.remove(id);
-        Ok(())
+        let (actor, task) = audit::context();
+        let op = audit::Operation::begin(
+            &self.audit_dir(),
+            "dev",
+            "remove_project",
+            id,
+            &actor,
+            &task,
+        )?;
+        let result = (|| {
+            if !self.config.projects.contains_key(id) {
+                bail!("unknown project id `{id}`; try `tongyun-dev list`");
+            }
+            let mut doc = read_doc(&self.path)?;
+            let removed = doc
+                .get_mut("projects")
+                .and_then(|p| p.as_table_mut())
+                .and_then(|t| t.remove(id));
+            if removed.is_none() {
+                bail!("project `{id}` not found in {}", self.path.display());
+            }
+            write_doc(&self.path, &doc)?;
+            self.config.projects.remove(id);
+            Ok(())
+        })();
+        op.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed_or_unknown"
+        })
+        .context("audit completion failed; inspect started operation before retry")?;
+        result
     }
 
     /// Absolute, canonical roots of registered projects -> id (for scan dedupe).
@@ -6450,309 +6633,383 @@ impl Loaded {
 
     /// Update an existing project in the config file. Preserves other keys, key order, comments and multiline strings.
     pub fn update_project(&mut self, id: &str, edit: ProjectEdit) -> Result<ProjectRow> {
-        self.validate_update_project(id, &edit)?;
-        let existing = self
-            .config
-            .projects
-            .get(id)
-            .with_context(|| format!("unknown project id `{id}`; try `tongyun-dev list`"))?;
+        let (actor, task) = audit::context();
+        let op = audit::Operation::begin(
+            &self.audit_dir(),
+            "dev",
+            "update_project",
+            id,
+            &actor,
+            &task,
+        )?;
+        let result = (|| {
+            self.validate_update_project(id, &edit)?;
+            let existing =
+                self.config.projects.get(id).with_context(|| {
+                    format!("unknown project id `{id}`; try `tongyun-dev list`")
+                })?;
 
-        for (label, v) in [("node", &edit.node), ("java", &edit.java)] {
-            if let Some(v) = v {
-                let trimmed = v.trim();
-                if !trimmed.is_empty() && !valid_version(trimmed) {
-                    bail!("{label} version `{trimmed}` may only contain letters, digits, `.`, `-`, `_`");
-                }
-            }
-        }
-
-        let mut doc = read_doc(&self.path)?;
-        let projects = doc
-            .get_mut("projects")
-            .and_then(|p| p.as_table_mut())
-            .context("`projects` in config is not a table")?;
-        let proj_table = projects
-            .get_mut(id)
-            .and_then(|p| p.as_table_mut())
-            .context(format!(
-                "project `{id}` not found in {}",
-                self.path.display()
-            ))?;
-
-        if let Some(ref name) = edit.name {
-            let trimmed = name.trim();
-            if trimmed.is_empty() {
-                proj_table.remove("name");
-            } else {
-                set_table_val(proj_table, "name", toml_edit::Value::from(trimmed));
-            }
-        }
-
-        let mut group_to_ensure: Option<String> = None;
-        if let Some(ref group) = edit.group {
-            let trimmed = group.trim();
-            if trimmed.is_empty() {
-                proj_table.remove("group");
-            } else {
-                validate_group_key(trimmed)?;
-                set_table_val(proj_table, "group", toml_edit::Value::from(trimmed));
-                group_to_ensure = Some(trimmed.to_string());
-            }
-        }
-
-        if let Some(ref root) = edit.root {
-            let trimmed = root.trim();
-            if trimmed.is_empty() {
-                proj_table.remove("root");
-            } else {
-                set_table_val(proj_table, "root", toml_edit::Value::from(trimmed));
-            }
-        }
-
-        if let Some(port) = edit.port {
-            set_table_val(proj_table, "port", toml_edit::Value::from(i64::from(port)));
-        }
-
-        if let Some(ref start) = edit.start {
-            let trimmed = start.trim();
-            if trimmed.is_empty() {
-                proj_table.remove("start");
-            } else {
-                let argv = shell_argv(trimmed, existing.shell.as_deref());
-                let mut a = toml_edit::Array::new();
-                for s in argv {
-                    a.push(s.as_str());
-                }
-                set_table_val(proj_table, "start", toml_edit::Value::Array(a));
-            }
-        }
-
-        if let Some(ref stop) = edit.stop {
-            let trimmed = stop.trim();
-            if trimmed.is_empty() {
-                proj_table.remove("stop");
-            } else {
-                let argv = shell_argv(trimmed, existing.shell.as_deref());
-                let mut a = toml_edit::Array::new();
-                for s in argv {
-                    a.push(s.as_str());
-                }
-                set_table_val(proj_table, "stop", toml_edit::Value::Array(a));
-            }
-        }
-
-        if let Some(ref login_url) = edit.login_url {
-            let trimmed = login_url.trim();
-            if trimmed.is_empty() {
-                proj_table.remove("login_url");
-            } else {
-                set_table_val(proj_table, "login_url", toml_edit::Value::from(trimmed));
-            }
-        }
-
-        if let Some(ref health_url) = edit.health_url {
-            let trimmed = health_url.trim();
-            if trimmed.is_empty() {
-                proj_table.remove("health_url");
-            } else {
-                set_table_val(proj_table, "health_url", toml_edit::Value::from(trimmed));
-            }
-        }
-
-        if let Some(ref log_dir) = edit.log_dir {
-            let trimmed = log_dir.trim();
-            if trimmed.is_empty() {
-                proj_table.remove("log_dir");
-            } else {
-                set_table_val(proj_table, "log_dir", toml_edit::Value::from(trimmed));
-            }
-        }
-
-        if let Some(ref log_file) = edit.log_file {
-            let trimmed = log_file.trim();
-            if trimmed.is_empty() {
-                proj_table.remove("log_file");
-            } else {
-                set_table_val(proj_table, "log_file", toml_edit::Value::from(trimmed));
-            }
-        }
-
-        if let Some(ref node) = edit.node {
-            let trimmed = node.trim();
-            if trimmed.is_empty() {
-                proj_table.remove("node");
-            } else {
-                set_table_val(proj_table, "node", toml_edit::Value::from(trimmed));
-            }
-        }
-
-        if let Some(ref java) = edit.java {
-            let trimmed = java.trim();
-            if trimmed.is_empty() {
-                proj_table.remove("java");
-            } else {
-                set_table_val(proj_table, "java", toml_edit::Value::from(trimmed));
-            }
-        }
-
-        if let Some(enabled) = edit.enabled {
-            set_table_val(proj_table, "enabled", toml_edit::Value::from(enabled));
-        }
-
-        if let Some(ref reason) = edit.reason {
-            let trimmed = reason.trim();
-            if trimmed.is_empty() {
-                proj_table.remove("reason");
-            } else {
-                set_table_val(proj_table, "reason", toml_edit::Value::from(trimmed));
-            }
-        }
-
-        if let Some(timeout) = edit.start_timeout_secs {
-            if timeout == 0 {
-                proj_table.remove("start_timeout_secs");
-            } else {
-                set_table_val(
-                    proj_table,
-                    "start_timeout_secs",
-                    toml_edit::Value::from(timeout as i64),
-                );
-            }
-        }
-
-        if let Some(auto) = edit.auto_install {
-            if auto {
-                proj_table.remove("auto_install");
-            } else {
-                set_table_val(proj_table, "auto_install", toml_edit::Value::from(false));
-            }
-        }
-
-        if let Some(grace) = edit.stop_grace_secs {
-            if grace == 0 {
-                proj_table.remove("stop_grace_secs");
-            } else {
-                set_table_val(
-                    proj_table,
-                    "stop_grace_secs",
-                    toml_edit::Value::from(grace as i64),
-                );
-            }
-        }
-        if let Some(ref port_mode) = edit.port_mode {
-            let trimmed = port_mode.trim().to_ascii_lowercase();
-            if trimmed.is_empty() {
-                proj_table.remove("port_mode");
-            } else {
-                if !matches!(trimmed.as_str(), "none" | "arg" | "env" | "config") {
-                    bail!("port_mode must be one of none, arg, env, config, got `{trimmed}`");
-                }
-                set_table_val(proj_table, "port_mode", toml_edit::Value::from(trimmed));
-            }
-        }
-
-        if let Some(ref port_arg) = edit.port_arg {
-            let trimmed = port_arg.trim();
-            if trimmed.is_empty() {
-                proj_table.remove("port_arg");
-            } else {
-                set_table_val(proj_table, "port_arg", toml_edit::Value::from(trimmed));
-            }
-        }
-
-        if let Some(ref port_env) = edit.port_env {
-            let trimmed = port_env.trim();
-            if trimmed.is_empty() {
-                proj_table.remove("port_env");
-            } else {
-                set_table_val(proj_table, "port_env", toml_edit::Value::from(trimmed));
-            }
-        }
-
-        if let Some(ref env) = edit.env {
-            if env.is_empty() {
-                proj_table.remove("env");
-            } else {
-                let mut inline = toml_edit::InlineTable::new();
-                for (k, v) in env {
-                    inline.insert(k, toml_edit::Value::from(v.as_str()));
-                }
-                set_table_val(proj_table, "env", toml_edit::Value::InlineTable(inline));
-            }
-        }
-
-        if let Some(pty) = edit.pty {
-            if !pty {
-                proj_table.remove("pty");
-            } else {
-                set_table_val(proj_table, "pty", toml_edit::Value::from(true));
-            }
-        }
-
-        if let Some(ref answers) = edit.auto_answers {
-            if answers.is_empty() {
-                proj_table.remove("auto_answers");
-            } else {
-                set_table_val(
-                    proj_table,
-                    "auto_answers",
-                    toml_edit::Value::Array(auto_answers_to_toml_array(answers)),
-                );
-            }
-        }
-
-        if let Some(ref links) = edit.links {
-            if links.is_empty() {
-                proj_table.remove("links");
-            } else {
-                set_table_val(
-                    proj_table,
-                    "links",
-                    toml_edit::Value::Array(links_to_toml_array(links)),
-                );
-            }
-        }
-
-        if let Some(ref default_profile) = edit.default_profile {
-            let trimmed = default_profile.trim();
-            if trimmed.is_empty() {
-                proj_table.remove("default_profile");
-            } else {
-                set_table_val(
-                    proj_table,
-                    "default_profile",
-                    toml_edit::Value::from(trimmed),
-                );
-            }
-        }
-
-        if let Some(ref profiles) = edit.profiles {
-            if profiles.is_empty() {
-                proj_table.remove("profiles");
-            } else {
-                proj_table.insert(
-                    "profiles",
-                    toml_edit::Item::Table(profiles_to_toml_table(profiles)),
-                );
-            }
-        }
-
-        if let Some(ref depends_on) = edit.depends_on {
-            if depends_on.is_empty() {
-                proj_table.remove("depends_on");
-            } else {
-                let mut arr = toml_edit::Array::new();
-                for d in depends_on {
-                    let trimmed = d.trim();
-                    if !trimmed.is_empty() {
-                        arr.push(trimmed);
+            for (label, v) in [("node", &edit.node), ("java", &edit.java)] {
+                if let Some(v) = v {
+                    let trimmed = v.trim();
+                    if !trimmed.is_empty() && !valid_version(trimmed) {
+                        bail!("{label} version `{trimmed}` may only contain letters, digits, `.`, `-`, `_`");
                     }
                 }
-                set_table_val(proj_table, "depends_on", toml_edit::Value::Array(arr));
             }
-        }
 
-        if let Some(ref grp) = group_to_ensure {
+            let mut doc = read_doc(&self.path)?;
+            let projects = doc
+                .get_mut("projects")
+                .and_then(|p| p.as_table_mut())
+                .context("`projects` in config is not a table")?;
+            let proj_table = projects
+                .get_mut(id)
+                .and_then(|p| p.as_table_mut())
+                .context(format!(
+                    "project `{id}` not found in {}",
+                    self.path.display()
+                ))?;
+
+            if let Some(ref name) = edit.name {
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    proj_table.remove("name");
+                } else {
+                    set_table_val(proj_table, "name", toml_edit::Value::from(trimmed));
+                }
+            }
+
+            let mut group_to_ensure: Option<String> = None;
+            if let Some(ref group) = edit.group {
+                let trimmed = group.trim();
+                if trimmed.is_empty() {
+                    proj_table.remove("group");
+                } else {
+                    validate_group_key(trimmed)?;
+                    set_table_val(proj_table, "group", toml_edit::Value::from(trimmed));
+                    group_to_ensure = Some(trimmed.to_string());
+                }
+            }
+
+            if let Some(ref root) = edit.root {
+                let trimmed = root.trim();
+                if trimmed.is_empty() {
+                    proj_table.remove("root");
+                } else {
+                    set_table_val(proj_table, "root", toml_edit::Value::from(trimmed));
+                }
+            }
+
+            if let Some(port) = edit.port {
+                set_table_val(proj_table, "port", toml_edit::Value::from(i64::from(port)));
+            }
+
+            if let Some(ref start) = edit.start {
+                let trimmed = start.trim();
+                if trimmed.is_empty() {
+                    proj_table.remove("start");
+                } else {
+                    let argv = shell_argv(trimmed, existing.shell.as_deref());
+                    let mut a = toml_edit::Array::new();
+                    for s in argv {
+                        a.push(s.as_str());
+                    }
+                    set_table_val(proj_table, "start", toml_edit::Value::Array(a));
+                }
+            }
+
+            if let Some(ref stop) = edit.stop {
+                let trimmed = stop.trim();
+                if trimmed.is_empty() {
+                    proj_table.remove("stop");
+                } else {
+                    let argv = shell_argv(trimmed, existing.shell.as_deref());
+                    let mut a = toml_edit::Array::new();
+                    for s in argv {
+                        a.push(s.as_str());
+                    }
+                    set_table_val(proj_table, "stop", toml_edit::Value::Array(a));
+                }
+            }
+
+            if let Some(ref login_url) = edit.login_url {
+                let trimmed = login_url.trim();
+                if trimmed.is_empty() {
+                    proj_table.remove("login_url");
+                } else {
+                    set_table_val(proj_table, "login_url", toml_edit::Value::from(trimmed));
+                }
+            }
+
+            if let Some(ref health_url) = edit.health_url {
+                let trimmed = health_url.trim();
+                if trimmed.is_empty() {
+                    proj_table.remove("health_url");
+                } else {
+                    set_table_val(proj_table, "health_url", toml_edit::Value::from(trimmed));
+                }
+            }
+
+            if let Some(ref log_dir) = edit.log_dir {
+                let trimmed = log_dir.trim();
+                if trimmed.is_empty() {
+                    proj_table.remove("log_dir");
+                } else {
+                    set_table_val(proj_table, "log_dir", toml_edit::Value::from(trimmed));
+                }
+            }
+
+            if let Some(ref log_file) = edit.log_file {
+                let trimmed = log_file.trim();
+                if trimmed.is_empty() {
+                    proj_table.remove("log_file");
+                } else {
+                    set_table_val(proj_table, "log_file", toml_edit::Value::from(trimmed));
+                }
+            }
+
+            if let Some(ref node) = edit.node {
+                let trimmed = node.trim();
+                if trimmed.is_empty() {
+                    proj_table.remove("node");
+                } else {
+                    set_table_val(proj_table, "node", toml_edit::Value::from(trimmed));
+                }
+            }
+
+            if let Some(ref java) = edit.java {
+                let trimmed = java.trim();
+                if trimmed.is_empty() {
+                    proj_table.remove("java");
+                } else {
+                    set_table_val(proj_table, "java", toml_edit::Value::from(trimmed));
+                }
+            }
+
+            if let Some(enabled) = edit.enabled {
+                set_table_val(proj_table, "enabled", toml_edit::Value::from(enabled));
+            }
+
+            if let Some(ref reason) = edit.reason {
+                let trimmed = reason.trim();
+                if trimmed.is_empty() {
+                    proj_table.remove("reason");
+                } else {
+                    set_table_val(proj_table, "reason", toml_edit::Value::from(trimmed));
+                }
+            }
+
+            if let Some(timeout) = edit.start_timeout_secs {
+                if timeout == 0 {
+                    proj_table.remove("start_timeout_secs");
+                } else {
+                    set_table_val(
+                        proj_table,
+                        "start_timeout_secs",
+                        toml_edit::Value::from(timeout as i64),
+                    );
+                }
+            }
+
+            if let Some(auto) = edit.auto_install {
+                if auto {
+                    proj_table.remove("auto_install");
+                } else {
+                    set_table_val(proj_table, "auto_install", toml_edit::Value::from(false));
+                }
+            }
+
+            if let Some(grace) = edit.stop_grace_secs {
+                if grace == 0 {
+                    proj_table.remove("stop_grace_secs");
+                } else {
+                    set_table_val(
+                        proj_table,
+                        "stop_grace_secs",
+                        toml_edit::Value::from(grace as i64),
+                    );
+                }
+            }
+            if let Some(ref port_mode) = edit.port_mode {
+                let trimmed = port_mode.trim().to_ascii_lowercase();
+                if trimmed.is_empty() {
+                    proj_table.remove("port_mode");
+                } else {
+                    if !matches!(trimmed.as_str(), "none" | "arg" | "env" | "config") {
+                        bail!("port_mode must be one of none, arg, env, config, got `{trimmed}`");
+                    }
+                    set_table_val(proj_table, "port_mode", toml_edit::Value::from(trimmed));
+                }
+            }
+
+            if let Some(ref port_arg) = edit.port_arg {
+                let trimmed = port_arg.trim();
+                if trimmed.is_empty() {
+                    proj_table.remove("port_arg");
+                } else {
+                    set_table_val(proj_table, "port_arg", toml_edit::Value::from(trimmed));
+                }
+            }
+
+            if let Some(ref port_env) = edit.port_env {
+                let trimmed = port_env.trim();
+                if trimmed.is_empty() {
+                    proj_table.remove("port_env");
+                } else {
+                    set_table_val(proj_table, "port_env", toml_edit::Value::from(trimmed));
+                }
+            }
+
+            if let Some(ref env) = edit.env {
+                if env.is_empty() {
+                    proj_table.remove("env");
+                } else {
+                    let mut inline = toml_edit::InlineTable::new();
+                    for (k, v) in env {
+                        inline.insert(k, toml_edit::Value::from(v.as_str()));
+                    }
+                    set_table_val(proj_table, "env", toml_edit::Value::InlineTable(inline));
+                }
+            }
+
+            if let Some(pty) = edit.pty {
+                if !pty {
+                    proj_table.remove("pty");
+                } else {
+                    set_table_val(proj_table, "pty", toml_edit::Value::from(true));
+                }
+            }
+
+            if let Some(ref answers) = edit.auto_answers {
+                if answers.is_empty() {
+                    proj_table.remove("auto_answers");
+                } else {
+                    set_table_val(
+                        proj_table,
+                        "auto_answers",
+                        toml_edit::Value::Array(auto_answers_to_toml_array(answers)),
+                    );
+                }
+            }
+
+            if let Some(ref links) = edit.links {
+                if links.is_empty() {
+                    proj_table.remove("links");
+                } else {
+                    set_table_val(
+                        proj_table,
+                        "links",
+                        toml_edit::Value::Array(links_to_toml_array(links)),
+                    );
+                }
+            }
+
+            if let Some(ref default_profile) = edit.default_profile {
+                let trimmed = default_profile.trim();
+                if trimmed.is_empty() {
+                    proj_table.remove("default_profile");
+                } else {
+                    set_table_val(
+                        proj_table,
+                        "default_profile",
+                        toml_edit::Value::from(trimmed),
+                    );
+                }
+            }
+
+            if let Some(ref profiles) = edit.profiles {
+                if profiles.is_empty() {
+                    proj_table.remove("profiles");
+                } else {
+                    proj_table.insert(
+                        "profiles",
+                        toml_edit::Item::Table(profiles_to_toml_table(profiles)),
+                    );
+                }
+            }
+
+            if let Some(ref depends_on) = edit.depends_on {
+                if depends_on.is_empty() {
+                    proj_table.remove("depends_on");
+                } else {
+                    let mut arr = toml_edit::Array::new();
+                    for d in depends_on {
+                        let trimmed = d.trim();
+                        if !trimmed.is_empty() {
+                            arr.push(trimmed);
+                        }
+                    }
+                    set_table_val(proj_table, "depends_on", toml_edit::Value::Array(arr));
+                }
+            }
+
+            if let Some(ref grp) = group_to_ensure {
+                let groups = doc
+                    .entry("group")
+                    .or_insert_with(|| {
+                        let mut t = toml_edit::Table::new();
+                        t.set_implicit(true);
+                        toml_edit::Item::Table(t)
+                    })
+                    .as_table_mut()
+                    .context("`group` in config is not a table")?;
+                if !groups.contains_key(grp) {
+                    let t = toml_edit::Table::new();
+                    groups.insert(grp, toml_edit::Item::Table(t));
+                    self.config
+                        .group
+                        .insert(grp.to_string(), GroupConfig::default());
+                }
+            }
+
+            let temp_config = parse_config(&doc.to_string())?;
+            let updated_project = temp_config
+                .projects
+                .get(id)
+                .context(format!("project `{id}` missing after update"))?;
+            resolve_project_with_log_default(
+                id,
+                updated_project,
+                current_home().as_deref(),
+                &temp_config.log_dir,
+            )?;
+
+            write_doc(&self.path, &doc)?;
+            self.config = temp_config;
+
+            let r = self.resolve(id)?;
+            let configured = r.port > 0 && (!r.active_start().is_empty() || r.tomcat.is_some());
+            let raw = self.config.projects.get(id);
+            Ok(row_from_resolved(
+                &r,
+                configured,
+                raw.and_then(|p| p.default_profile.clone()),
+                raw.map(|p| p.profiles.clone()).unwrap_or_default(),
+            ))
+        })();
+        op.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed_or_unknown"
+        })
+        .context("audit completion failed; inspect started operation before retry")?;
+        result
+    }
+
+    /// Create a new group, writing `[group.<key>]` (with optional label) to config preserving comments.
+    pub fn create_group(&mut self, key: &str, label: Option<&str>) -> Result<GroupInfo> {
+        let (actor, task) = audit::context();
+        let op =
+            audit::Operation::begin(&self.audit_dir(), "dev", "create_group", key, &actor, &task)?;
+        let result = (|| {
+            let key = key.trim();
+            validate_group_key(key)?;
+            if self.config.group.contains_key(key) {
+                bail!("分组 `{key}` 已存在");
+            }
+            let label = label.map(str::trim).filter(|s| !s.is_empty());
+            let mut doc = read_doc(&self.path)?;
             let groups = doc
                 .entry("group")
                 .or_insert_with(|| {
@@ -6762,123 +7019,96 @@ impl Loaded {
                 })
                 .as_table_mut()
                 .context("`group` in config is not a table")?;
-            if !groups.contains_key(grp) {
-                let t = toml_edit::Table::new();
-                groups.insert(grp, toml_edit::Item::Table(t));
-                self.config
-                    .group
-                    .insert(grp.to_string(), GroupConfig::default());
+            if groups.contains_key(key) {
+                bail!("分组 `{key}` 已存在");
             }
-        }
-
-        let temp_config = parse_config(&doc.to_string())?;
-        let updated_project = temp_config
-            .projects
-            .get(id)
-            .context(format!("project `{id}` missing after update"))?;
-        resolve_project_with_log_default(
-            id,
-            updated_project,
-            current_home().as_deref(),
-            &temp_config.log_dir,
-        )?;
-
-        write_doc(&self.path, &doc)?;
-        self.config = temp_config;
-
-        let r = self.resolve(id)?;
-        let configured = r.port > 0 && (!r.active_start().is_empty() || r.tomcat.is_some());
-        let raw = self.config.projects.get(id);
-        Ok(row_from_resolved(
-            &r,
-            configured,
-            raw.and_then(|p| p.default_profile.clone()),
-            raw.map(|p| p.profiles.clone()).unwrap_or_default(),
-        ))
-    }
-
-    /// Create a new group, writing `[group.<key>]` (with optional label) to config preserving comments.
-    pub fn create_group(&mut self, key: &str, label: Option<&str>) -> Result<GroupInfo> {
-        let key = key.trim();
-        validate_group_key(key)?;
-        if self.config.group.contains_key(key) {
-            bail!("分组 `{key}` 已存在");
-        }
-        let label = label.map(str::trim).filter(|s| !s.is_empty());
-        let mut doc = read_doc(&self.path)?;
-        let groups = doc
-            .entry("group")
-            .or_insert_with(|| {
-                let mut t = toml_edit::Table::new();
-                t.set_implicit(true);
-                toml_edit::Item::Table(t)
-            })
-            .as_table_mut()
-            .context("`group` in config is not a table")?;
-        if groups.contains_key(key) {
-            bail!("分组 `{key}` 已存在");
-        }
-        let mut t = toml_edit::Table::new();
-        if let Some(l) = label {
-            t["label"] = toml_edit::value(l);
-        }
-        groups.insert(key, toml_edit::Item::Table(t));
-        write_doc(&self.path, &doc)?;
-        self.config.group.insert(
-            key.to_string(),
-            GroupConfig {
-                label: label.map(|s| s.to_string()),
+            let mut t = toml_edit::Table::new();
+            if let Some(l) = label {
+                t["label"] = toml_edit::value(l);
+            }
+            groups.insert(key, toml_edit::Item::Table(t));
+            write_doc(&self.path, &doc)?;
+            self.config.group.insert(
+                key.to_string(),
+                GroupConfig {
+                    label: label.map(|s| s.to_string()),
+                    order: None,
+                    members: Vec::new(),
+                    depends_on: Vec::new(),
+                },
+            );
+            Ok(GroupInfo {
+                key: key.to_string(),
+                label: label.unwrap_or(key).to_string(),
                 order: None,
                 members: Vec::new(),
                 depends_on: Vec::new(),
-            },
-        );
-        Ok(GroupInfo {
-            key: key.to_string(),
-            label: label.unwrap_or(key).to_string(),
-            order: None,
-            members: Vec::new(),
-            depends_on: Vec::new(),
+            })
+        })();
+        op.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed_or_unknown"
         })
+        .context("audit completion failed; inspect started operation before retry")?;
+        result
     }
 
     /// Rename group label, writing to config preserving comments.
     pub fn rename_group_label(&mut self, key: &str, label: &str) -> Result<GroupInfo> {
-        let key = key.trim();
-        validate_group_key(key)?;
-        let label = label.trim();
-        if label.is_empty() {
-            bail!("分组 label 不能为空");
-        }
-        let mut doc = read_doc(&self.path)?;
-        let groups = doc
-            .entry("group")
-            .or_insert_with(|| {
-                let mut t = toml_edit::Table::new();
-                t.set_implicit(true);
-                toml_edit::Item::Table(t)
+        let (actor, task) = audit::context();
+        let op = audit::Operation::begin(
+            &self.audit_dir(),
+            "dev",
+            "rename_group_label",
+            key,
+            &actor,
+            &task,
+        )?;
+        let result = (|| {
+            let key = key.trim();
+            validate_group_key(key)?;
+            let label = label.trim();
+            if label.is_empty() {
+                bail!("分组 label 不能为空");
+            }
+            let mut doc = read_doc(&self.path)?;
+            let groups = doc
+                .entry("group")
+                .or_insert_with(|| {
+                    let mut t = toml_edit::Table::new();
+                    t.set_implicit(true);
+                    toml_edit::Item::Table(t)
+                })
+                .as_table_mut()
+                .context("`group` in config is not a table")?;
+            let target = groups
+                .entry(key)
+                .or_insert_with(|| {
+                    let t = toml_edit::Table::new();
+                    toml_edit::Item::Table(t)
+                })
+                .as_table_mut()
+                .context("group entry is not a table")?;
+            set_table_val(target, "label", toml_edit::Value::from(label));
+            write_doc(&self.path, &doc)?;
+            let entry = self.config.group.entry(key.to_string()).or_default();
+            entry.label = Some(label.to_string());
+            Ok(GroupInfo {
+                key: key.to_string(),
+                label: label.to_string(),
+                order: entry.order,
+                members: entry.members.clone(),
+                depends_on: entry.depends_on.clone(),
             })
-            .as_table_mut()
-            .context("`group` in config is not a table")?;
-        let target = groups
-            .entry(key)
-            .or_insert_with(|| {
-                let t = toml_edit::Table::new();
-                toml_edit::Item::Table(t)
-            })
-            .as_table_mut()
-            .context("group entry is not a table")?;
-        set_table_val(target, "label", toml_edit::Value::from(label));
-        write_doc(&self.path, &doc)?;
-        let entry = self.config.group.entry(key.to_string()).or_default();
-        entry.label = Some(label.to_string());
-        Ok(GroupInfo {
-            key: key.to_string(),
-            label: label.to_string(),
-            order: entry.order,
-            members: entry.members.clone(),
-            depends_on: entry.depends_on.clone(),
+        })();
+        op.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed_or_unknown"
         })
+        .context("audit completion failed; inspect started operation before retry")?;
+        result
     }
 
     /// Resolve a group input (key or label) for a project:
@@ -6921,27 +7151,57 @@ impl Loaded {
 
     /// Remove a group by key. Does not touch projects belonging to it.
     pub fn remove_group(&mut self, key: &str) -> Result<()> {
-        let key = key.trim();
-        validate_group_key(key)?;
-        let mut doc = read_doc(&self.path)?;
-        if let Some(groups) = doc.get_mut("group").and_then(|g| g.as_table_mut()) {
-            groups.remove(key);
-        }
-        write_doc(&self.path, &doc)?;
-        self.config.group.remove(key);
-        Ok(())
+        let (actor, task) = audit::context();
+        let op =
+            audit::Operation::begin(&self.audit_dir(), "dev", "remove_group", key, &actor, &task)?;
+        let result = (|| {
+            let key = key.trim();
+            validate_group_key(key)?;
+            let mut doc = read_doc(&self.path)?;
+            if let Some(groups) = doc.get_mut("group").and_then(|g| g.as_table_mut()) {
+                groups.remove(key);
+            }
+            write_doc(&self.path, &doc)?;
+            self.config.group.remove(key);
+            Ok(())
+        })();
+        op.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed_or_unknown"
+        })
+        .context("audit completion failed; inspect started operation before retry")?;
+        result
     }
 
     /// Update or clear project group, writing back to config with toml_edit preserving comments.
     pub fn set_project_group(&mut self, id: &str, group: Option<&str>) -> Result<ProjectRow> {
-        let val = group.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("");
-        self.update_project(
+        let (actor, task) = audit::context();
+        let op = audit::Operation::begin(
+            &self.audit_dir(),
+            "dev",
+            "set_project_group",
             id,
-            ProjectEdit {
-                group: Some(val.to_string()),
-                ..Default::default()
-            },
-        )
+            &actor,
+            &task,
+        )?;
+        let result = (|| {
+            let val = group.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("");
+            self.update_project(
+                id,
+                ProjectEdit {
+                    group: Some(val.to_string()),
+                    ..Default::default()
+                },
+            )
+        })();
+        op.finish(if result.is_ok() {
+            "completed"
+        } else {
+            "failed_or_unknown"
+        })
+        .context("audit completion failed; inspect started operation before retry")?;
+        result
     }
 
     /// Page to open in the browser: first link if configured, else `login_url`, else `health_url`, else `http://127.0.0.1:<port>/`.

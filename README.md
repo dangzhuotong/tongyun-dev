@@ -145,3 +145,5 @@ tongyun-dev stop demo_api --json
 ```
 
 启停 / 重启 / 安装 / 等待 / 日志的 JSON 返回 `{ok, action, id, status, logs, error}`，操作失败退出码为 1；`status --json` 与 `list --json` 保持原有结构。等待超时后已启动的服务仍可查询和停止，自动依赖安装则会取消；`wait` 本身不会启停服务。完整协议和超时范围见 [开发文档](docs/development.md#ai-操作协议与等待上限)。
+
+2026-10-16：共享核心的持久化操作记录、CLI 关联字段和配置备份见 [Agent 安全与追溯](docs/agent-safety.md)。

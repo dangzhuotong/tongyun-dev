@@ -31,10 +31,10 @@ cargo run -p tongyun-dev-cli -- remove demo_web
 
 常用 CLI 命令格式：
 - `tongyun-dev scan <dir> [--depth N] [--apply] [--json]`：扫描目录，识别项目并可选写入配置
-- `tongyun-dev list [--json] [--with-groups]`：列出所有已登记项目；`--json` 输出项目数组 `[...]`，搭配 `--with-groups` 输出 `{"projects":[...],"groups":[{key,label,order}]}`
-- `tongyun-dev status [id] [--json]`：查看项目状态（不带 id 为全部项目，返回当前生命周期、端口与 active_profile）
-- `tongyun-dev start [<id|组名>] [--all] [--group 组名] [--profile 名] [--open] [--json]`：启动项目，或启动一个分组。`start <组名>`（参数是分组 key、不是项目 id）按 `[group.<组名>].members` 的顺序启动，等前一个就绪后再启下一个；也可用 `--group`。`--open` 只对单个项目生效
-- `tongyun-dev restart [<id>] [--all] [--group 组名] [--profile 名] [--open] [--json]`：停止并重新启动项目或分组（按依赖拓扑顺序）
+- `tongyun-dev list [--json] [--with-groups]`：列出所有已登记项目；`--json` 输出项目数组 `[...]`，搭配 `--with-groups` 输出 `{"projects":[...],"groups":[...]}`，每个 group 为 `{key,label,order,members,depends_on}`（`members` / `depends_on` 为空时省略），按 `order` / `label` 排序
+- `tongyun-dev status [id] [--json]`：查看项目状态（不带 id 为全部项目，返回当前生命周期、端口与探针；运行中指定了环境预设时含 `active_profile`）
+- `tongyun-dev start [<id|组名>] [--all] [--group 组名] [--profile 名] [--timeout N] [--open] [--json]`：启动项目，或启动一个分组。`start <组名>`（位置参数是分组 key、不是项目 id）先按项目级 `depends_on` 拓扑排序，再按 `[group.<组名>].members` 顺序启动，等前一个就绪后再启下一个；也可用 `--group 组名`。位置参数是分组时不要搭配 `--json`（分组批量 JSON 只用 `--group` 形式）。`--open` 只对单个项目生效
+- `tongyun-dev restart [<id>] [--all] [--group 组名] [--profile 名] [--timeout N] [--open] [--json]`：停止并重新启动项目或分组（按依赖拓扑顺序）；分组只用 `--all` / `--group`，位置参数只接受项目 id
 - `tongyun-dev terminal <id> [--profile 名]`：在系统原生终端窗口中打开并执行项目的启动命令或测试调试
 - `tongyun-dev stop [<id>] [--all] [--group 组名] [--json]`：停止项目（支持批量 `--all` 或 `--group`，自动按逆依赖拓扑顺序停止）
 - `tongyun-dev logs <id> [--follow] [--lines N]`：查看或跟随日志输出
@@ -42,7 +42,7 @@ cargo run -p tongyun-dev-cli -- remove demo_web
 - `tongyun-dev install <id>`：手动触发依赖安装（按锁文件选用 pnpm / yarn / npm）
 - `tongyun-dev input <id> [text] [--no-enter] [--key up|down|left|right|enter|tab|esc|ctrl-c]`：向运行中的交互脚本发送输入或按键
 - `tongyun-dev add <id> ...` / `tongyun-dev remove <id>`：添加或移除项目登记
-- `tongyun-dev group <id> <key>` / `tongyun-dev group <id> --clear`：设置或清除项目所属分组
+- `tongyun-dev group <id> <key>` / `tongyun-dev group <id> --clear`：设置或清除项目所属分组（`key` 优先匹配已有分组的 `label` 或 key；未匹配且 key 合法则直接作为新分组名）
 - `tongyun-dev group-add <key> [--label 名]`：新增分组
 - `tongyun-dev ui [--port 9099] [--no-open]`：启动网页控制台
 
@@ -198,7 +198,7 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 | `group` | 可选。所属分组 key（引用顶层 `[group.<key>]`；未定义也作为同名组展示）。在 `--json` 中输出为 `group` 字段（未设置时为 `null`） |
 | `links` | 可选。快捷网页链接列表（如 `[{ title = "后台", url = "http://127.0.0.1:8080/admin" }]`），在 CLI（`open --all`）、控制台和桌面端展示为多链接菜单 |
 | `default_profile` | 可选。默认环境预设标识（如 `"dev"`、`"mock"`），不传 `--profile` 时的默认启动环境 |
-| `profiles` | 可选。环境预设配置表（`[projects.<id>.profiles.<name>]`，支持自定义 `label`、`start` 命令与 `port` 端口重写） |
+| `profiles` | 可选。环境预设配置表（`[projects.<id>.profiles.<name>]`，支持自定义 `label`、`start` 命令、`port` 端口重写与 `env` 环境变量；`env` 合并进项目级 `env`，同名覆盖） |
 | `env` | 可选。额外环境变量键值对（例如 `env = { CI = "1", APP_ENV = "dev" }`），注入启动和依赖安装环境，用户显式配置的值优先 |
 | `pty` | 可选（缺省 `false`）。Unix 上是否用 openpty relay 在伪终端中运行后台进程（macOS 与 Linux 同一路径，不用系统 `script`）。Windows 忽略该字段 |
 | `auto_answers` | 可选。自动应答规则数组（例如 `[{ expect = "Select environment", send = "dev" }]`），启动时匹配日志输出并自动向标准输入发送内容 |
@@ -213,7 +213,7 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 | --- | --- |
 | `label` | 可选。显示名，缺省使用 key |
 | `order` | 可选（如 `1`）。排序序号，数值小的排在前面；未配置 order 的按 label 排序在有 order 的分组之后 |
-| `members` | 组内项目 id，按启动顺序排列。`tongyun-dev start <组名>` 与网页 / 桌面分组卡片的「全部启动」都按这个顺序，并等前一个就绪后再启下一个。未写入 members、但 `group` 字段指向本组的项目排在后面 |
+| `members` | 组内项目 id，按启动顺序排列。`tongyun-dev start <组名>` 与网页 / 桌面分组卡片的「全部启动」先按项目级 `depends_on` 拓扑排序，再按 members 顺序，并等前一个就绪后再启下一个。未写入 members、但 `group` 字段指向本组的项目排在后面 |
 | `depends_on` | 可选。分组之间的依赖。项目级 `depends_on` 仍然优先于 members 顺序 |
 
 ## 验收清单
@@ -221,7 +221,7 @@ Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/releas
 用于验证核心功能的通用验收清单（可用示例项目或你自己的一个项目进行验证）：
 
 1. [ ] **扫描目录添加项目**：执行 `tongyun-dev scan ~/code` 或在界面中点击「扫描目录…」，能正确识别出 Spring Boot、Vite 前端等项目类型、端口与推荐工具链版本；带 `--apply` 保存时，已注册过的目录（相同 root）会被跳过且不覆盖已有配置。
-2. [ ] **状态查询与 JSON 输出**：执行 `tongyun-dev status demo_api --json`（或你自己的一个项目），能返回标准 JSON，包含 `state`、`running`、`pid`、`port`、`log_path`、`active_profile` 与探针状态；未启动时 `state = "stopped"`，`running = false`。
+2. [ ] **状态查询与 JSON 输出**：执行 `tongyun-dev status demo_api --json`（或你自己的一个项目），能返回标准 JSON，包含 `state`、`running`、`pid`、`port`、`log_path` 与探针状态（运行中指定了环境预设时还含 `active_profile`）；未启动时 `state = "stopped"`，`running = false`。
 3. [ ] **分阶段启停与就绪探针**：执行 `tongyun-dev start demo_api --open`，经历 `starting` -> `port_open` 直到就绪探针（或端口连通）成功变为 `ready`，并自动打开浏览器；执行 `tongyun-dev stop demo_api` 后进程退出且端口释放，状态回归 `stopped`。
 4. [ ] **端口冲突检测**：端口被非本项目的外部程序占用时，`status --json` 能正确标记 `port_conflict = true`，并在 `port_holder` 中显示占用程序的 PID 与进程名，不误判为本项目就绪。
 5. [ ] **日志查看与跟随**：执行 `tongyun-dev logs demo_api` 能正确输出日志内容；带 `--follow` 参数能在文件生成及追加内容时持续跟随输出。
@@ -262,7 +262,7 @@ tongyun-dev logs demo_api --lines 80 --json
 | `logs` | 日志读取结果 `{path, missing, text}`；其他动作时为 null |
 | `error` | 错误原因字符串；成功时为 null |
 
-退出码：成功 0，操作失败 1，参数错误 2。参数解析错误由 CLI 输出到 stderr，不输出 JSON。`list --json` 与 `status --json` 的成功输出保持原有数组/状态对象结构，不包装上述对象；新增 `list --json --with-groups` 输出包含分组的完整结构 `{"projects":[...],"groups":[{key,label,order}]}`。
+退出码：成功 0，操作失败 1，参数错误 2。参数解析错误由 CLI 输出到 stderr，不输出 JSON。`list --json` 与 `status --json` 的成功输出保持原有数组/状态对象结构，不包装上述对象；新增 `list --json --with-groups` 输出包含分组的完整结构 `{"projects":[...],"groups":[{key,label,order,members,depends_on}]}`（`members` / `depends_on` 为空时省略）。
 
 - `wait` 只观察已存在的服务；停止、启动失败或端口冲突会立即返回错误，等待超时不会取消其他调用启动的服务或安装。
 - `start` / `restart` 的 `--timeout` 是启动命令返回后的就绪等待预算，覆盖自动安装阶段；不改配置里的 `start_timeout_secs`，也不限制前置停止或自定义启动脚本本身的执行时长。不传时采用项目的启动超时。一次状态探测最多可能额外花费约 5 秒。

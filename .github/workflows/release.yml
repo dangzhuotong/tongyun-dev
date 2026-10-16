@@ -1,0 +1,110 @@
+name: Release
+
+# Tag v* publishes a GitHub Release plus updater latest.json.
+# workflow_dispatch builds installers and uploads Actions artifacts only.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-apps:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            os: windows
+            arch: x64
+            rust-targets: ""
+          - platform: macos-latest
+            os: macos
+            arch: universal
+            args: "--target universal-apple-darwin"
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - platform: ubuntu-22.04
+            os: linux
+            arch: x64
+            args: "--bundles appimage,deb"
+            rust-targets: ""
+    runs-on: ${{ matrix.platform }}
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && 'tongyun-dev v__VERSION__' || '' }}
+          # 非 tag 触发时 tagName/releaseName 为空，tauri-action 只构建不建 Release
+          releaseBody: |
+            tongyun-dev v__VERSION__
+
+            下载指引：
+            - Windows 选 *_x64-setup.exe（推荐）或 .msi
+            - macOS 选 *_universal.dmg（Apple Silicon 与 Intel 通用）
+            - Linux 选 .AppImage 或 .deb
+
+            已安装带更新器的版本可在设置或关于里点「检查更新」。启动约 3 秒后也会静默检查，有新版会提示。
+
+            ### macOS 首次打开
+            安装包没有 Apple 签名和公证，所以 macOS 首次打开会提示无法验证开发者。三种解决办法：
+            1. 系统设置 → 隐私与安全性 → 往下找到提示，点「仍要打开」；
+            2. 在「应用程序」里右键点 App，选「打开」，再确认一次；
+            3. 终端执行：`xattr -dr com.apple.quarantine /Applications/tongyun-dev.app`
+
+            已经装上的 App 用「检查更新」换的是 minisign 签过的包，不受这次隔离提示影响。
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args || '' }}
+          # 仅 tag 发版时写入 latest.json；workflow_dispatch 只构建、不碰 Release
+          includeUpdaterJson: ${{ startsWith(github.ref, 'refs/tags/') }}
+          updaterJsonPreferNsis: true
+
+      # Cargo workspace output is <repo>/target, not apps/desktop/src-tauri/target.
+      - name: Upload bundle artifacts
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: tongyun-dev-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            target/release/bundle/**
+            target/**/release/bundle/**
+          if-no-files-found: error
+          retention-days: 7

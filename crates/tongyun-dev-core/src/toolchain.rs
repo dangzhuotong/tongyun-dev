@@ -799,6 +799,11 @@ mod tests {
             std::fs::write(sdkman_java.join(dir).join("bin/java"), "").unwrap();
         }
 
+        // None means the real /Library/Java/JavaVirtualMachines. GitHub macOS
+        // runners have a Temurin JDK there, so pin an empty dir and keep the
+        // missing-Java assertion independent of the host.
+        let empty_jvm = temp.path().join("empty-jvms");
+        std::fs::create_dir_all(&empty_jvm).unwrap();
         let roots = ToolchainRoots {
             os: HostOs::Mac,
             home: Some(home.clone()),
@@ -810,7 +815,7 @@ mod tests {
             nvm_home: None,
             base_path: "/bin".into(),
             common_dirs: None,
-            mac_jvm_dir: None,
+            mac_jvm_dir: Some(empty_jvm),
         };
 
         // "8" picks 8.0.504+1-zulu

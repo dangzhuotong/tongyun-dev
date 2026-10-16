@@ -4,6 +4,10 @@ import type { BatchOutput, ConfigInfo, LogTail, ProjectDetail, ProjectList, Stat
 import { Toolbar } from "./Toolbar";
 import { StatusBar } from "./StatusBar";
 import { AboutModal } from "./AboutModal";
+import { UpdateModal } from "./UpdateModal";
+import { checkForAppUpdate, resolveDisplayedAppVersion } from "./updater";
+import type { Update } from "@tauri-apps/plugin-updater";
+import { version as bundledVersion } from "../package.json";
 import { ShortcutsHelpModal } from "./ShortcutsHelpModal";
 import { ProjectDetailsTab } from "./ProjectDetailsTab";
 import { LogPanel } from "./LogPanel";
@@ -109,6 +113,14 @@ export function App() {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [runtimeVersion, setRuntimeVersion] = useState<string | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [activeUpdate, setActiveUpdate] = useState<Update | null>(null);
+  const [updateToast, setUpdateToast] = useState<{ text: string; tone: "ok" | "danger" } | null>(
+    null,
+  );
+  const checkingUpdateRef = useRef(false);
+  const displayVersion = resolveDisplayedAppVersion(runtimeVersion, bundledVersion);
 
   // Theme
   const [theme, setTheme] = useState<"system" | "light" | "dark">(() => {
@@ -120,6 +132,59 @@ export function App() {
       return "system";
     }
   });
+
+  const handleCheckUpdate = useCallback(async (manual: boolean) => {
+    if (checkingUpdateRef.current) return;
+    checkingUpdateRef.current = true;
+    setCheckingUpdate(true);
+    try {
+      const update = await checkForAppUpdate();
+      if (update) {
+        setActiveUpdate((prev) => {
+          prev?.close().catch(() => {});
+          return update;
+        });
+      } else if (manual) {
+        setUpdateToast({ text: "已是最新版本", tone: "ok" });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (manual) {
+        setUpdateToast({ text: `检查更新失败：${message}`, tone: "danger" });
+      } else {
+        console.warn("[Updater] Silent check skipped/failed:", err);
+      }
+    } finally {
+      checkingUpdateRef.current = false;
+      setCheckingUpdate(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    import("@tauri-apps/api/app")
+      .then(({ getVersion }) => getVersion())
+      .then((version) => {
+        if (!cancelled) setRuntimeVersion(version);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void handleCheckUpdate(false);
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [handleCheckUpdate]);
+
+  useEffect(() => {
+    if (!updateToast) return;
+    const timer = window.setTimeout(() => setUpdateToast(null), 3600);
+    return () => window.clearTimeout(timer);
+  }, [updateToast]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -899,6 +964,9 @@ export function App() {
         onPickConfig={handlePickConfig}
         onOpenConfigFile={handleOpenConfigFile}
         onReloadConfig={() => loadProjects().catch((err) => setError(String(err)))}
+        appVersion={displayVersion}
+        checkingUpdate={checkingUpdate}
+        onCheckUpdate={() => void handleCheckUpdate(true)}
       />
 
       <div className="workspace-shell">
@@ -1210,6 +1278,21 @@ export function App() {
             </button>
             {menu === "settings" && (
               <div className="menu menu-up" role="menu">
+                <div className="menu-section">
+                  <span className="menu-label">当前版本 v{displayVersion}</span>
+                </div>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={checkingUpdate}
+                  onClick={() => {
+                    setMenu("");
+                    void handleCheckUpdate(true);
+                  }}
+                >
+                  <RefreshIcon /> {checkingUpdate ? "正在检查更新…" : "检查更新"}
+                </button>
+                <div className="menu-sep" />
                 <div className="menu-section">
                   <span className="menu-label">配置文件</span>
                   <code className="menu-path" title={configInfo?.path ?? projects?.config_path ?? ""}>
@@ -1822,8 +1905,34 @@ export function App() {
       <AboutModal
         isOpen={aboutOpen}
         onClose={() => setAboutOpen(false)}
+        version={displayVersion}
+        checkingUpdate={checkingUpdate}
+        onCheckUpdate={() => void handleCheckUpdate(true)}
         configPath={projects?.config_path ?? configInfo?.path ?? configInfo?.default_path}
       />
+
+      {activeUpdate && (
+        <UpdateModal
+          update={activeUpdate}
+          onClose={() => {
+            activeUpdate.close().catch(() => {});
+            setActiveUpdate(null);
+          }}
+        />
+      )}
+
+      {updateToast && (
+        <div
+          role="status"
+          className={`fixed bottom-10 left-1/2 -translate-x-1/2 z-[60] px-4 py-2 rounded-lg text-xs font-medium shadow-lg border ${
+            updateToast.tone === "danger"
+              ? "bg-[var(--color-danger)]/15 border-[var(--color-danger)]/40 text-[var(--color-danger)]"
+              : "bg-[var(--color-surface)] border-[var(--color-border)] text-[var(--color-text)]"
+          }`}
+        >
+          {updateToast.text}
+        </div>
+      )}
 
       <ShortcutsHelpModal
         isOpen={shortcutsOpen}

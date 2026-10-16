@@ -106,7 +106,15 @@ npm run tauri dev      # 开发
 npm run tauri build    # 打包
 ```
 
-产物在 `apps/desktop/src-tauri/target/release/bundle/`（macOS：`macos/tongyun-dev.app` 和 `dmg/*.dmg`）。安装包没有 Apple 签名，第一次打开如被拦：系统设置 → 隐私与安全性 → 仍要打开。
+产物在仓库根目录的 `target/release/bundle/`（macOS 通用包在 `target/universal-apple-darwin/release/bundle/`；`.app` 名为 `tongyun-dev.app`）。安装包没有 Apple 签名，第一次打开如被拦：系统设置 → 隐私与安全性 → 仍要打开，或执行 `xattr -dr com.apple.quarantine /Applications/tongyun-dev.app`。
+
+### 检查更新
+
+日常更新用桌面 App 里的 **检查更新**（顶栏或侧栏的设置，以及关于窗口），或等启动大约 3 秒后的提示。已经是最新会提示「已是最新版本」。不要找人在本机用开发 tip 重装。
+
+新版本来自 tag `vX.Y.Z`，并且和 `apps/desktop/package.json`、`apps/desktop/src-tauri/tauri.conf.json`、仓库 `Cargo.toml` 的版本一致。GitHub Actions 会发布 Release，并带上更新器用的 `latest.json`。合进 main 不会自动发版。步骤见 [docs/RELEASE.md](docs/RELEASE.md)。
+
+安装包在 CI 里用 **minisign** 签过更新包（`TAURI_SIGNING_*`）。**尚未做 Apple 公证**：首次安装仍可能要按上面的办法解除隔离。已经装上的 App 用检查更新换包。发版流水线挂了，或用户本机环境坏了，才需要人工介入。
 
 ## 平台
 
@@ -119,6 +127,7 @@ npm run tauri build    # 打包
 - [docs/prd.md](docs/prd.md) — 产品范围
 - [docs/plan.md](docs/plan.md) — 排期
 - [docs/development.md](docs/development.md) — 命令、配置字段与验收
+- [docs/RELEASE.md](docs/RELEASE.md) — 桌面 App 发版与检查更新
 
 ## License
 

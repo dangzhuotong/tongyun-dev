@@ -1691,4 +1691,58 @@ mod tests {
         assert!(!s4.start.contains("--port"));
         assert_eq!(s4.port_mode.as_deref(), Some("none"));
     }
+
+    #[test]
+    fn spring_profile_pure_helpers_and_detection() {
+        // Pure helper: spring_profile_from_filename
+        assert_eq!(spring_profile_from_filename("application-dev.yml").as_deref(), Some("dev"));
+        assert_eq!(spring_profile_from_filename("application-prod.yaml").as_deref(), Some("prod"));
+        assert_eq!(spring_profile_from_filename("application-local_test-1.properties").as_deref(), Some("local_test-1"));
+        assert_eq!(spring_profile_from_filename("application.yml"), None);
+        assert_eq!(spring_profile_from_filename("application.properties"), None);
+        assert_eq!(spring_profile_from_filename("application-.yml"), None);
+        assert_eq!(spring_profile_from_filename("application-dev.test.yml"), None);
+        assert_eq!(spring_profile_from_filename("application-dev/test.yml"), None);
+        assert_eq!(spring_profile_from_filename("application-dev\\test.yml"), None);
+        assert_eq!(spring_profile_from_filename("application-dev@special.yml"), None);
+        assert_eq!(spring_profile_from_filename("bootstrap-dev.yml"), None);
+        assert_eq!(spring_profile_from_filename("other-dev.yml"), None);
+
+        // Helper: suggest_spring_profiles with temporary resources
+        let t = Tmp::new("prof_helpers");
+        let root = &t.0;
+        assert!(suggest_spring_profiles(root).is_empty());
+
+        t.write("src/main/resources/application.yml", "server:\n  port: 8080\n");
+        t.write("src/main/resources/application-dev.yml", "server:\n  port: 8081\n");
+        t.write("src/main/resources/application-test.properties", "server.port = 8082\n");
+        t.write("src/main/resources/application-prod.yaml", "# no port specified\n");
+        t.write("src/main/resources/application-invalid.dot.yml", "server.port: 8083\n");
+        t.write("src/main/resources/ignored.txt", "nothing\n");
+
+        let profiles = suggest_spring_profiles(root);
+        assert_eq!(profiles.len(), 3);
+
+        let dev = profiles.get("dev").unwrap();
+        assert_eq!(dev.label, "dev");
+        assert_eq!(dev.port, Some(8081));
+        assert_eq!(dev.env.get("SPRING_PROFILES_ACTIVE").map(String::as_str), Some("dev"));
+
+        let test = profiles.get("test").unwrap();
+        assert_eq!(test.label, "test");
+        assert_eq!(test.port, Some(8082));
+        assert_eq!(test.env.get("SPRING_PROFILES_ACTIVE").map(String::as_str), Some("test"));
+
+        let prod = profiles.get("prod").unwrap();
+        assert_eq!(prod.label, "prod");
+        assert_eq!(prod.port, None);
+        assert_eq!(prod.env.get("SPRING_PROFILES_ACTIVE").map(String::as_str), Some("prod"));
+
+        // Helper: attach_spring_profiles
+        let mut candidate = base_candidate(root, None, "spring-boot-maven", "Spring Boot");
+        attach_spring_profiles(&mut candidate, root);
+        assert_eq!(candidate.profiles.len(), 3);
+        assert!(candidate.why.iter().any(|w| w.contains("环境预设来自已有的 application-*.yml") && w.contains("dev") && w.contains("prod") && w.contains("test")));
+    }
 }
+

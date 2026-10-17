@@ -11751,7 +11751,10 @@ mod core7_group_key_ordering_and_failure_tests {
             "a".repeat(40)
         );
         let trailing = format!("{}-zzzzzzzzzzzzzzzzzz", "a".repeat(39));
-        assert_eq!(generate_group_key(&trailing, &[] as &[&str]), "a".repeat(39));
+        assert_eq!(
+            generate_group_key(&trailing, &[] as &[&str]),
+            "a".repeat(39)
+        );
 
         // a truncated candidate that already exists falls back to g{n}.
         let existing = vec!["a".repeat(40)];
@@ -11775,7 +11778,10 @@ start = ["echo", "hi"]
 
         assert!(loaded.create_group("Bad Key", Some("x")).is_err());
         assert_eq!(
-            loaded.create_group("bad.key", None).unwrap_err().to_string(),
+            loaded
+                .create_group("bad.key", None)
+                .unwrap_err()
+                .to_string(),
             "分组 key 只能包含小写字母、数字、下划线和连字符: `bad.key`"
         );
 
@@ -11787,7 +11793,10 @@ start = ["echo", "hi"]
         assert_eq!(created.label, "Demo Group");
         // duplicate detection uses the trimmed key.
         assert_eq!(
-            loaded.create_group("demo_grp", None).unwrap_err().to_string(),
+            loaded
+                .create_group("demo_grp", None)
+                .unwrap_err()
+                .to_string(),
             "分组 `demo_grp` 已存在"
         );
 
@@ -11824,14 +11833,20 @@ start = ["echo", "x"]
             Some("shop")
         );
         assert_eq!(
-            loaded.resolve_or_create_group("  Shop  ").unwrap().as_deref(),
+            loaded
+                .resolve_or_create_group("  Shop  ")
+                .unwrap()
+                .as_deref(),
             Some("shop")
         );
         let key = loaded.resolve_or_create_group("New Team").unwrap().unwrap();
         assert_eq!(key, "new-team");
         // the freshly generated key is found case-insensitively too.
         assert_eq!(
-            loaded.resolve_or_create_group("NEW-TEAM").unwrap().as_deref(),
+            loaded
+                .resolve_or_create_group("NEW-TEAM")
+                .unwrap()
+                .as_deref(),
             Some("new-team")
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -11964,14 +11979,8 @@ port = 1
 start = ["echo", "x"]
 "#;
         let (dir, loaded) = temp_loaded("cross_group", toml_str);
-        assert_eq!(
-            loaded.projects_in_group("a"),
-            vec!["p_cross".to_string()]
-        );
-        assert_eq!(
-            loaded.projects_in_group("b"),
-            vec!["p_cross".to_string()]
-        );
+        assert_eq!(loaded.projects_in_group("a"), vec!["p_cross".to_string()]);
+        assert_eq!(loaded.projects_in_group("b"), vec!["p_cross".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

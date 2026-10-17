@@ -11666,3 +11666,654 @@ start = ["echo", "solo"]
         assert!(json.contains("\"failure\":\"\""));
     }
 }
+
+#[cfg(test)]
+mod core7_group_key_ordering_and_failure_tests {
+    use super::*;
+
+    fn temp_loaded(tag: &str, toml_str: &str) -> (PathBuf, Loaded) {
+        let dir = std::env::temp_dir().join(format!(
+            "tongyun_dev_core7_{tag}_{}_{}",
+            std::process::id(),
+            current_time_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("projects.toml");
+        std::fs::write(&path, toml_str).unwrap();
+        let loaded = load(Some(&path)).unwrap();
+        (dir, loaded)
+    }
+
+    // ---- group key validation ----
+
+    #[test]
+    fn validate_group_key_boundaries_and_messages() {
+        assert!(
+            validate_group_key(&"a".repeat(40)).is_ok(),
+            "40 chars is the max and must pass"
+        );
+        assert!(
+            validate_group_key(&"z".repeat(41)).is_err(),
+            "41 chars is too long"
+        );
+        assert!(validate_group_key("0").is_ok());
+        assert!(validate_group_key("1234567890").is_ok());
+        assert!(validate_group_key("_").is_ok());
+        assert!(validate_group_key("-").is_ok());
+        assert!(validate_group_key("a_b-c9").is_ok());
+
+        // no trimming here: surrounding whitespace is part of the key and rejected.
+        assert!(validate_group_key(" demo").is_err());
+        assert!(validate_group_key("demo ").is_err());
+        assert!(validate_group_key("de mo").is_err());
+        assert!(validate_group_key("de\tmo").is_err());
+        assert!(validate_group_key("de\nmo").is_err());
+        assert!(validate_group_key("demo.api").is_err());
+        assert!(validate_group_key("demo/api").is_err());
+        assert!(validate_group_key("Demo").is_err());
+        assert!(validate_group_key("DEMO").is_err());
+        assert!(validate_group_key("分组").is_err());
+
+        // exact error wording for each branch.
+        assert_eq!(
+            validate_group_key("").unwrap_err().to_string(),
+            "分组 key 不能为空"
+        );
+        assert_eq!(
+            validate_group_key(&"a".repeat(41)).unwrap_err().to_string(),
+            "分组 key 长度不能超过 40 个字符"
+        );
+        assert_eq!(
+            validate_group_key("Bad Key").unwrap_err().to_string(),
+            "分组 key 只能包含小写字母、数字、下划线和连字符: `Bad Key`"
+        );
+    }
+
+    #[test]
+    fn generate_group_key_uncovered_shapes() {
+        // labels that collapse to nothing fall back to a generated key.
+        assert_eq!(generate_group_key("@@@", &[] as &[&str]), "g1");
+        assert_eq!(generate_group_key("-", &[] as &[&str]), "g1");
+        assert_eq!(generate_group_key("---", &[] as &[&str]), "g1");
+        assert_eq!(generate_group_key("   ", &[] as &[&str]), "g1");
+
+        // consecutive illegal runs collapse to a single hyphen; legal chars kept.
+        assert_eq!(generate_group_key("a@@@b", &[] as &[&str]), "a-b");
+        assert_eq!(generate_group_key("V1_2-3", &[] as &[&str]), "v1_2-3");
+
+        // surrounding whitespace ignored, uppercase lowered.
+        assert_eq!(generate_group_key("  Demo  ", &[] as &[&str]), "demo");
+
+        // longer than 40 chars: truncate, then drop a trailing hyphen.
+        assert_eq!(
+            generate_group_key(&"a".repeat(50), &[] as &[&str]),
+            "a".repeat(40)
+        );
+        let trailing = format!("{}-zzzzzzzzzzzzzzzzzz", "a".repeat(39));
+        assert_eq!(generate_group_key(&trailing, &[] as &[&str]), "a".repeat(39));
+
+        // a truncated candidate that already exists falls back to g{n}.
+        let existing = vec!["a".repeat(40)];
+        assert_eq!(generate_group_key(&"a".repeat(50), &existing), "g1");
+
+        // existing keys may be owned Strings, and g{n} probes skip taken keys.
+        let owned = vec!["g1".to_string(), "g3".to_string()];
+        assert_eq!(generate_group_key("中文", owned), "g2");
+    }
+
+    #[test]
+    fn create_and_rename_group_enforce_key_validation() {
+        let toml_str = r#"
+[projects.demo]
+name = "Demo"
+root = "/tmp"
+port = 3000
+start = ["echo", "hi"]
+"#;
+        let (dir, mut loaded) = temp_loaded("grp_crud", toml_str);
+
+        assert!(loaded.create_group("Bad Key", Some("x")).is_err());
+        assert_eq!(
+            loaded.create_group("bad.key", None).unwrap_err().to_string(),
+            "分组 key 只能包含小写字母、数字、下划线和连字符: `bad.key`"
+        );
+
+        // the key is trimmed before validation and storage.
+        let created = loaded
+            .create_group("  demo_grp  ", Some("Demo Group"))
+            .unwrap();
+        assert_eq!(created.key, "demo_grp");
+        assert_eq!(created.label, "Demo Group");
+        // duplicate detection uses the trimmed key.
+        assert_eq!(
+            loaded.create_group("demo_grp", None).unwrap_err().to_string(),
+            "分组 `demo_grp` 已存在"
+        );
+
+        // empty label is rejected before touching the file.
+        assert_eq!(
+            loaded
+                .rename_group_label("demo_grp", "   ")
+                .unwrap_err()
+                .to_string(),
+            "分组 label 不能为空"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_or_create_group_matches_case_insensitively_and_generates_keys() {
+        let toml_str = r#"
+[group.shop]
+label = "Shop"
+
+[projects.p]
+name = "P"
+root = "/tmp"
+port = 1
+start = ["echo", "x"]
+"#;
+        let (dir, mut loaded) = temp_loaded("resolve_grp", toml_str);
+        assert_eq!(
+            loaded.resolve_or_create_group("shop").unwrap().as_deref(),
+            Some("shop")
+        );
+        assert_eq!(
+            loaded.resolve_or_create_group("SHOP").unwrap().as_deref(),
+            Some("shop")
+        );
+        assert_eq!(
+            loaded.resolve_or_create_group("  Shop  ").unwrap().as_deref(),
+            Some("shop")
+        );
+        let key = loaded.resolve_or_create_group("New Team").unwrap().unwrap();
+        assert_eq!(key, "new-team");
+        // the freshly generated key is found case-insensitively too.
+        assert_eq!(
+            loaded.resolve_or_create_group("NEW-TEAM").unwrap().as_deref(),
+            Some("new-team")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- depends_on ordering helpers ----
+
+    #[test]
+    fn depends_on_of_returns_direct_dependencies() {
+        let toml_str = r#"
+[projects.a]
+name = "A"
+root = "/tmp"
+port = 1
+start = ["echo", "a"]
+depends_on = ["b", "c"]
+
+[projects.b]
+name = "B"
+root = "/tmp"
+port = 2
+start = ["echo", "b"]
+"#;
+        let (dir, loaded) = temp_loaded("dep_of", toml_str);
+        assert_eq!(
+            loaded.depends_on_of("a"),
+            vec!["b".to_string(), "c".to_string()]
+        );
+        assert!(loaded.depends_on_of("b").is_empty());
+        assert!(loaded.depends_on_of("ghost").is_empty());
+        // the id is trimmed before lookup.
+        assert_eq!(
+            loaded.depends_on_of("  a  "),
+            vec!["b".to_string(), "c".to_string()]
+        );
+        // returns an owned copy: mutating it does not change the config.
+        let mut copy = loaded.depends_on_of("a");
+        copy.push("zzz".into());
+        assert_eq!(
+            loaded.depends_on_of("a"),
+            vec!["b".to_string(), "c".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn contains_group_and_projects_in_group_semantics() {
+        let toml_str = r#"
+[group.declared_empty]
+label = "Declared Empty"
+
+[group.members_only]
+members = ["ghost", "p_member", "p_member"]
+
+[group.other]
+
+[projects.p_member]
+name = "Member"
+group = "members_only"
+root = "/tmp"
+port = 1
+start = ["echo", "m"]
+
+[projects.p_extra]
+name = "Extra"
+group = "members_only"
+root = "/tmp"
+port = 2
+start = ["echo", "e"]
+
+[projects.p_other]
+name = "Other"
+group = "other"
+root = "/tmp"
+port = 3
+start = ["echo", "o"]
+
+[projects.p_inferred]
+name = "Inferred"
+group = "inferred"
+root = "/tmp"
+port = 4
+start = ["echo", "i"]
+"#;
+        let (dir, loaded) = temp_loaded("group_membership", toml_str);
+
+        assert!(loaded.contains_group("declared_empty"));
+        assert!(loaded.contains_group("members_only"));
+        assert!(loaded.contains_group("inferred"));
+        assert!(!loaded.contains_group("nope"));
+        assert!(!loaded.contains_group(""));
+        assert!(!loaded.contains_group("   "));
+
+        // declared members come first, then the remaining members sorted by id.
+        assert_eq!(
+            loaded.projects_in_group("members_only"),
+            vec!["p_member".to_string(), "p_extra".to_string()]
+        );
+        assert_eq!(
+            loaded.projects_in_group("declared_empty"),
+            Vec::<String>::new()
+        );
+        assert_eq!(loaded.projects_in_group("nope"), Vec::<String>::new());
+        // an inferred, undeclared group is sorted by id.
+        assert_eq!(
+            loaded.projects_in_group("inferred"),
+            vec!["p_inferred".to_string()]
+        );
+        // group keys are trimmed.
+        assert_eq!(
+            loaded.projects_in_group("  other  "),
+            vec!["p_other".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn group_member_listed_across_groups_appears_in_both() {
+        let toml_str = r#"
+[group.a]
+members = ["p_cross"]
+
+[group.b]
+
+[projects.p_cross]
+name = "Cross"
+group = "b"
+root = "/tmp"
+port = 1
+start = ["echo", "x"]
+"#;
+        let (dir, loaded) = temp_loaded("cross_group", toml_str);
+        assert_eq!(
+            loaded.projects_in_group("a"),
+            vec!["p_cross".to_string()]
+        );
+        assert_eq!(
+            loaded.projects_in_group("b"),
+            vec!["p_cross".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn group_start_order_self_dependency_and_duplicate_deps() {
+        let toml_str = r#"
+[group.self_dep]
+label = "Self"
+order = 1
+depends_on = ["self_dep"]
+
+[group.a]
+label = "A"
+order = 2
+depends_on = ["b", "b"]
+
+[group.b]
+label = "B"
+order = 3
+"#;
+        let (dir, loaded) = temp_loaded("grp_self_dep", toml_str);
+        // duplicate depends_on entries do not break the topological sort; a group
+        // that depends on itself is left to the cycle fallback (groups() order).
+        let order = loaded.group_start_order();
+        assert_eq!(
+            order,
+            vec!["b".to_string(), "a".to_string(), "self_dep".to_string()]
+        );
+        // every group appears exactly once even with duplicated dependencies.
+        let mut sorted = order.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), order.len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sorted_projects_self_dependency_duplicates_and_group_tiebreaks() {
+        let toml_str = r#"
+[group.gb]
+order = 1
+
+[group.ga]
+order = 2
+
+[projects.p_self]
+name = "Self"
+root = "/tmp"
+port = 1
+start = ["echo", "x"]
+depends_on = ["p_self"]
+
+[projects.p_z]
+name = "ZZZ"
+group = "gb"
+root = "/tmp"
+port = 2
+start = ["echo", "z"]
+
+[projects.p_a]
+name = "AAA"
+group = "ga"
+root = "/tmp"
+port = 3
+start = ["echo", "a"]
+
+[projects.p_alpha_in]
+name = "Alpha"
+group = "ga"
+root = "/tmp"
+port = 4
+start = ["echo", "ai"]
+
+[projects.p_beta_in]
+name = "Beta"
+group = "ga"
+root = "/tmp"
+port = 5
+start = ["echo", "bi"]
+"#;
+        let (dir, loaded) = temp_loaded("sorted_proj_edge", toml_str);
+
+        // a self dependency cannot be ordered, so input order is kept.
+        assert_eq!(
+            loaded.sorted_projects_for_start(&["p_self"]),
+            vec!["p_self".to_string()]
+        );
+
+        // duplicate ids are preserved verbatim (no de-duplication).
+        assert_eq!(
+            loaded.sorted_projects_for_start(&["p_a", "p_a"]),
+            vec!["p_a".to_string(), "p_a".to_string()]
+        );
+
+        // group order (gb before ga) beats project name ordering.
+        assert_eq!(
+            loaded.sorted_projects_for_start(&["p_a", "p_z"]),
+            vec!["p_z".to_string(), "p_a".to_string()]
+        );
+
+        // within one group with no members, name then id decide.
+        assert_eq!(
+            loaded.sorted_projects_for_start(&["p_beta_in", "p_alpha_in"]),
+            vec!["p_alpha_in".to_string(), "p_beta_in".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sorted_projects_uses_inferred_group_order() {
+        let toml_str = r#"
+[projects.p_zeta]
+name = "Zeta Project"
+group = "zeta"
+root = "/tmp"
+port = 1
+start = ["echo", "z"]
+
+[projects.p_alpha]
+name = "Alpha Project"
+group = "alpha"
+root = "/tmp"
+port = 2
+start = ["echo", "a"]
+
+[projects.p_none]
+name = "Aaa Ungrouped"
+root = "/tmp"
+port = 3
+start = ["echo", "n"]
+"#;
+        let (dir, loaded) = temp_loaded("inferred_order", toml_str);
+        // undeclared groups order by label/key; ungrouped projects sort last.
+        assert_eq!(
+            loaded.group_start_order(),
+            vec!["alpha".to_string(), "zeta".to_string()]
+        );
+        assert_eq!(
+            loaded.sorted_projects_for_start(&["p_none", "p_zeta", "p_alpha"]),
+            vec![
+                "p_alpha".to_string(),
+                "p_zeta".to_string(),
+                "p_none".to_string()
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- derive_state / failure messages ----
+
+    #[test]
+    fn derive_state_uncovered_branches() {
+        let base = StateInput {
+            process_alive: false,
+            port_open: false,
+            port_conflict: false,
+            has_probe: false,
+            probe_ok: false,
+            started_at: None,
+            now: 100,
+            timeout_secs: 10,
+            start_error: None,
+        };
+
+        // no start marker: open port + passing probe -> Ready.
+        assert_eq!(
+            derive_state(StateInput {
+                port_open: true,
+                has_probe: true,
+                probe_ok: true,
+                ..base.clone()
+            }),
+            (LifeState::Ready, None)
+        );
+
+        // no start marker: closed port with a dead process -> Stopped, probe ignored.
+        assert_eq!(
+            derive_state(StateInput {
+                has_probe: true,
+                probe_ok: true,
+                ..base.clone()
+            }),
+            (LifeState::Stopped, None)
+        );
+
+        // no start marker: closed port with a live process -> Starting.
+        assert_eq!(
+            derive_state(StateInput {
+                process_alive: true,
+                has_probe: true,
+                probe_ok: true,
+                ..base.clone()
+            }),
+            (LifeState::Starting, None)
+        );
+
+        // no start marker + port conflict + live process -> Starting, never Ready.
+        assert_eq!(
+            derive_state(StateInput {
+                process_alive: true,
+                port_open: true,
+                port_conflict: true,
+                ..base.clone()
+            }),
+            (LifeState::Starting, None)
+        );
+
+        // with a start marker, elapsed exactly at the timeout is already a failure.
+        assert_eq!(
+            derive_state(StateInput {
+                process_alive: true,
+                started_at: Some(100),
+                now: 110,
+                ..base.clone()
+            }),
+            (LifeState::Failed, Some("超过 10 秒仍未就绪".to_string()))
+        );
+
+        // "process exited" is reported ahead of the timeout wording.
+        assert_eq!(
+            derive_state(StateInput {
+                started_at: Some(100),
+                now: 100 + START_EXIT_GRACE_SECS + 500,
+                timeout_secs: 10,
+                ..base.clone()
+            }),
+            (LifeState::Failed, Some("进程已退出".to_string()))
+        );
+
+        // port conflict + dead process past the grace window -> 进程已退出.
+        assert_eq!(
+            derive_state(StateInput {
+                port_open: true,
+                port_conflict: true,
+                started_at: Some(100),
+                now: 110,
+                ..base.clone()
+            }),
+            (LifeState::Failed, Some("进程已退出".to_string()))
+        );
+
+        // closed port + live process, probe irrelevant, still within timeout -> Starting.
+        assert_eq!(
+            derive_state(StateInput {
+                process_alive: true,
+                has_probe: true,
+                probe_ok: true,
+                started_at: Some(100),
+                now: 105,
+                ..base.clone()
+            }),
+            (LifeState::Starting, None)
+        );
+    }
+
+    #[test]
+    fn extract_start_failure_line_uncovered_patterns() {
+        // port-in-use synonyms.
+        for line in [
+            "java.net.BindException: Address already in use\n",
+            "Failed to bind to port 8080\n",
+            "EADDRINUSE: address already in use :::3000\n",
+            "地址已在使用\n",
+        ] {
+            let got = extract_start_failure_line(line).unwrap();
+            assert!(got.starts_with("端口被占用"), "line `{line}` -> {got}");
+        }
+
+        // dependency-resolution synonyms.
+        for line in [
+            "Could not find artifact com.example:demo:jar:1.0\n",
+            "module not found: Error: Can't resolve './missing'\n",
+            "non-resolvable parent POM for demo\n",
+            "无法解析依赖：foo\n",
+            "failed to collect dependencies\n",
+        ] {
+            let got = extract_start_failure_line(line).unwrap();
+            assert!(got.starts_with("依赖解析失败"), "line `{line}` -> {got}");
+        }
+
+        // a capital-E "Exception" is required; lowercase alone is not a failure.
+        assert_eq!(
+            extract_start_failure_line("java.lang.runtimeexception: boom\n"),
+            None
+        );
+        assert_eq!(
+            extract_start_failure_line("exception in thread main\n"),
+            None
+        );
+        // lowercase "caused by:" is still recognised.
+        assert_eq!(
+            extract_start_failure_line("caused by: java.io.IOException\n").as_deref(),
+            Some("异常：caused by: java.io.IOException")
+        );
+
+        // Maven auth: a bare `status:` keyword plus 401/403 is enough.
+        assert_eq!(
+            extract_start_failure_line("status: 401\n").as_deref(),
+            Some("认证失败：Maven 仓库返回 401")
+        );
+        assert_eq!(
+            extract_start_failure_line("status: 403\n").as_deref(),
+            Some("认证失败：Maven 仓库返回 403")
+        );
+        // digit boundaries are respected: 4010 / x1401 are not a 401.
+        assert_eq!(extract_start_failure_line("status: 4010\n"), None);
+        assert_eq!(
+            extract_start_failure_line("code x1401 unauthorized\n"),
+            None
+        );
+
+        // auth is matched before dependency lines.
+        let both = extract_start_failure_line(
+            "authentication failed status: 401\nCould not resolve dependencies for demo\n",
+        )
+        .unwrap();
+        assert!(both.starts_with("认证失败"), "{both}");
+    }
+
+    #[test]
+    fn failure_message_helper_uncovered_cases() {
+        // generic reasons are replaceable by a log line.
+        assert!(failure_allows_log_line("进程已退出但仍有子进程"));
+        // non-generic or warned reasons are not.
+        assert!(!failure_allows_log_line("超过"));
+        assert!(!failure_allows_log_line("超 过 10 秒"));
+        assert!(!failure_allows_log_line("process exited"));
+        assert!(!failure_allows_log_line("Disabled"));
+        assert!(!failure_allows_log_line("启动失败: boom"));
+
+        // prefix_failure: an already-labelled line is returned as-is.
+        assert_eq!(prefix_failure("异常", "异常处理失败"), "异常处理失败");
+
+        // exactly 180 chars is not truncated.
+        let exactly180 = "x".repeat(180);
+        let out180 = prefix_failure("异常", &exactly180);
+        assert_eq!(out180, format!("异常：{exactly180}"));
+        assert!(!out180.ends_with('…'));
+
+        // 181 chars is truncated to 180 plus an ellipsis.
+        let out181 = prefix_failure("异常", &"x".repeat(181));
+        assert!(out181.ends_with('…'));
+        assert_eq!(out181.chars().count(), "异常：".chars().count() + 181);
+    }
+}

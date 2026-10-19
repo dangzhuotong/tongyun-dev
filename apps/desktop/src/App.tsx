@@ -16,7 +16,6 @@ import { ProjectForm } from "./ProjectForm";
 import { ScanDialog } from "./ScanDialog";
 import { countByFilter, filterProjects, STATUS_FILTERS, type StatusFilter } from "./projectFilter";
 import { canStopProject, stopButtonTitle } from "./buttonState";
-import { effectiveStartCommand } from "./startCommand";
 import logoUrl from "./assets/logo.svg";
 import {
   AlertIcon,
@@ -100,7 +99,6 @@ export function App() {
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
   const [newGroupLabel, setNewGroupLabel] = useState("");
   const [selectedProfile, setSelectedProfile] = useState<string>("");
-  const [copiedCmd, setCopiedCmd] = useState(false);
   const [pagesDropdownOpen, setPagesDropdownOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<"overview" | "logs" | "details">(() => {
     try {
@@ -701,31 +699,6 @@ export function App() {
     }
   }
 
-  async function openInCursor() {
-    const folder = status?.root || current?.root || "";
-    if (!folder) return;
-    setError("");
-    try {
-      await invoke("open_in_cursor", { path: folder });
-    } catch (err: unknown) {
-      setError(String(err));
-    }
-  }
-
-  async function copyStartCommand() {
-    const cmd = effectiveStartCommand(current, selectedProfile);
-    if (!cmd) {
-      setError("没有可复制的启动命令");
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(cmd);
-      setCopiedCmd(true);
-      window.setTimeout(() => setCopiedCmd(false), 1500);
-    } catch (err: unknown) {
-      setError(String(err));
-    }
-  }
 
   const current = projects?.projects.find((row) => row.id === selected) ?? null;
   const page = pageUrl(status, current);
@@ -1487,28 +1460,7 @@ export function App() {
                     {status?.root ?? current.root}
                   </span>
                 </div>
-                <div className="shortcut-row">
-                  <button type="button" className="btn btn-secondary btn-xs" onClick={openInCursor} title="用 Cursor 打开项目目录">
-                    用 Cursor 打开
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-xs"
-                    disabled={!canOpenLog}
-                    onClick={() => reveal("log")}
-                    title="用系统默认程序打开日志文件"
-                  >
-                    打开日志文件
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-xs"
-                    onClick={copyStartCommand}
-                    title={effectiveStartCommand(current, selectedProfile) || "复制启动命令"}
-                  >
-                    {copiedCmd ? "已复制" : "复制启动命令"}
-                  </button>
-                </div>
+
               </div>
               <div className="header-actions" aria-busy={busy !== ""}>
                 {current.profiles && Object.keys(current.profiles).length > 0 && (

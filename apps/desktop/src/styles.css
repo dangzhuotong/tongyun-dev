@@ -587,12 +587,6 @@ svg {
   word-break: break-all;
 }
 
-.shortcut-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}
 
 .group-header {
   display: flex;

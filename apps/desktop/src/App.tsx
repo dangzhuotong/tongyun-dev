@@ -16,11 +16,14 @@ import { ProjectForm } from "./ProjectForm";
 import { ScanDialog } from "./ScanDialog";
 import { countByFilter, filterProjects, STATUS_FILTERS, type StatusFilter } from "./projectFilter";
 import { canStopProject, stopButtonTitle } from "./buttonState";
+import { effectiveStartCommand } from "./startCommand";
 import logoUrl from "./assets/logo.svg";
 import {
   AlertIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  CodeIcon,
+  CopyIcon,
   CpuIcon,
   DoorIcon,
   ExternalIcon,
@@ -99,6 +102,7 @@ export function App() {
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
   const [newGroupLabel, setNewGroupLabel] = useState("");
   const [selectedProfile, setSelectedProfile] = useState<string>("");
+  const [copiedCmd, setCopiedCmd] = useState(false);
   const [pagesDropdownOpen, setPagesDropdownOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<"overview" | "logs" | "details">(() => {
     try {
@@ -699,6 +703,31 @@ export function App() {
     }
   }
 
+  async function openInCursor() {
+    const folder = status?.root || current?.root || "";
+    if (!folder) return;
+    setError("");
+    try {
+      await invoke("open_in_cursor", { path: folder });
+    } catch (err: unknown) {
+      setError(String(err));
+    }
+  }
+
+  async function copyStartCommand() {
+    const cmd = effectiveStartCommand(current, selectedProfile);
+    if (!cmd) {
+      setError("没有可复制的启动命令");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(cmd);
+      setCopiedCmd(true);
+      window.setTimeout(() => setCopiedCmd(false), 1500);
+    } catch (err: unknown) {
+      setError(String(err));
+    }
+  }
 
   const current = projects?.projects.find((row) => row.id === selected) ?? null;
   const page = pageUrl(status, current);
@@ -1419,264 +1448,285 @@ export function App() {
                 </button>
               </div>
 
-              <button
-                type="button"
-                onClick={() => reveal("folder")}
-                className="flex items-center gap-1.5 font-mono text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:underline truncate max-w-[50%] cursor-pointer"
-                title="在系统资源管理器中打开项目目录"
-              >
-                <FolderIcon width={13} height={13} className="text-[var(--color-accent)] shrink-0" />
-                <span className="truncate">{status?.root ?? current.root}</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-[11px] text-[var(--color-text-subtle)] truncate max-w-[240px]">
+                  {current.id}
+                </span>
+              </div>
             </div>
 
             {activeTab === "overview" && (
               <div className="flex-1 flex flex-col h-full min-h-0 overflow-y-auto">
                 <header className="detail-header shrink-0">
-              <div className="title-area">
-                <div className="title-row">
-                  <h1>{current.name}</h1>
-                  <StatusPill project={current} status={status} />
-                  {status?.active_profile && (
-                    <span className="profile-active-tag" title={`当前运行环境：${status.active_profile}`}>
-                      ⚡ {current.profiles?.[status.active_profile]?.label || status.active_profile}
-                    </span>
-                  )}
-                </div>
-                <div className="subtitle">
-                  <code className="id-tag">{current.id}</code>
-                  {toolchainOf(current).map((t) => (
-                    <span key={t} className="tool-tag">
-                      {t}
-                    </span>
-                  ))}
-                  {current.depends_on && current.depends_on.length > 0 && (
-                    <span className="tool-tag depends-on-tag" title={`依赖服务：${current.depends_on.join(", ")}`}>
-                      依赖: {current.depends_on.join(", ")}
-                    </span>
-                  )}
-                  <span className="path" title={status?.root ?? current.root}>
-                    <FolderIcon />
-                    {status?.root ?? current.root}
-                  </span>
-                </div>
-
-              </div>
-              <div className="header-actions" aria-busy={busy !== ""}>
-                {current.profiles && Object.keys(current.profiles).length > 0 && (
-                  <div className="profile-selector-container">
-                    <label htmlFor="header-profile-select" className="profile-selector-label">
-                      环境:
-                    </label>
-                    <select
-                      id="header-profile-select"
-                      className="profile-selector-select"
-                      value={selectedProfile}
-                      disabled={busy !== ""}
-                      onChange={(e) => setSelectedProfile(e.target.value)}
-                      title="选择启动环境预设"
-                    >
-                      <option value="">默认配置</option>
-                      {Object.entries(current.profiles).map(([key, prof]) => (
-                        <option key={key} value={key}>
-                          {prof.label ? `${prof.label} (${key})` : key}
-                        </option>
+                  <div className="title-area">
+                    <div className="title-row">
+                      <h1>{current.name}</h1>
+                      <StatusPill project={current} status={status} />
+                      {status?.active_profile && (
+                        <span className="profile-active-tag" title={`当前运行环境：${status.active_profile}`}>
+                          ⚡ {current.profiles?.[status.active_profile]?.label || status.active_profile}
+                        </span>
+                      )}
+                    </div>
+                    <div className="subtitle">
+                      <code className="id-tag">{current.id}</code>
+                      {toolchainOf(current).map((t) => (
+                        <span key={t} className="tool-tag">
+                          {t}
+                        </span>
                       ))}
-                    </select>
+                      {current.depends_on && current.depends_on.length > 0 && (
+                        <span className="tool-tag depends-on-tag" title={`依赖服务：${current.depends_on.join(", ")}`}>
+                          依赖: {current.depends_on.join(", ")}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => reveal("folder")}
+                        className="path subtitle-path-btn"
+                        title={`在系统文件管理器中打开：${status?.root ?? current.root}`}
+                      >
+                        <FolderIcon />
+                        <span className="truncate max-w-[320px]">{status?.root ?? current.root}</span>
+                      </button>
+                    </div>
                   </div>
-                )}
-                <div className="btn-group">
-                  <button type="button" className="btn btn-secondary" disabled={!canStart} onClick={() => handleStart()}>
-                    <PlayIcon className="icon-play" />
-                    {busy === "start" ? "启动中…" : "启动"}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    disabled={!canStop}
-                    title={stopButtonTitle(status)}
-                    onClick={handleStop}
-                  >
-                    <StopIcon className="icon-stop" />
-                    {busy === "stop" ? "停止中…" : "停止"}
-                  </button>
-                  <button type="button" className="btn btn-secondary" disabled={!canRestart} onClick={() => handleRestart()}>
-                    <RestartIcon />
-                    {busy === "restart" ? "重启中…" : "重启"}
-                  </button>
-                </div>
-                {current.links && current.links.length > 1 ? (
-                  <div className="pages-split-btn">
+
+                  <div className="header-actions" aria-busy={busy !== ""}>
+                    {current.profiles && Object.keys(current.profiles).length > 0 && (
+                      <div className="profile-selector-container">
+                        <label htmlFor="header-profile-select" className="profile-selector-label">
+                          环境:
+                        </label>
+                        <select
+                          id="header-profile-select"
+                          className="profile-selector-select"
+                          value={selectedProfile}
+                          disabled={busy !== ""}
+                          onChange={(e) => setSelectedProfile(e.target.value)}
+                          title="选择启动环境预设"
+                        >
+                          <option value="">默认配置</option>
+                          {Object.entries(current.profiles).map(([key, prof]) => (
+                            <option key={key} value={key}>
+                              {prof.label ? `${prof.label} (${key})` : key}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    <div className="btn-group">
+                      <button type="button" className="btn btn-secondary" disabled={!canStart} onClick={() => handleStart()}>
+                        <PlayIcon className="icon-play" />
+                        {busy === "start" ? "启动中…" : "启动"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        disabled={!canStop}
+                        title={stopButtonTitle(status)}
+                        onClick={handleStop}
+                      >
+                        <StopIcon className="icon-stop" />
+                        {busy === "stop" ? "停止中…" : "停止"}
+                      </button>
+                      <button type="button" className="btn btn-secondary" disabled={!canRestart} onClick={() => handleRestart()}>
+                        <RestartIcon />
+                        {busy === "restart" ? "重启中…" : "重启"}
+                      </button>
+                    </div>
+
+                    {current.links && current.links.length > 1 ? (
+                      <div className="pages-split-btn">
+                        <button
+                          type="button"
+                          className="btn btn-primary pages-primary-btn"
+                          disabled={!canOpenPage}
+                          title={current.links[0].url}
+                          onClick={() => invoke("open_page", { url: current.links![0].url })}
+                        >
+                          <ExternalIcon />
+                          {current.links[0].title || "打开网页"}
+                        </button>
+                        <button
+                          type="button"
+                          className={`btn btn-primary pages-dropdown-toggle${pagesDropdownOpen ? " active" : ""}`}
+                          disabled={!canOpenPage}
+                          onClick={() => setPagesDropdownOpen((prev) => !prev)}
+                          title="展开全部网页链接"
+                          aria-label="展开全部网页链接"
+                        >
+                          <ChevronDownIcon />
+                        </button>
+                        {pagesDropdownOpen && (
+                          <div className="menu menu-down pages-menu" role="menu">
+                            {current.links.map((link, idx) => (
+                              <button
+                                key={idx}
+                                type="button"
+                                role="menuitem"
+                                onClick={() => {
+                                  setPagesDropdownOpen(false);
+                                  invoke("open_page", { url: link.url }).catch((e) => setError(String(e)));
+                                }}
+                                title={link.url}
+                              >
+                                <ExternalIcon /> {link.title || link.url}
+                              </button>
+                            ))}
+                            <div className="menu-sep" />
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="pages-open-all-btn"
+                              onClick={() => {
+                                setPagesDropdownOpen(false);
+                                handleOpenAllPages();
+                              }}
+                            >
+                              全部打开 ({current.links.length})
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        disabled={!canOpenPage}
+                        title={getOpenPageTitle()}
+                        onClick={() => reveal("page")}
+                      >
+                        <ExternalIcon />
+                        {current.links?.[0]?.title || "打开网页"}
+                      </button>
+                    )}
+
                     <button
                       type="button"
-                      className="btn btn-primary pages-primary-btn"
-                      disabled={!canOpenPage}
-                      title={current.links[0].url}
-                      onClick={() => invoke("open_page", { url: current.links![0].url })}
+                      className="btn btn-secondary"
+                      onClick={handleOpenEdit}
+                      disabled={busy !== ""}
+                      title="编辑项目设置"
                     >
-                      <ExternalIcon />
-                      {current.links[0].title || "打开网页"}
+                      <GearIcon />
+                      <span>设置</span>
                     </button>
-                    <button
-                      type="button"
-                      className={`btn btn-primary pages-dropdown-toggle${pagesDropdownOpen ? " active" : ""}`}
-                      disabled={!canOpenPage}
-                      onClick={() => setPagesDropdownOpen((prev) => !prev)}
-                      title="展开全部网页链接"
-                      aria-label="展开全部网页链接"
-                    >
-                      <ChevronDownIcon />
-                    </button>
-                    {pagesDropdownOpen && (
-                      <div className="menu menu-down pages-menu" role="menu">
-                        {current.links.map((link, idx) => (
+
+                    <div className="menu-anchor">
+                      <button
+                        type="button"
+                        className={`btn icon-btn${menu === "more" ? " pressed" : ""}`}
+                        onClick={() => setMenu(menu === "more" ? "" : "more")}
+                        title="更多操作"
+                        aria-label="更多操作"
+                        aria-expanded={menu === "more"}
+                      >
+                        <MoreIcon />
+                      </button>
+                      {menu === "more" && (
+                        <div className="menu menu-down" role="menu">
                           <button
-                            key={idx}
+                            type="button"
+                            role="menuitem"
+                            disabled={busy !== ""}
+                            onClick={() => {
+                              setMenu("");
+                              setError("");
+                              refresh(selected).catch((err: unknown) => setError(String(err)));
+                            }}
+                          >
+                            <RefreshIcon /> 刷新状态
+                          </button>
+                          <button
                             type="button"
                             role="menuitem"
                             onClick={() => {
-                              setPagesDropdownOpen(false);
-                              invoke("open_page", { url: link.url }).catch((e) => setError(String(e)));
+                              setMenu("");
+                              openInCursor();
                             }}
-                            title={link.url}
+                            title="用 Cursor 打开项目目录"
                           >
-                            <ExternalIcon /> {link.title || link.url}
+                            <CodeIcon /> 用 Cursor 打开
                           </button>
-                        ))}
-                        <div className="menu-sep" />
-                        <button
-                          type="button"
-                          role="menuitem"
-                          className="pages-open-all-btn"
-                          onClick={() => {
-                            setPagesDropdownOpen(false);
-                            handleOpenAllPages();
-                          }}
-                        >
-                          全部打开 ({current.links.length})
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    disabled={!canOpenPage}
-                    title={getOpenPageTitle()}
-                    onClick={() => reveal("page")}
-                  >
-                    <ExternalIcon />
-                    {current.links?.[0]?.title || "打开网页"}
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="btn btn-secondary btn-terminal-header"
-                  onClick={() => handleOpenTerminal()}
-                  title="在系统原生终端 (CMD) 中运行项目"
-                >
-                  <TerminalIcon />
-                  打开 CMD
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => reveal("folder")}
-                  title="在系统文件管理器中打开项目目录"
-                >
-                  <FolderIcon />
-                  打开目录
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={handleOpenEdit}
-                  disabled={busy !== ""}
-                  title="编辑这个项目的目录、命令、端口、日志、Java/Node 版本"
-                >
-                  <GearIcon />
-                  项目设置
-                </button>
-                <div className="menu-anchor">
-                  <button
-                    type="button"
-                    className={`btn icon-btn${menu === "more" ? " pressed" : ""}`}
-                    onClick={() => setMenu(menu === "more" ? "" : "more")}
-                    title="更多"
-                    aria-label="更多"
-                    aria-expanded={menu === "more"}
-                  >
-                    <MoreIcon />
-                  </button>
-                  {menu === "more" && (
-                    <div className="menu menu-down" role="menu">
-                      <button
-                        type="button"
-                        role="menuitem"
-                        disabled={busy !== ""}
-                        onClick={() => {
-                          setMenu("");
-                          setError("");
-                          refresh(selected).catch((err: unknown) => setError(String(err)));
-                        }}
-                      >
-                        <RefreshIcon /> 刷新状态
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        onClick={() => {
-                          setMenu("");
-                          handleOpenTerminal();
-                        }}
-                        title="在系统独立终端中交互运行"
-                      >
-                        <TerminalIcon /> 在系统终端中运行
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        disabled={!canOpenLog}
-                        onClick={() => {
-                          setMenu("");
-                          reveal("log");
-                        }}
-                      >
-                        <FileIcon /> 打开日志文件
-                      </button>
-                      {status?.install_command && (
-                        <button
-                          type="button"
-                          role="menuitem"
-                          disabled={!canInstall}
-                          title={`在项目目录运行 ${status.install_command}`}
-                          onClick={() => {
-                            setMenu("");
-                            handleInstall();
-                          }}
-                        >
-                          <RefreshIcon /> 安装依赖（{status.install_command}）
-                        </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setMenu("");
+                              reveal("folder");
+                            }}
+                            title="在系统文件管理器中打开项目目录"
+                          >
+                            <FolderIcon /> 打开项目目录
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setMenu("");
+                              handleOpenTerminal();
+                            }}
+                            title="在系统独立命令行终端 (CMD) 中运行"
+                          >
+                            <TerminalIcon /> 在系统终端中运行
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            disabled={!canOpenLog}
+                            onClick={() => {
+                              setMenu("");
+                              reveal("log");
+                            }}
+                            title="用系统默认程序打开日志文件"
+                          >
+                            <FileIcon /> 打开日志文件
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setMenu("");
+                              copyStartCommand();
+                            }}
+                            title={effectiveStartCommand(current, selectedProfile) || "复制启动命令"}
+                          >
+                            <CopyIcon /> {copiedCmd ? "已复制启动命令" : "复制启动命令"}
+                          </button>
+                          {status?.install_command && (
+                            <button
+                              type="button"
+                              role="menuitem"
+                              disabled={!canInstall}
+                              title={`在项目目录运行 ${status.install_command}`}
+                              onClick={() => {
+                                setMenu("");
+                                handleInstall();
+                              }}
+                            >
+                              <RefreshIcon /> 安装依赖（{status.install_command}）
+                            </button>
+                          )}
+                          <div className="menu-sep" />
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="danger"
+                            disabled={busy !== ""}
+                            onClick={() => {
+                              setMenu("");
+                              handleDeleteProject();
+                            }}
+                          >
+                            <TrashIcon /> 删除项目…
+                          </button>
+                        </div>
                       )}
-                      <div className="menu-sep" />
-                      <button
-                        type="button"
-                        role="menuitem"
-                        className="danger"
-                        disabled={busy !== ""}
-                        onClick={() => {
-                          setMenu("");
-                          handleDeleteProject();
-                        }}
-                      >
-                        <TrashIcon /> 删除项目…
-                      </button>
                     </div>
-                  )}
-                </div>
-              </div>
-            </header>
+                  </div>
+                </header>
 
             <div className="detail-body">
               <DetailStateBar
@@ -1802,15 +1852,88 @@ export function App() {
                 />
               </section>
 
-              <LogPanel
-                log={log}
-                logPath={logPath}
-                canOpenLog={canOpenLog}
-                onOpenLog={() => reveal("log")}
-                selected={selected}
-                running={status?.running ?? false}
-                onOpenTerminal={() => handleOpenTerminal()}
-              />
+              {/* 快捷开发动作条 */}
+              <div className="quick-actions-bar" aria-label="快捷开发动作">
+                <button
+                  type="button"
+                  className="quick-action-btn"
+                  onClick={openInCursor}
+                  title="用 Cursor 打开项目目录"
+                >
+                  <CodeIcon />
+                  <span>在 Cursor 中打开</span>
+                </button>
+                <button
+                  type="button"
+                  className="quick-action-btn"
+                  onClick={() => reveal("folder")}
+                  title="在系统文件管理器中打开项目目录"
+                >
+                  <FolderIcon />
+                  <span>打开项目目录</span>
+                </button>
+                <button
+                  type="button"
+                  className="quick-action-btn"
+                  disabled={!canOpenLog}
+                  onClick={() => reveal("log")}
+                  title="用系统默认程序打开日志文件"
+                >
+                  <FileIcon />
+                  <span>打开日志文件</span>
+                </button>
+                <button
+                  type="button"
+                  className="quick-action-btn"
+                  onClick={copyStartCommand}
+                  title={effectiveStartCommand(current, selectedProfile) || "复制启动命令"}
+                >
+                  <CopyIcon />
+                  <span>{copiedCmd ? "已复制命令" : "复制启动命令"}</span>
+                </button>
+                <button
+                  type="button"
+                  className="quick-action-btn"
+                  onClick={() => handleOpenTerminal()}
+                  title="在系统独立命令行终端 (CMD) 中运行项目"
+                >
+                  <TerminalIcon />
+                  <span>系统 CMD 运行</span>
+                </button>
+              </div>
+
+              {/* 概览中的实时日志卡片 */}
+              <div className="overview-log-card">
+                <div className="overview-log-header">
+                  <div className="overview-log-title">
+                    <span className={`log-dot ${status?.running ? "pulse" : ""}`} />
+                    <span>实时日志</span>
+                    {logPath && (
+                      <code className="overview-log-path font-mono text-[11px] text-[var(--color-text-muted)] truncate max-w-[280px]" title={logPath}>
+                        {logPath}
+                      </code>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    className="overview-log-expand-btn"
+                    onClick={() => setActiveTab("logs")}
+                    title="切换到独立全屏沉浸式日志视图"
+                  >
+                    <span>进入全屏日志</span>
+                    <ChevronRightIcon />
+                  </button>
+                </div>
+                <LogPanel
+                  log={log}
+                  logPath={logPath}
+                  canOpenLog={canOpenLog}
+                  onOpenLog={() => reveal("log")}
+                  selected={selected}
+                  running={status?.running ?? false}
+                  onOpenTerminal={() => handleOpenTerminal()}
+                />
+              </div>
             </div>
           </div>
         )}

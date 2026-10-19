@@ -1037,10 +1037,33 @@ mark {
   text-overflow: ellipsis;
 }
 
+.subtitle-path-btn {
+  background: none;
+  border: none;
+  padding: 2px 6px;
+  margin: -2px -6px;
+  border-radius: var(--ty-radius-xs);
+  cursor: pointer;
+  color: var(--ty-text-muted);
+  transition: all 0.15s ease;
+  font-size: var(--ty-font-size-sm);
+}
+
+.subtitle-path-btn:hover {
+  background: var(--ty-surface-raised);
+  color: var(--ty-text);
+}
+
+.subtitle-path-btn:hover svg {
+  color: var(--ty-matcha);
+}
+
 .subtitle .path svg {
   width: 13px;
   height: 13px;
   color: var(--ty-text-subtle);
+  flex-shrink: 0;
+  transition: color 0.15s ease;
 }
 
 .header-actions {
@@ -1463,6 +1486,130 @@ mark {
 
 .tone-muted .stat-value {
   color: var(--ty-text-muted);
+}
+
+/* ───────── 快捷开发动作条 ───────── */
+
+.quick-actions-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--ty-surface);
+  border: 1px solid var(--ty-border);
+  border-radius: var(--ty-radius-md);
+  box-shadow: var(--ty-shadow-card);
+}
+
+.quick-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: var(--ty-radius-sm);
+  border: 1px solid var(--ty-border);
+  background: var(--ty-surface-raised);
+  color: var(--ty-text);
+  font-size: var(--ty-font-size-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.quick-action-btn:hover:not(:disabled) {
+  background: var(--ty-surface);
+  border-color: var(--ty-border-strong);
+  color: var(--ty-text);
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+}
+
+.quick-action-btn:active:not(:disabled) {
+  background: var(--ty-surface-sunken);
+  transform: translateY(1px);
+}
+
+.quick-action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.quick-action-btn svg {
+  width: 14px;
+  height: 14px;
+  color: var(--ty-text-muted);
+  flex-shrink: 0;
+  transition: color 0.15s ease;
+}
+
+.quick-action-btn:hover:not(:disabled) svg {
+  color: var(--ty-matcha);
+}
+
+/* ───────── 概览页日志卡片容器 ───────── */
+
+.overview-log-card {
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--ty-radius-md);
+  border: 1px solid var(--ty-border);
+  background: var(--log-bg);
+  box-shadow: var(--ty-shadow-card);
+  overflow: hidden;
+  min-height: 280px;
+  flex: 1;
+}
+
+.overview-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 14px;
+  background: var(--log-bar);
+  border-bottom: 1px solid var(--log-border);
+  user-select: none;
+}
+
+.overview-log-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--ty-font-size-sm);
+  font-weight: 600;
+  color: var(--log-text);
+}
+
+.overview-log-expand-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: var(--ty-radius-xs);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--log-muted);
+  font-size: var(--ty-font-size-xs);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.overview-log-expand-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.overview-log-expand-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+.overview-log-card .log {
+  border: none;
+  box-shadow: none;
+  border-radius: 0;
 }
 
 /* ───────── 日志面板（暖深色） ───────── */

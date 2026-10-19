@@ -216,4 +216,10 @@ export const WrapIcon = (p: P) => (
     <polyline points="16 16 14 18 16 20" />
   </Svg>
 );
+export const CodeIcon = (p: P) => (
+  <Svg {...p}>
+    <polyline points="16 18 22 12 16 6" />
+    <polyline points="8 6 2 12 8 18" />
+  </Svg>
+);
 

@@ -4456,7 +4456,7 @@ checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "tongyun-dev-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -4467,7 +4467,7 @@ dependencies = [
 
 [[package]]
 name = "tongyun-dev-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -4481,7 +4481,7 @@ dependencies = [
 
 [[package]]
 name = "tongyun-dev-desktop"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "objc2",
  "objc2-app-kit",

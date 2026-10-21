@@ -11,6 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub mod scan;
+pub mod secret_store;
 pub mod toolchain;
 
 pub use scan::{Candidate, Confidence, ScanReport, DEFAULT_SCAN_DEPTH};

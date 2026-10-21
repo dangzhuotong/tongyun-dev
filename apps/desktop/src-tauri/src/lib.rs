@@ -429,6 +429,12 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // First launch after an update runs migration. This app has no
+            // registered legacy keychain accounts, so the call does not open
+            // the OS keychain. See `secret_store` module docs for the trigger.
+            let _ = tongyun_dev_core::secret_store::migrate_app_secrets(
+                &tongyun_dev_core::config_dir(None),
+            );
             schedule_front(app.handle());
             Ok(())
         })

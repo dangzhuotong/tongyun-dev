@@ -19,6 +19,14 @@ export type StatusFact = {
   title?: string;
 };
 
+export type OverviewProgress = {
+  mode: "determinate" | "indeterminate";
+  /** 0–100。安装依赖没有总量，用 indeterminate。 */
+  percent: number;
+  /** 启动等待上限，例如 `最长 180 秒`。安装中为空。 */
+  timeoutLabel: string;
+};
+
 export type OverviewStatusModel = {
   /** 运行中 / 已停止，以及启动中、安装中、未配置这类仍需要一眼看到的词。 */
   headline: string;
@@ -27,6 +35,8 @@ export type OverviewStatusModel = {
   portText: string;
   /** 原来四张统计卡的内容，紧凑排在同一行。 */
   facts: StatusFact[];
+  /** 启动或安装时贴在状态行底部的细进度，没有则为 null。 */
+  progress: OverviewProgress | null;
 };
 
 export type OverviewWarningAction = "edit" | "dismiss" | "install" | "logs";
@@ -166,12 +176,57 @@ export function overviewStatusLine(project: ProjectBits, status: Status | null):
     });
   }
   facts.push(probeFact(project, status));
+  const warnings = collectOverviewWarnings({ project, status });
   return {
     headline: head.headline,
-    tone: head.tone,
+    tone: toneAtLeast(head.tone, warnings),
     portText: port > 0 ? `:${port}` : "端口未配置",
     facts,
+    progress: startProgress(status),
   };
+}
+
+const TONE_RANK: Record<OverviewTone, number> = {
+  muted: 0,
+  ok: 1,
+  info: 2,
+  warn: 3,
+  danger: 4,
+};
+
+/** 状态行颜色取自身和警告里更高的一级，避免启动失败被端口警告的颜色盖住。 */
+export function toneAtLeast(base: OverviewTone, warnings: { tone: OverviewTone }[]): OverviewTone {
+  return warnings.reduce(
+    (best, warning) => (TONE_RANK[warning.tone] > TONE_RANK[best] ? warning.tone : best),
+    base,
+  );
+}
+
+function startProgress(status: Status | null): OverviewProgress | null {
+  if (!status) return null;
+  if (status.state === "installing") {
+    return { mode: "indeterminate", percent: 35, timeoutLabel: "" };
+  }
+  if (status.state === "starting") {
+    const elapsed = status.elapsed_secs ?? 0;
+    const timeout = status.timeout_secs || 180;
+    const pct = Math.min(100, Math.round((elapsed / Math.max(timeout, 1)) * 100));
+    return {
+      mode: "determinate",
+      percent: Math.max(4, pct),
+      timeoutLabel: `最长 ${timeout} 秒`,
+    };
+  }
+  return null;
+}
+
+function failedDetail(status: Status): string {
+  const parts: string[] = [];
+  if (status.failure) parts.push(status.failure);
+  if (status.pid != null) {
+    parts.push(`进程 PID ${status.pid} 仍在，停止可清理，重启可重新尝试`);
+  }
+  return parts.join("\n") || "服务启动失败";
 }
 
 function hintWarning(hints: string[]): OverviewWarning | null {
@@ -186,8 +241,9 @@ function hintWarning(hints: string[]): OverviewWarning | null {
 }
 
 /**
- * 详情页同时只突出一条警告。多条时按阻塞程度排序，折叠态只显示第一条。
- * 配置错误 > 未配置 > 操作失败 > 已停用 > 端口占用 > 启动失败 > 启动提示 > 缺依赖。
+ * 详情页同时只突出一条警告。同级里仍按「配置错误 > 未配置 > 操作失败 > 已停用 >
+ * 端口占用 > 启动失败 > 启动提示 > 缺依赖」稳定排序，但 danger 一定排在 warn / muted 前面，
+ * 这样启动失败不会被折进端口占用的「还有 N 条」。
  */
 export function collectOverviewWarnings(input: {
   project: ProjectBits;
@@ -255,7 +311,7 @@ export function collectOverviewWarnings(input: {
       id: "failed",
       tone: "danger",
       title: "启动失败",
-      detail: status.failure || (status.pid != null ? `进程 PID ${status.pid} 仍在，可以停止清理后再启动。` : "服务启动失败"),
+      detail: failedDetail(status),
       action: deps && status.install_command ? "install" : "logs",
       actionLabel: deps && status.install_command ? "安装依赖" : "看日志",
     });
@@ -276,7 +332,13 @@ export function collectOverviewWarnings(input: {
     });
   }
 
-  return warnings;
+  return warnings
+    .map((warning, index) => ({ warning, index }))
+    .sort((a, b) => {
+      const byTone = TONE_RANK[b.warning.tone] - TONE_RANK[a.warning.tone];
+      return byTone !== 0 ? byTone : a.index - b.index;
+    })
+    .map((item) => item.warning);
 }
 
 /** 折叠时只留第一条；展开后其余警告仍可看到。 */

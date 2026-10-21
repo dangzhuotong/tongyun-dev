@@ -43,7 +43,7 @@ const LOG_LINES = 500;
 const COLLAPSED_STORAGE_KEY = "tongyun-dev:collapsed-groups";
 
 function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
-  if (isDetailPreview()) {
+  if (import.meta.env.DEV && isDetailPreview()) {
     const record = args && !ArrayBuffer.isView(args) && !(args instanceof ArrayBuffer) && !Array.isArray(args)
       ? (args as Record<string, unknown>)
       : undefined;
@@ -163,7 +163,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (isDetailPreview()) return;
+    if (import.meta.env.DEV && isDetailPreview()) return;
     let cancelled = false;
     import("@tauri-apps/api/app")
       .then(({ getVersion }) => getVersion())
@@ -177,7 +177,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (isDetailPreview()) return;
+    if (import.meta.env.DEV && isDetailPreview()) return;
     const timer = window.setTimeout(() => {
       void handleCheckUpdate(false);
     }, 3000);

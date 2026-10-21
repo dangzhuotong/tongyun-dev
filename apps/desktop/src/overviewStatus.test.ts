@@ -30,9 +30,13 @@ function status(partial: Partial<Status> & Pick<Status, "state">): Status {
 
 describe("overviewStatusLine", () => {
   it("运行中时把端口号放在状态旁边，四项信息收成一行", () => {
-    const line = overviewStatusLine(previewDemoApi, previewDemoStatus);
+    const line = overviewStatusLine(
+      { ...previewDemoApi, hints: [] },
+      { ...previewDemoStatus, hints: [], port_conflict: false },
+    );
     expect(line.headline).toBe("运行中");
     expect(line.tone).toBe("ok");
+    expect(line.progress).toBeNull();
     expect(line.portText).toBe(":8080");
     expect(line.facts.map((fact) => fact.key)).toEqual(["state", "pid", "port", "probe"]);
     expect(line.facts.find((fact) => fact.key === "state")?.value).toBe("就绪");
@@ -51,13 +55,18 @@ describe("overviewStatusLine", () => {
     expect(line.facts.find((fact) => fact.key === "probe")?.value).toBe("未响应");
   });
 
-  it("启动中保留秒数，失败时状态行仍是已停止", () => {
+  it("启动中保留秒数和细进度，失败时状态行仍是已停止", () => {
     const starting = overviewStatusLine(
-      previewDemoApi,
-      status({ state: "starting", elapsed_secs: 8, port_open: false }),
+      { ...previewDemoApi, hints: [] },
+      status({ state: "starting", elapsed_secs: 8, port_open: false, timeout_secs: 180 }),
     );
     expect(starting.headline).toBe("启动中");
     expect(starting.facts.find((fact) => fact.key === "state")?.value).toBe("启动中 · 8 秒");
+    expect(starting.progress).toEqual({
+      mode: "determinate",
+      percent: 4,
+      timeoutLabel: "最长 180 秒",
+    });
 
     const failed = overviewStatusLine(
       previewDemoApi,
@@ -114,6 +123,37 @@ describe("collectOverviewWarnings", () => {
     });
     expect(warnings.map((item) => item.id)).toEqual(["error", "failed"]);
     expect(warnings[1].action).toBe("logs");
+  });
+
+  it("启动失败排在端口占用前面，状态行取 danger，并保留残留进程提示", () => {
+    const failed = status({
+      state: "failed",
+      failure: "端口没有起来",
+      pid: 4242,
+      port_conflict: true,
+      port_holder: "pid 9991",
+    });
+    const project = { ...previewDemoApi, hints: [] };
+    const warnings = collectOverviewWarnings({ project, status: failed });
+    expect(warnings.map((item) => item.id)).toEqual(["failed", "port-conflict"]);
+    expect(warnings[0].tone).toBe("danger");
+    expect(warnings[0].detail).toContain("端口没有起来");
+    expect(warnings[0].detail).toContain("进程 PID 4242 仍在，停止可清理，重启可重新尝试");
+    expect(warnings[0].actionLabel).toBe("看日志");
+    expect(visibleOverviewWarnings(warnings, false).map((item) => item.id)).toEqual(["failed"]);
+
+    const line = overviewStatusLine(project, failed);
+    expect(line.headline).toBe("已停止");
+    expect(line.tone).toBe("danger");
+  });
+
+  it("端口占用把运行中的状态行抬到 warn", () => {
+    const running = overviewStatusLine(
+      { ...previewDemoApi, hints: [] },
+      { ...previewDemoStatus, hints: [] },
+    );
+    expect(running.headline).toBe("运行中");
+    expect(running.tone).toBe("warn");
   });
 
   it("缺依赖的停止态给出一条可安装的提示", () => {

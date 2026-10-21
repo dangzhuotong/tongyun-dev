@@ -60,8 +60,10 @@ describe("ProjectOverview", () => {
     expect(html).toContain("正常 · 200");
     expect(html).toContain("启动");
     expect(html).toContain("停止");
-    expect(html).toContain("打开网页");
+    expect(html).toContain("控制台");
+    expect(html).toContain('title="http://127.0.0.1:8080/"');
     expect(html).toContain("更多");
+    expect(renderOverview({ project: { ...previewDemoApi, links: [] } })).toContain("打开网页");
     expect(html).not.toContain("quick-actions-bar");
     expect(html).not.toContain('class="stats"');
     expect(html).not.toContain("state-bar");
@@ -79,6 +81,47 @@ describe("ProjectOverview", () => {
     expect(html.match(/class="callout overview-warning/g)).toHaveLength(1);
   });
 
+  it("启动失败折叠时盖过端口警告，并带上残留进程", () => {
+    const html = renderOverview({
+      project: { ...previewDemoApi, hints: [] },
+      status: {
+        ...previewDemoStatus,
+        running: false,
+        state: "failed",
+        failure: "端口没有起来",
+        pid: 4242,
+        port_open: false,
+        port_conflict: true,
+        hints: [],
+        login_probe: { url: "http://127.0.0.1:8080/login", http_code: null, ok: false },
+      },
+    });
+    expect(html).toContain("tone-danger");
+    expect(html).toContain("启动失败");
+    expect(html).toContain("进程 PID 4242 仍在，停止可清理，重启可重新尝试");
+    expect(html).toContain("看日志");
+    expect(html).not.toContain("被别的进程占着");
+  });
+
+  it("启动中把进度条收在状态行里", () => {
+    const html = renderOverview({
+      project: { ...previewDemoApi, hints: [] },
+      status: {
+        ...previewDemoStatus,
+        running: false,
+        state: "starting",
+        elapsed_secs: 8,
+        timeout_secs: 180,
+        port_open: false,
+        port_conflict: false,
+        hints: [],
+      },
+    });
+    expect(html).toContain("最长 180 秒");
+    expect(html).toContain("status-line-progress");
+    expect(html).toContain('aria-label="启动进度"');
+  });
+
   it("更多菜单里仍能到达重启、设置和原来的快捷动作", () => {
     const html = renderOverview({ moreOpen: true });
     for (const label of [
@@ -91,7 +134,7 @@ describe("ProjectOverview", () => {
       "打开日志文件",
       "复制启动命令",
       "安装依赖（pnpm install）",
-      "查看实时日志",
+      "看日志",
       "删除项目…",
     ]) {
       expect(html).toContain(label);

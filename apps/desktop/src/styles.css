@@ -1334,16 +1334,46 @@ mark {
 
 .status-line {
   display: flex;
-  align-items: center;
-  gap: 14px;
-  height: 36px;
-  padding: 0 12px;
+  flex-direction: column;
+  align-items: stretch;
+  height: auto;
+  padding: 0;
   border-radius: var(--ty-radius-md);
   border: 1px solid var(--ty-border);
   background: var(--ty-surface);
   box-shadow: var(--ty-shadow-card);
   overflow: hidden;
   flex-shrink: 0;
+}
+
+.status-line-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 36px;
+  min-width: 0;
+  padding: 0 12px;
+}
+
+.status-line-timeout {
+  flex-shrink: 0;
+  color: var(--ty-text-subtle);
+  font-size: var(--ty-font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.status-line-log {
+  flex-shrink: 0;
+}
+
+.status-line-progress {
+  height: 3px;
+  border-radius: 0;
+  flex-shrink: 0;
+}
+
+.status-line-progress .progress-bar {
+  border-radius: 0;
 }
 
 .status-line-main {
@@ -1450,6 +1480,11 @@ mark {
 
 .status-line.tone-danger .status-line-headline {
   color: var(--ty-peach-text);
+}
+
+.status-line.tone-warn {
+  background: var(--ty-honey-tint);
+  border-color: #eedcb2;
 }
 
 .status-line.tone-warn .state-dot {

@@ -4,6 +4,7 @@ import { LogPanel } from "./LogPanel";
 import {
   collectOverviewWarnings,
   overviewStatusLine,
+  toneAtLeast,
   type OverviewWarning,
 } from "./overviewStatus";
 import { effectiveStartCommand } from "./startCommand";
@@ -78,7 +79,12 @@ export function ProjectOverview(props: ProjectOverviewProps) {
     () => collectOverviewWarnings({ project, status, error: props.error }),
     [project, status, props.error],
   );
+  const tone = toneAtLeast(model.tone, warnings);
   const links = project.links ?? [];
+  const pageLabel = links[0]?.title || "打开网页";
+  const showLogShortcut =
+    status?.state === "installing" ||
+    (status?.state === "failed" && warnings[0]?.action !== "logs");
   const profiles = project.profiles ? Object.entries(project.profiles) : [];
   const startCommand = effectiveStartCommand(project, props.selectedProfile);
 
@@ -169,7 +175,7 @@ export function ProjectOverview(props: ProjectOverviewProps) {
                 onClick={() => props.onOpenPage(links[0].url)}
               >
                 <ExternalIcon />
-                打开网页
+                {pageLabel}
               </button>
               <button
                 type="button"
@@ -222,7 +228,7 @@ export function ProjectOverview(props: ProjectOverviewProps) {
               onClick={() => props.onOpenPage()}
             >
               <ExternalIcon />
-              打开网页
+              {pageLabel}
             </button>
           )}
 
@@ -289,7 +295,7 @@ export function ProjectOverview(props: ProjectOverviewProps) {
                   </button>
                 )}
                 <button type="button" role="menuitem" onClick={() => { props.onCloseMore(); props.onShowLogs(); }}>
-                  <FileIcon /> 查看实时日志
+                  <FileIcon /> 看日志
                 </button>
                 <div className="menu-sep" />
                 <button
@@ -311,24 +317,49 @@ export function ProjectOverview(props: ProjectOverviewProps) {
       </header>
 
       <div className="detail-body">
-        <section className={`status-line tone-${model.tone}`} aria-label="运行信息">
-          <div className="status-line-main">
-            <span className="state-dot" />
-            <strong className="status-line-headline">{model.headline}</strong>
-            <span className="status-line-port">{model.portText}</span>
+        <section className={`status-line tone-${tone}${model.progress ? " has-progress" : ""}`} aria-label="运行信息">
+          <div className="status-line-row">
+            <div className="status-line-main">
+              <span className="state-dot" />
+              <strong className="status-line-headline">{model.headline}</strong>
+              <span className="status-line-port">{model.portText}</span>
+            </div>
+            <div className="status-line-facts">
+              {model.facts.map((fact) => (
+                <span
+                  key={fact.key}
+                  className={`status-fact tone-${fact.tone}`}
+                  title={fact.title || `${fact.label} ${fact.value}`}
+                >
+                  <span className="status-fact-label">{fact.label}</span>
+                  <span className="status-fact-value">{fact.value}</span>
+                </span>
+              ))}
+            </div>
+            {model.progress?.timeoutLabel && (
+              <span className="status-line-timeout">{model.progress.timeoutLabel}</span>
+            )}
+            {showLogShortcut && (
+              <button type="button" className="btn btn-ghost btn-sm status-line-log" onClick={props.onShowLogs}>
+                看日志
+              </button>
+            )}
           </div>
-          <div className="status-line-facts">
-            {model.facts.map((fact) => (
-              <span
-                key={fact.key}
-                className={`status-fact tone-${fact.tone}`}
-                title={fact.title || `${fact.label} ${fact.value}`}
-              >
-                <span className="status-fact-label">{fact.label}</span>
-                <span className="status-fact-value">{fact.value}</span>
-              </span>
-            ))}
-          </div>
+          {model.progress && (
+            <div
+              className={`progress status-line-progress${model.progress.mode === "indeterminate" ? " indeterminate" : ""}`}
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={model.progress.mode === "determinate" ? model.progress.percent : undefined}
+              aria-label={model.progress.mode === "indeterminate" ? "正在安装依赖" : "启动进度"}
+            >
+              <div
+                className="progress-bar"
+                style={model.progress.mode === "determinate" ? { width: `${model.progress.percent}%` } : undefined}
+              />
+            </div>
+          )}
         </section>
 
         <OverviewWarnings

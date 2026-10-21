@@ -982,8 +982,8 @@ mark {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
-  padding: 20px 24px 16px;
+  gap: 12px;
+  padding: 12px 20px 10px;
   border-bottom: 1px solid var(--ty-border);
   background: var(--ty-bg);
 }
@@ -1187,13 +1187,22 @@ mark {
   background: rgba(143, 193, 157, 0.28) !important;
 }
 
+.overview-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .detail-body {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 16px 24px 20px;
+  gap: 8px;
+  padding: 10px 20px 12px;
+  overflow: hidden;
 }
 
 /* 状态条 */
@@ -1321,6 +1330,181 @@ mark {
   animation: pulse-dot 1.2s ease-in-out infinite;
 }
 
+/* 概览：一条状态行，四张统计卡收成行内信息 */
+
+.status-line {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  height: auto;
+  padding: 0;
+  border-radius: var(--ty-radius-md);
+  border: 1px solid var(--ty-border);
+  background: var(--ty-surface);
+  box-shadow: var(--ty-shadow-card);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.status-line-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 36px;
+  min-width: 0;
+  padding: 0 12px;
+}
+
+.status-line-timeout {
+  flex-shrink: 0;
+  color: var(--ty-text-subtle);
+  font-size: var(--ty-font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.status-line-log {
+  flex-shrink: 0;
+}
+
+.status-line-progress {
+  height: 3px;
+  border-radius: 0;
+  flex-shrink: 0;
+}
+
+.status-line-progress .progress-bar {
+  border-radius: 0;
+}
+
+.status-line-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.status-line-headline {
+  font-size: var(--ty-font-size-md);
+  font-weight: 700;
+}
+
+.status-line-port {
+  font-family: var(--ty-font-mono);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ty-text);
+}
+
+.status-line-facts {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.status-fact {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  flex-shrink: 0;
+  min-width: 0;
+  font-size: var(--ty-font-size-sm);
+  white-space: nowrap;
+}
+
+.status-fact + .status-fact {
+  margin-left: 12px;
+}
+
+.status-fact + .status-fact::before {
+  content: "";
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--ty-text-subtle);
+  align-self: center;
+  margin-right: 12px;
+  flex-shrink: 0;
+}
+
+.status-fact-label {
+  color: var(--ty-text-subtle);
+  font-size: var(--ty-font-size-xs);
+}
+
+.status-fact-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-fact:last-child {
+  flex-shrink: 1;
+}
+
+.status-fact:last-child .status-fact-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-line.tone-ok {
+  background: var(--ty-matcha-tint);
+  border-color: var(--ty-matcha-soft);
+}
+
+.status-line.tone-ok .state-dot {
+  background: var(--ty-matcha);
+  box-shadow: 0 0 0 3px rgba(77, 124, 93, 0.15);
+}
+
+.status-line.tone-ok .status-line-headline {
+  color: var(--ty-matcha-hover);
+}
+
+.status-line.tone-info .state-dot {
+  background: var(--ty-sky);
+}
+
+.status-line.tone-info .status-line-headline {
+  color: var(--ty-sky);
+}
+
+.status-line.tone-danger {
+  background: var(--ty-peach-tint);
+  border-color: var(--ty-peach-soft);
+}
+
+.status-line.tone-danger .state-dot {
+  background: var(--ty-peach);
+}
+
+.status-line.tone-danger .status-line-headline {
+  color: var(--ty-peach-text);
+}
+
+.status-line.tone-warn {
+  background: var(--ty-honey-tint);
+  border-color: #eedcb2;
+}
+
+.status-line.tone-warn .state-dot {
+  background: var(--ty-honey);
+}
+
+.status-line.tone-warn .status-line-headline {
+  color: var(--ty-honey);
+}
+
+.status-line.tone-muted .state-dot {
+  background: var(--ty-text-subtle);
+}
+
+.status-fact.tone-ok .status-fact-value { color: var(--ty-matcha-hover); }
+.status-fact.tone-info .status-fact-value { color: var(--ty-sky); }
+.status-fact.tone-warn .status-fact-value { color: var(--ty-honey); }
+.status-fact.tone-danger .status-fact-value { color: var(--ty-peach-text); }
+.status-fact.tone-muted .status-fact-value { color: var(--ty-text-muted); }
+
 /* 提示条 */
 
 .callout {
@@ -1377,6 +1561,98 @@ mark {
 
 .callout.muted .callout-icon {
   color: var(--ty-text-subtle);
+}
+
+.callout.overview-warning {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.overview-warning-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 2px 8px 2px 2px;
+}
+
+.overview-warning-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 4px 0 8px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.overview-warning-title {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.overview-warning-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ty-text-muted);
+  font-size: var(--ty-font-size-sm);
+  font-weight: 400;
+}
+
+.overview-warning-count {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: var(--ty-radius-pill);
+  background: rgba(255, 255, 255, 0.55);
+  color: var(--ty-text-muted);
+  font-size: var(--ty-font-size-xs);
+  font-weight: 600;
+}
+
+.overview-warning-toggle .chevron {
+  width: 14px;
+  height: 14px;
+  color: var(--ty-text-subtle);
+  flex-shrink: 0;
+}
+
+.overview-warning-toggle .chevron.open {
+  transform: rotate(180deg);
+}
+
+.overview-warning-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 120px;
+  overflow: auto;
+  padding: 0 12px 10px 34px;
+}
+
+.overview-warning-body p {
+  margin: 0;
+  white-space: pre-line;
+}
+
+.overview-warning-extra {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.overview-warning-extra strong {
+  font-weight: 600;
 }
 
 .banner.danger {
@@ -1558,7 +1834,7 @@ mark {
   background: var(--log-bg);
   box-shadow: var(--ty-shadow-card);
   overflow: hidden;
-  min-height: 280px;
+  min-height: 0;
   flex: 1;
 }
 
@@ -1610,6 +1886,7 @@ mark {
   border: none;
   box-shadow: none;
   border-radius: 0;
+  min-height: 0;
 }
 
 /* ───────── 日志面板（暖深色） ───────── */

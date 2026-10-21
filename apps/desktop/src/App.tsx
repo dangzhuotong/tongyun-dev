@@ -1,5 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { isDetailPreview, previewInvoke } from "./previewData";
 import type { BatchOutput, ConfigInfo, LogTail, ProjectDetail, ProjectList, Status } from "./types";
 import { Toolbar } from "./Toolbar";
 import { StatusBar } from "./StatusBar";
@@ -10,8 +11,10 @@ import type { Update } from "@tauri-apps/plugin-updater";
 import { version as bundledVersion } from "../package.json";
 import { ShortcutsHelpModal } from "./ShortcutsHelpModal";
 import { ProjectDetailsTab } from "./ProjectDetailsTab";
+import { ProjectOverview } from "./ProjectOverview";
 import { LogPanel } from "./LogPanel";
 import { stateShortLabel } from "./logFormat";
+import { runLabel } from "./overviewStatus";
 import { ProjectForm } from "./ProjectForm";
 import { ScanDialog } from "./ScanDialog";
 import { countByFilter, filterProjects, STATUS_FILTERS, type StatusFilter } from "./projectFilter";
@@ -19,28 +22,14 @@ import { canStopProject, stopButtonTitle } from "./buttonState";
 import { effectiveStartCommand } from "./startCommand";
 import logoUrl from "./assets/logo.svg";
 import {
-  AlertIcon,
   ChevronDownIcon,
   ChevronRightIcon,
-  CodeIcon,
-  CopyIcon,
-  CpuIcon,
-  DoorIcon,
-  ExternalIcon,
   FileIcon,
   FolderIcon,
   GearIcon,
-  MoreIcon,
-  PlayIcon,
-  PlugIcon,
   PlusIcon,
-  PulseIcon,
   RefreshIcon,
-  RestartIcon,
   SearchIcon,
-  StopIcon,
-  TerminalIcon,
-  TrashIcon,
   XIcon,
 } from "./icons";
 import {
@@ -52,6 +41,16 @@ import {
 
 const LOG_LINES = 500;
 const COLLAPSED_STORAGE_KEY = "tongyun-dev:collapsed-groups";
+
+function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
+  if (import.meta.env.DEV && isDetailPreview()) {
+    const record = args && !ArrayBuffer.isView(args) && !(args instanceof ArrayBuffer) && !Array.isArray(args)
+      ? (args as Record<string, unknown>)
+      : undefined;
+    return previewInvoke<T>(cmd, record);
+  }
+  return tauriInvoke<T>(cmd, args);
+}
 
 function loadCollapsedGroups(): Record<string, boolean> {
   try {
@@ -164,6 +163,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (import.meta.env.DEV && isDetailPreview()) return;
     let cancelled = false;
     import("@tauri-apps/api/app")
       .then(({ getVersion }) => getVersion())
@@ -177,6 +177,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (import.meta.env.DEV && isDetailPreview()) return;
     const timer = window.setTimeout(() => {
       void handleCheckUpdate(false);
     }, 3000);
@@ -1403,7 +1404,7 @@ export function App() {
             {error && <p className="banner danger">{error}</p>}
           </div>
         ) : (
-          <div className="flex-1 flex flex-col h-full overflow-hidden">
+          <div className="flex-1 flex flex-col h-full min-h-0 overflow-hidden">
             {/* 34px Tab Bar */}
             <div className="h-[34px] px-4 border-b border-[var(--color-border)] bg-[var(--color-surface)] flex items-center justify-between shrink-0 select-none">
               <div className="flex items-center gap-4 h-full" role="tablist" aria-label="项目视图">
@@ -1456,487 +1457,65 @@ export function App() {
             </div>
 
             {activeTab === "overview" && (
-              <div className="flex-1 flex flex-col h-full min-h-0 overflow-y-auto">
-                <header className="detail-header shrink-0">
-                  <div className="title-area">
-                    <div className="title-row">
-                      <h1>{current.name}</h1>
-                      <StatusPill project={current} status={status} />
-                      {status?.active_profile && (
-                        <span className="profile-active-tag" title={`当前运行环境：${status.active_profile}`}>
-                          ⚡ {current.profiles?.[status.active_profile]?.label || status.active_profile}
-                        </span>
-                      )}
-                    </div>
-                    <div className="subtitle">
-                      <code className="id-tag">{current.id}</code>
-                      {toolchainOf(current).map((t) => (
-                        <span key={t} className="tool-tag">
-                          {t}
-                        </span>
-                      ))}
-                      {current.depends_on && current.depends_on.length > 0 && (
-                        <span className="tool-tag depends-on-tag" title={`依赖服务：${current.depends_on.join(", ")}`}>
-                          依赖: {current.depends_on.join(", ")}
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => reveal("folder")}
-                        className="path subtitle-path-btn"
-                        title={`在系统文件管理器中打开：${status?.root ?? current.root}`}
-                      >
-                        <FolderIcon />
-                        <span className="truncate max-w-[320px]">{status?.root ?? current.root}</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="header-actions" aria-busy={busy !== ""}>
-                    {current.profiles && Object.keys(current.profiles).length > 0 && (
-                      <div className="profile-selector-container">
-                        <label htmlFor="header-profile-select" className="profile-selector-label">
-                          环境:
-                        </label>
-                        <select
-                          id="header-profile-select"
-                          className="profile-selector-select"
-                          value={selectedProfile}
-                          disabled={busy !== ""}
-                          onChange={(e) => setSelectedProfile(e.target.value)}
-                          title="选择启动环境预设"
-                        >
-                          <option value="">默认配置</option>
-                          {Object.entries(current.profiles).map(([key, prof]) => (
-                            <option key={key} value={key}>
-                              {prof.label ? `${prof.label} (${key})` : key}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-
-                    <div className="btn-group">
-                      <button type="button" className="btn btn-secondary" disabled={!canStart} onClick={() => handleStart()}>
-                        <PlayIcon className="icon-play" />
-                        {busy === "start" ? "启动中…" : "启动"}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        disabled={!canStop}
-                        title={stopButtonTitle(status)}
-                        onClick={handleStop}
-                      >
-                        <StopIcon className="icon-stop" />
-                        {busy === "stop" ? "停止中…" : "停止"}
-                      </button>
-                      <button type="button" className="btn btn-secondary" disabled={!canRestart} onClick={() => handleRestart()}>
-                        <RestartIcon />
-                        {busy === "restart" ? "重启中…" : "重启"}
-                      </button>
-                    </div>
-
-                    {current.links && current.links.length > 1 ? (
-                      <div className="pages-split-btn">
-                        <button
-                          type="button"
-                          className="btn btn-primary pages-primary-btn"
-                          disabled={!canOpenPage}
-                          title={current.links[0].url}
-                          onClick={() => invoke("open_page", { url: current.links![0].url })}
-                        >
-                          <ExternalIcon />
-                          {current.links[0].title || "打开网页"}
-                        </button>
-                        <button
-                          type="button"
-                          className={`btn btn-primary pages-dropdown-toggle${pagesDropdownOpen ? " active" : ""}`}
-                          disabled={!canOpenPage}
-                          onClick={() => setPagesDropdownOpen((prev) => !prev)}
-                          title="展开全部网页链接"
-                          aria-label="展开全部网页链接"
-                        >
-                          <ChevronDownIcon />
-                        </button>
-                        {pagesDropdownOpen && (
-                          <div className="menu menu-down pages-menu" role="menu">
-                            {current.links.map((link, idx) => (
-                              <button
-                                key={idx}
-                                type="button"
-                                role="menuitem"
-                                onClick={() => {
-                                  setPagesDropdownOpen(false);
-                                  invoke("open_page", { url: link.url }).catch((e) => setError(String(e)));
-                                }}
-                                title={link.url}
-                              >
-                                <ExternalIcon /> {link.title || link.url}
-                              </button>
-                            ))}
-                            <div className="menu-sep" />
-                            <button
-                              type="button"
-                              role="menuitem"
-                              className="pages-open-all-btn"
-                              onClick={() => {
-                                setPagesDropdownOpen(false);
-                                handleOpenAllPages();
-                              }}
-                            >
-                              全部打开 ({current.links.length})
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        className="btn btn-primary"
-                        disabled={!canOpenPage}
-                        title={getOpenPageTitle()}
-                        onClick={() => reveal("page")}
-                      >
-                        <ExternalIcon />
-                        {current.links?.[0]?.title || "打开网页"}
-                      </button>
-                    )}
-
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={handleOpenEdit}
-                      disabled={busy !== ""}
-                      title="编辑项目设置"
-                    >
-                      <GearIcon />
-                      <span>设置</span>
-                    </button>
-
-                    <div className="menu-anchor">
-                      <button
-                        type="button"
-                        className={`btn icon-btn${menu === "more" ? " pressed" : ""}`}
-                        onClick={() => setMenu(menu === "more" ? "" : "more")}
-                        title="更多操作"
-                        aria-label="更多操作"
-                        aria-expanded={menu === "more"}
-                      >
-                        <MoreIcon />
-                      </button>
-                      {menu === "more" && (
-                        <div className="menu menu-down" role="menu">
-                          <button
-                            type="button"
-                            role="menuitem"
-                            disabled={busy !== ""}
-                            onClick={() => {
-                              setMenu("");
-                              setError("");
-                              refresh(selected).catch((err: unknown) => setError(String(err)));
-                            }}
-                          >
-                            <RefreshIcon /> 刷新状态
-                          </button>
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={() => {
-                              setMenu("");
-                              openInCursor();
-                            }}
-                            title="用 Cursor 打开项目目录"
-                          >
-                            <CodeIcon /> 用 Cursor 打开
-                          </button>
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={() => {
-                              setMenu("");
-                              reveal("folder");
-                            }}
-                            title="在系统文件管理器中打开项目目录"
-                          >
-                            <FolderIcon /> 打开项目目录
-                          </button>
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={() => {
-                              setMenu("");
-                              handleOpenTerminal();
-                            }}
-                            title="在系统独立命令行终端 (CMD) 中运行"
-                          >
-                            <TerminalIcon /> 在系统终端中运行
-                          </button>
-                          <button
-                            type="button"
-                            role="menuitem"
-                            disabled={!canOpenLog}
-                            onClick={() => {
-                              setMenu("");
-                              reveal("log");
-                            }}
-                            title="用系统默认程序打开日志文件"
-                          >
-                            <FileIcon /> 打开日志文件
-                          </button>
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={() => {
-                              setMenu("");
-                              copyStartCommand();
-                            }}
-                            title={effectiveStartCommand(current, selectedProfile) || "复制启动命令"}
-                          >
-                            <CopyIcon /> {copiedCmd ? "已复制启动命令" : "复制启动命令"}
-                          </button>
-                          {status?.install_command && (
-                            <button
-                              type="button"
-                              role="menuitem"
-                              disabled={!canInstall}
-                              title={`在项目目录运行 ${status.install_command}`}
-                              onClick={() => {
-                                setMenu("");
-                                handleInstall();
-                              }}
-                            >
-                              <RefreshIcon /> 安装依赖（{status.install_command}）
-                            </button>
-                          )}
-                          <div className="menu-sep" />
-                          <button
-                            type="button"
-                            role="menuitem"
-                            className="danger"
-                            disabled={busy !== ""}
-                            onClick={() => {
-                              setMenu("");
-                              handleDeleteProject();
-                            }}
-                          >
-                            <TrashIcon /> 删除项目…
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </header>
-
-            <div className="detail-body">
-              <DetailStateBar
-                status={status}
+              <ProjectOverview
                 project={current}
+                status={status}
+                busy={busy}
+                error={error}
+                log={log}
+                logPath={logPath}
+                canOpenLog={canOpenLog}
+                canStart={canStart}
+                canStop={canStop}
+                canRestart={canRestart}
                 canInstall={canInstall}
-                installing={busy === "install"}
-                onInstall={handleInstall}
-                onScrollToLog={() => {
-                  document.getElementById("log-panel")?.scrollIntoView({ behavior: "smooth" });
+                canOpenPage={canOpenPage}
+                selectedProfile={selectedProfile}
+                onProfileChange={setSelectedProfile}
+                copiedCmd={copiedCmd}
+                pagesOpen={pagesDropdownOpen}
+                onTogglePages={() => {
+                  setMenu("");
+                  setPagesDropdownOpen((prev) => !prev);
                 }}
+                onClosePages={() => setPagesDropdownOpen(false)}
+                moreOpen={menu === "more"}
+                onToggleMore={() => {
+                  setPagesDropdownOpen(false);
+                  setMenu(menu === "more" ? "" : "more");
+                }}
+                onCloseMore={() => setMenu("")}
+                onStart={() => handleStart()}
+                onStop={handleStop}
+                onRestart={() => handleRestart()}
+                onOpenPage={(url) => {
+                  if (url) {
+                    invoke("open_page", { url }).catch((err: unknown) => setError(String(err)));
+                  } else {
+                    void reveal("page");
+                  }
+                }}
+                onOpenAllPages={handleOpenAllPages}
+                onEdit={handleOpenEdit}
+                onRefresh={() => {
+                  setError("");
+                  refresh(selected).catch((err: unknown) => setError(String(err)));
+                }}
+                onOpenCursor={openInCursor}
+                onOpenFolder={() => reveal("folder")}
+                onOpenTerminal={() => handleOpenTerminal()}
+                onOpenLog={() => reveal("log")}
+                onCopyCommand={copyStartCommand}
+                onInstall={handleInstall}
+                onDelete={handleDeleteProject}
+                onDismissError={() => setError("")}
+                onShowLogs={() => setActiveTab("logs")}
+                stopTitle={stopButtonTitle(status)}
+                openPageTitle={getOpenPageTitle()}
+                toolchain={toolchainOf(current)}
+                rootPath={status?.root ?? current.root}
               />
-
-              {current.resolve_error && (
-                <div className="callout warn">
-                  <AlertIcon className="callout-icon" />
-                  <div className="callout-text">
-                    <strong>这个项目的配置解析失败</strong>
-                    <p>{current.resolve_error}</p>
-                  </div>
-                  <button type="button" className="btn btn-primary" onClick={handleOpenEdit}>
-                    <GearIcon /> 去配置
-                  </button>
-                </div>
-              )}
-
-              {!current.configured && !current.resolve_error && (
-                <div className="callout warn">
-                  <AlertIcon className="callout-icon" />
-                  <div className="callout-text">
-                    <strong>这个项目还没配置好</strong>
-                    <p>缺端口或启动命令，所以先不能启动。填好就能用。</p>
-                  </div>
-                  <button type="button" className="btn btn-primary" onClick={handleOpenEdit}>
-                    <GearIcon /> 去配置
-                  </button>
-                </div>
-              )}
-
-              {!current.enabled && (
-                <div className="callout muted">
-                  <AlertIcon className="callout-icon" />
-                  <div className="callout-text">
-                    <strong>已停用</strong>
-                    <p>{current.reason || "这个项目在配置里被停用了。"}</p>
-                  </div>
-                  <button type="button" className="btn btn-secondary" onClick={handleOpenEdit}>
-                    <GearIcon /> 项目设置
-                  </button>
-                </div>
-              )}
-              {status?.port_conflict && (
-                <div className="callout warn">
-                  <AlertIcon className="callout-icon" />
-                  <div className="callout-text">
-                    <strong>端口 {status.port} 被别的进程占着</strong>
-                    <p>{status.port_holder || "不是本项目启动的进程。"}</p>
-                  </div>
-                </div>
-              )}
-              {((status?.hints && status.hints.length > 0) ? status.hints : (current.hints ?? [])).map((hint, idx) => (
-                <div key={idx} className="callout warn">
-                  <AlertIcon className="callout-icon" />
-                  <div className="callout-text">
-                    <strong>启动提示</strong>
-                    <p>{hint}</p>
-                  </div>
-                </div>
-              ))}
-              {error && (
-                <div className="callout danger">
-                  <AlertIcon className="callout-icon" />
-                  <div className="callout-text">
-                    <p>{error}</p>
-                  </div>
-                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => setError("")}>
-                    知道了
-                  </button>
-                </div>
-              )}
-
-              <section className="stats" aria-label="运行信息">
-                <Stat
-                  icon={<PulseIcon />}
-                  label="运行状态"
-                  value={runLabel(status, current)}
-                  tone={runTone(status, current)}
-                />
-                <Stat
-                  icon={<CpuIcon />}
-                  label="进程"
-                  value={status?.pid ? `PID ${status.pid}` : status ? "未运行" : "—"}
-                  tone={status?.pid ? "ok" : "muted"}
-                />
-                <Stat
-                  icon={<PlugIcon />}
-                  label="端口"
-                  value={
-                    !current.port
-                      ? "未配置"
-                      : status
-                        ? `${status.port} · ${status.port_open ? "已通" : "未通"}`
-                        : String(current.port)
-                  }
-                  tone={!current.port ? "warn" : status?.port_open ? "ok" : "muted"}
-                />
-                <Stat
-                  icon={<DoorIcon />}
-                  label="登录页"
-                  value={
-                    !current.configured || !current.port
-                      ? "未配置"
-                      : !status
-                      ? "—"
-                      : status.login_probe.ok
-                        ? `正常 · ${status.login_probe.http_code ?? ""}`.trim()
-                        : status.login_probe.http_code
-                          ? `异常 · ${status.login_probe.http_code}`
-                          : "未响应"
-                  }
-                  detail={current.configured && current.port ? status?.login_probe.url : undefined}
-                  tone={status?.login_probe.ok ? "ok" : status?.login_probe.http_code ? "danger" : "muted"}
-                />
-              </section>
-
-              {/* 快捷开发动作条 */}
-              <div className="quick-actions-bar" aria-label="快捷开发动作">
-                <button
-                  type="button"
-                  className="quick-action-btn"
-                  onClick={openInCursor}
-                  title="用 Cursor 打开项目目录"
-                >
-                  <CodeIcon />
-                  <span>在 Cursor 中打开</span>
-                </button>
-                <button
-                  type="button"
-                  className="quick-action-btn"
-                  onClick={() => reveal("folder")}
-                  title="在系统文件管理器中打开项目目录"
-                >
-                  <FolderIcon />
-                  <span>打开项目目录</span>
-                </button>
-                <button
-                  type="button"
-                  className="quick-action-btn"
-                  disabled={!canOpenLog}
-                  onClick={() => reveal("log")}
-                  title="用系统默认程序打开日志文件"
-                >
-                  <FileIcon />
-                  <span>打开日志文件</span>
-                </button>
-                <button
-                  type="button"
-                  className="quick-action-btn"
-                  onClick={copyStartCommand}
-                  title={effectiveStartCommand(current, selectedProfile) || "复制启动命令"}
-                >
-                  <CopyIcon />
-                  <span>{copiedCmd ? "已复制命令" : "复制启动命令"}</span>
-                </button>
-                <button
-                  type="button"
-                  className="quick-action-btn"
-                  onClick={() => handleOpenTerminal()}
-                  title="在系统独立命令行终端 (CMD) 中运行项目"
-                >
-                  <TerminalIcon />
-                  <span>系统 CMD 运行</span>
-                </button>
-              </div>
-
-              {/* 概览中的实时日志卡片 */}
-              <div className="overview-log-card">
-                <div className="overview-log-header">
-                  <div className="overview-log-title">
-                    <span className={`log-dot ${status?.running ? "pulse" : ""}`} />
-                    <span>实时日志</span>
-                    {logPath && (
-                      <code className="overview-log-path font-mono text-[11px] text-[var(--color-text-muted)] truncate max-w-[280px]" title={logPath}>
-                        {logPath}
-                      </code>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    className="overview-log-expand-btn"
-                    onClick={() => setActiveTab("logs")}
-                    title="切换到独立全屏沉浸式日志视图"
-                  >
-                    <span>进入全屏日志</span>
-                    <ChevronRightIcon />
-                  </button>
-                </div>
-                <LogPanel
-                  log={log}
-                  logPath={logPath}
-                  canOpenLog={canOpenLog}
-                  onOpenLog={() => reveal("log")}
-                  selected={selected}
-                  running={status?.running ?? false}
-                  onOpenTerminal={() => handleOpenTerminal()}
-                />
-              </div>
-            </div>
-          </div>
-        )}
+            )}
 
         {activeTab === "logs" && (
           <div className="flex-1 flex flex-col h-full min-h-0 overflow-hidden bg-[var(--color-bg)]">
@@ -2041,45 +1620,6 @@ export function App() {
   );
 }
 
-type Tone = "ok" | "warn" | "danger" | "info" | "muted";
-
-function runLabel(status: Status | null, project: { enabled: boolean; configured: boolean }): string {
-  if (!project.configured) return "未配置";
-  if (!project.enabled) return "已停用";
-  if (!status) return "探测中…";
-  switch (status.state) {
-    case "ready":
-      return "就绪";
-    case "port_open":
-      return "端口已通";
-    case "installing":
-      return `安装依赖中 · ${status.elapsed_secs ?? 0} 秒`;
-    case "starting":
-      return `启动中 · ${status.elapsed_secs ?? 0} 秒`;
-    case "failed":
-      return status.deps_missing ? "依赖未安装" : "启动失败";
-    default:
-      return "已停止";
-  }
-}
-
-function runTone(status: Status | null, project: { enabled: boolean; configured: boolean }): Tone {
-  if (!project.configured) return "warn";
-  if (!project.enabled || !status) return "muted";
-  switch (status.state) {
-    case "ready":
-    case "port_open":
-      return "ok";
-    case "installing":
-    case "starting":
-      return "info";
-    case "failed":
-      return "danger";
-    default:
-      return "muted";
-  }
-}
-
 function StatusPill({
   project,
   status,
@@ -2135,160 +1675,10 @@ function Highlight({ text, query }: { text: string; query: string }) {
   return <>{parts}</>;
 }
 
-function DetailStateBar({
-  status,
-  project,
-  canInstall,
-  installing,
-  onInstall,
-  onScrollToLog,
-}: {
-  status: Status | null;
-  project: { enabled: boolean; configured: boolean };
-  canInstall: boolean;
-  installing: boolean;
-  onInstall: () => void;
-  onScrollToLog: () => void;
-}) {
-  if (!project.configured || !project.enabled) return null;
-  if (!status) {
-    return (
-      <div className="state-bar probing">
-        <span className="state-dot" />
-        <span className="state-text">正在探测状态…</span>
-      </div>
-    );
-  }
-  const state = status.state;
-  const installBtn = (
-    <button type="button" className="btn btn-primary btn-sm" disabled={!canInstall} onClick={onInstall}>
-      {installing ? "安装中…" : "安装依赖"}
-    </button>
-  );
-  if (state === "installing") {
-    const elapsed = status.elapsed_secs ?? 0;
-    return (
-      <div className="state-bar starting installing">
-        <span className="state-dot" />
-        <div className="state-main">
-          <div className="state-line">
-            <span className="state-text">安装依赖中 · 已 {elapsed} 秒</span>
-            <span className="state-tip">
-              缺 node_modules，正在运行 {status.install_command || "install"}，装完会自动启动；输出在下面日志里
-            </span>
-          </div>
-          <div className="progress indeterminate">
-            <div className="progress-bar" />
-          </div>
-        </div>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={onScrollToLog}>
-          看日志
-        </button>
-      </div>
-    );
-  }
-  if (state === "starting") {
-    const elapsed = status.elapsed_secs ?? 0;
-    const timeout = status.timeout_secs || 180;
-    const pct = Math.min(100, Math.round((elapsed / timeout) * 100));
-    return (
-      <div className="state-bar starting">
-        <span className="state-dot" />
-        <div className="state-main">
-          <div className="state-line">
-            <span className="state-text">启动中 · 已 {elapsed} 秒</span>
-            <span className="state-tip">
-              {status.port_open
-                ? "端口已通，正在等待服务就绪…"
-                : `端口 ${status.port} 还没通，日志在写说明在启动`}
-            </span>
-          </div>
-          <div className="progress">
-            <div className="progress-bar" style={{ width: `${Math.max(4, pct)}%` }} />
-          </div>
-        </div>
-        <span className="state-timeout">最长 {timeout} 秒</span>
-      </div>
-    );
-  }
-  if (state === "port_open") {
-    return (
-      <div className="state-bar port_open">
-        <span className="state-dot" />
-        <span className="state-text">端口已通 · 等登录页</span>
-      </div>
-    );
-  }
-  if (state === "ready") {
-    const elapsed = status.elapsed_secs;
-    return (
-      <div className="state-bar ready">
-        <span className="state-dot" />
-        <span className="state-text">{elapsed != null ? `就绪 · 用时 ${elapsed} 秒` : "就绪"}</span>
-        <span className="state-tip">服务已能访问，可以点「打开网页」</span>
-      </div>
-    );
-  }
-  if (state === "failed") {
-    return (
-      <div className="state-bar failed">
-        <span className="state-dot" />
-        <span className="state-text">失败 · {status.failure || "服务启动失败"}</span>
-        {status.pid != null && <span className="state-tip">进程 PID {status.pid} 仍在，停止可清理，重启可重新尝试</span>}
-        {status.install_command && (status.deps_missing || (status.failure ?? "").includes("依赖")) && installBtn}
-        <button type="button" className="btn btn-ghost btn-sm" onClick={onScrollToLog}>
-          看日志
-        </button>
-      </div>
-    );
-  }
-  return (
-    <div className="state-bar stopped">
-      <span className="state-dot" />
-      <span className="state-text">已停止</span>
-      <span className="state-tip">
-        {status.deps_missing
-          ? `还没装依赖（缺 node_modules），点「启动」会先自动运行 ${status.install_command || "install"}`
-          : "点「启动」运行这个项目"}
-      </span>
-      {status.deps_missing && status.install_command && installBtn}
-    </div>
-  );
-}
-
 function pageUrl(status: Status | null, project: { port: number } | null): string {
   const probe = status?.login_probe.url.trim() ?? "";
   if (probe.startsWith("http://") || probe.startsWith("https://")) return probe;
   const port = status?.port ?? project?.port ?? 0;
   if (port > 0) return `http://127.0.0.1:${port}/`;
   return "";
-}
-
-function Stat({
-  icon,
-  label,
-  value,
-  detail,
-  tone,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  detail?: string;
-  tone: Tone;
-}) {
-  return (
-    <article className={`stat tone-${tone}`}>
-      <div className="stat-head">
-        <span className="stat-icon">{icon}</span>
-        <span className="stat-label">{label}</span>
-      </div>
-      <p className="stat-value">{value}</p>
-      {detail && (
-        <small className="stat-detail" title={detail}>
-          {detail}
-        </small>
-      )}
-    </article>
-  );
 }

@@ -6,8 +6,11 @@
 //! keychain password dialog.
 //!
 //! The encryption key is HKDF-SHA256 over a 32-byte seed stored next to the
-//! vault (`secret.key`, mode `0600`). The seed is generated locally. Nothing
-//! is derived from the OS keychain or from a machine-id API.
+//! vault (`secret.key`, mode `0600`). The directory itself is mode `0700` and
+//! is rejected if it is a symlink. The seed is generated locally with
+//! `create_new` under a file lock. Nothing is derived from the OS keychain
+//! or from a machine-id API. A vault without its seed is an error; the seed
+//! is never regenerated over an existing vault.
 //!
 //! # Migration
 //!
@@ -44,7 +47,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use chacha20poly1305::aead::Aead;
@@ -66,6 +69,7 @@ const DEFAULT_KEY_NAME: &str = "secret.key";
 const DEFAULT_VAULT_NAME: &str = "secrets.vault";
 const DEFAULT_JOURNAL_NAME: &str = "secrets.migration.json";
 const DEFAULT_MARKER_NAME: &str = "secrets.migrated";
+const LOCK_NAME: &str = ".secrets.lock";
 
 /// Where the seed, vault, migration journal, and done-marker live.
 #[derive(Debug, Clone)]
@@ -188,6 +192,8 @@ pub enum SecretStoreError {
     VerifyFailed,
     EmptyAccount,
     RefusingSymlink,
+    MissingSeed,
+    NotOwner,
     Legacy(String),
 }
 
@@ -208,6 +214,10 @@ impl std::fmt::Display for SecretStoreError {
             }
             Self::EmptyAccount => write!(f, "secret store account is empty"),
             Self::RefusingSymlink => write!(f, "secret store refuses to follow a symlink"),
+            Self::MissingSeed => write!(f, "secret store seed is missing while the vault exists"),
+            Self::NotOwner => {
+                write!(f, "secret store directory is not owned by the current user")
+            }
             Self::Legacy(msg) => write!(f, "legacy secret source: {msg}"),
         }
     }
@@ -224,11 +234,15 @@ impl std::error::Error for SecretStoreError {
 
 impl From<io::Error> for SecretStoreError {
     fn from(err: io::Error) -> Self {
-        Self::Io(err)
+        if is_symlink_error(&err) {
+            Self::RefusingSymlink
+        } else {
+            Self::Io(err)
+        }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct VaultFile {
     v: u32,
     entries: BTreeMap<String, String>,
@@ -255,8 +269,8 @@ impl Drop for FileSecretStore {
 
 impl FileSecretStore {
     pub fn open(paths: StorePaths) -> Result<Self, SecretStoreError> {
-        fs::create_dir_all(&paths.dir)?;
-        let mut ikm = load_or_create_seed(&paths.key_path())?;
+        ensure_private_dir(&paths.dir)?;
+        let mut ikm = load_or_create_seed(&paths)?;
         let key = derive_key(&ikm, paths.kdf_info.as_bytes())?;
         ikm.zeroize();
         Ok(Self {
@@ -269,12 +283,14 @@ impl FileSecretStore {
 
     pub fn get(&self, account: &str) -> Result<Option<String>, SecretStoreError> {
         reject_empty(account)?;
+        let _lock = lock_store(&self.paths.dir)?;
         let entries = self.read_entries()?;
         Ok(entries.get(account).cloned())
     }
 
     pub fn set(&mut self, account: &str, secret: &str) -> Result<(), SecretStoreError> {
         reject_empty(account)?;
+        let _lock = lock_store(&self.paths.dir)?;
         let mut entries = self.read_entries()?;
         entries.insert(account.to_string(), secret.to_string());
         self.write_entries(&entries)
@@ -282,6 +298,7 @@ impl FileSecretStore {
 
     pub fn delete(&mut self, account: &str) -> Result<(), SecretStoreError> {
         reject_empty(account)?;
+        let _lock = lock_store(&self.paths.dir)?;
         let mut entries = self.read_entries()?;
         entries.remove(account);
         self.write_entries(&entries)
@@ -296,7 +313,8 @@ impl FileSecretStore {
         if items.is_empty() {
             return Ok(MigrationReport::fresh());
         }
-        if self.paths.marker_path().is_file() {
+        let _lock = lock_store(&self.paths.dir)?;
+        if regular_file_exists(&self.paths.marker_path())? {
             let mut report = MigrationReport::fresh();
             report.already_migrated = true;
             return Ok(report);
@@ -378,12 +396,9 @@ impl FileSecretStore {
     }
 
     fn read_entries(&self) -> Result<BTreeMap<String, String>, SecretStoreError> {
-        let path = self.paths.vault_path();
-        if !path.is_file() {
+        let Some(bytes) = read_regular_file(&self.paths.vault_path())? else {
             return Ok(BTreeMap::new());
-        }
-        ensure_not_symlink(&path)?;
-        let bytes = fs::read(&path)?;
+        };
         let mut plain = decrypt(&self.key, &bytes)?;
         let vault: VaultFile = match serde_json::from_slice(&plain) {
             Ok(vault) => vault,
@@ -411,12 +426,9 @@ impl FileSecretStore {
     }
 
     fn read_journal(&self) -> Result<JournalFile, SecretStoreError> {
-        let path = self.paths.journal_path();
-        if !path.is_file() {
+        let Some(bytes) = read_regular_file(&self.paths.journal_path())? else {
             return Ok(JournalFile::default());
-        }
-        ensure_not_symlink(&path)?;
-        let bytes = fs::read(&path)?;
+        };
         serde_json::from_slice(&bytes).map_err(|_| SecretStoreError::Corrupt)
     }
 
@@ -446,7 +458,7 @@ pub fn migrate_in_dir(
     if items.is_empty() {
         return Ok(MigrationReport::fresh());
     }
-    if paths.marker_path().is_file() {
+    if regular_file_exists(&paths.marker_path())? {
         let mut report = MigrationReport::fresh();
         report.already_migrated = true;
         return Ok(report);
@@ -471,22 +483,35 @@ fn derive_key(ikm: &[u8; KEY_LEN], info: &[u8]) -> Result<[u8; KEY_LEN], SecretS
     Ok(okm)
 }
 
-fn load_or_create_seed(path: &Path) -> Result<[u8; KEY_LEN], SecretStoreError> {
-    ensure_not_symlink(path)?;
-    if path.is_file() {
-        let bytes = fs::read(path)?;
-        restrict_private(path)?;
-        if bytes.len() != KEY_LEN {
-            return Err(SecretStoreError::Corrupt);
-        }
-        let mut seed = [0u8; KEY_LEN];
-        seed.copy_from_slice(&bytes);
+fn load_or_create_seed(paths: &StorePaths) -> Result<[u8; KEY_LEN], SecretStoreError> {
+    let _lock = lock_store(&paths.dir)?;
+    if let Some(seed) = read_seed(&paths.key_path())? {
         return Ok(seed);
+    }
+    // A vault (or a symlink where the vault should be) with no seed must not
+    // grow a fresh seed. The ciphertext would be unreadable, and a symlink
+    // must not be replaced.
+    match regular_file_exists(&paths.vault_path()) {
+        Ok(true) => return Err(SecretStoreError::MissingSeed),
+        Ok(false) => {}
+        Err(err) => return Err(err),
     }
     let mut seed = [0u8; KEY_LEN];
     OsRng.fill_bytes(&mut seed);
-    write_private_file(path, &seed)?;
-    Ok(seed)
+    match create_seed_exclusive(&paths.key_path(), &seed) {
+        Ok(()) => Ok(seed),
+        Err(SecretStoreError::Io(err)) if err.kind() == io::ErrorKind::AlreadyExists => {
+            seed.zeroize();
+            match read_seed(&paths.key_path())? {
+                Some(winner) => Ok(winner),
+                None => Err(SecretStoreError::MissingSeed),
+            }
+        }
+        Err(err) => {
+            seed.zeroize();
+            Err(err)
+        }
+    }
 }
 
 fn encrypt(key: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8>, SecretStoreError> {
@@ -530,21 +555,177 @@ fn decrypt(key: &[u8; KEY_LEN], blob: &[u8]) -> Result<Vec<u8>, SecretStoreError
 
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), SecretStoreError> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        if !parent.as_os_str().is_empty() {
+            ensure_private_dir(parent)?;
+        }
     }
-    ensure_not_symlink(path)?;
-    let tmp = temp_path_for(path);
-    ensure_not_symlink(&tmp)?;
+    // Refuse to replace a symlink. rename would swap the directory entry, but
+    // the caller asked us not to touch a link planted at this path.
+    match regular_file_exists(path) {
+        Ok(_) => {}
+        Err(err) => return Err(err),
+    }
+    for _ in 0..8 {
+        let tmp = temp_path_for(path);
+        match open_create_new_nofollow(&tmp) {
+            Ok(mut file) => {
+                file.write_all(bytes)?;
+                file.sync_all()?;
+                set_file_mode(&file, 0o600)?;
+                drop(file);
+                if let Err(err) = fs::rename(&tmp, path) {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(err.into());
+                }
+                if let Ok(file) = open_read_nofollow(path) {
+                    set_file_mode(&file, 0o600)?;
+                }
+                sync_parent(path)?;
+                return Ok(());
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Err(io::Error::new(io::ErrorKind::AlreadyExists, "temp file collision").into())
+}
+
+/// Directory for the seed and vault: mode `0700`, not a symlink, owned by us.
+fn ensure_private_dir(dir: &Path) -> Result<(), SecretStoreError> {
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() => return Err(SecretStoreError::RefusingSymlink),
+        Ok(meta) if meta.is_dir() => {
+            ensure_owner(&meta)?;
+            restrict_dir(dir)?;
+            return Ok(());
+        }
+        Ok(_) => return Err(SecretStoreError::Corrupt),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+    if let Some(parent) = dir.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() => return Err(SecretStoreError::RefusingSymlink),
+        Ok(meta) if meta.is_dir() => {
+            ensure_owner(&meta)?;
+            restrict_dir(dir)?;
+            return Ok(());
+        }
+        Ok(_) => return Err(SecretStoreError::Corrupt),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
     {
-        let mut file = open_private(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
     }
-    restrict_private(&tmp)?;
-    fs::rename(&tmp, path)?;
-    restrict_private(path)?;
-    sync_parent(path)?;
+    match builder.create(dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            let meta = fs::symlink_metadata(dir)?;
+            if meta.file_type().is_symlink() {
+                return Err(SecretStoreError::RefusingSymlink);
+            }
+            if !meta.is_dir() {
+                return Err(SecretStoreError::Corrupt);
+            }
+            ensure_owner(&meta)?;
+        }
+        Err(err) => return Err(err.into()),
+    }
+    restrict_dir(dir)?;
     Ok(())
+}
+
+fn read_seed(path: &Path) -> Result<Option<[u8; KEY_LEN]>, SecretStoreError> {
+    match read_regular_file(path)? {
+        None => Ok(None),
+        Some(mut buf) if buf.len() == KEY_LEN => {
+            let mut seed = [0u8; KEY_LEN];
+            seed.copy_from_slice(&buf);
+            buf.zeroize();
+            Ok(Some(seed))
+        }
+        Some(mut buf) => {
+            buf.zeroize();
+            Err(SecretStoreError::Corrupt)
+        }
+    }
+}
+
+fn create_seed_exclusive(path: &Path, seed: &[u8; KEY_LEN]) -> Result<(), SecretStoreError> {
+    let mut file = open_create_new_nofollow(path)?;
+    file.write_all(seed)?;
+    file.sync_all()?;
+    set_file_mode(&file, 0o600)?;
+    Ok(())
+}
+
+fn read_regular_file(path: &Path) -> Result<Option<Vec<u8>>, SecretStoreError> {
+    let mut file = match open_read_nofollow(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
+        return Err(SecretStoreError::Corrupt);
+    }
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    Ok(Some(buf))
+}
+
+fn regular_file_exists(path: &Path) -> Result<bool, SecretStoreError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(SecretStoreError::RefusingSymlink),
+        Ok(meta) if meta.is_file() => Ok(true),
+        Ok(_) => Err(SecretStoreError::Corrupt),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err.into()),
+    }
+}
+
+struct StoreLock {
+    #[cfg(unix)]
+    _file: File,
+    #[cfg(not(unix))]
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+fn lock_store(dir: &Path) -> Result<StoreLock, SecretStoreError> {
+    ensure_private_dir(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::io::AsRawFd;
+        let path = dir.join(LOCK_NAME);
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        options.mode(0o600);
+        options.custom_flags(libc::O_NOFOLLOW);
+        let file = options.open(&path)?;
+        set_file_mode(&file, 0o600)?;
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(StoreLock { _file: file })
+    }
+    #[cfg(not(unix))]
+    {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _ = dir;
+        Ok(StoreLock {
+            _guard: LOCK.lock().unwrap_or_else(|err| err.into_inner()),
+        })
+    }
 }
 
 fn temp_path_for(path: &Path) -> PathBuf {
@@ -571,26 +752,71 @@ fn hex4(bytes: [u8; 4]) -> String {
     out
 }
 
-fn open_private(path: &Path) -> io::Result<File> {
+fn open_create_new_nofollow(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
+        options.custom_flags(libc::O_NOFOLLOW);
     }
     options.open(path)
 }
 
-fn restrict_private(path: &Path) -> io::Result<()> {
+fn open_read_nofollow(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+
+fn set_file_mode(file: &File, mode: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
     }
     #[cfg(not(unix))]
     {
-        let _ = path;
+        let _ = (file, mode);
+    }
+    Ok(())
+}
+
+fn restrict_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
+        let file = options.open(dir)?;
+        set_file_mode(&file, 0o700)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+    }
+    Ok(())
+}
+
+fn ensure_owner(meta: &fs::Metadata) -> Result<(), SecretStoreError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let uid = unsafe { libc::geteuid() };
+        if meta.uid() != uid {
+            return Err(SecretStoreError::NotOwner);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
     }
     Ok(())
 }
@@ -598,11 +824,15 @@ fn restrict_private(path: &Path) -> io::Result<()> {
 fn sync_parent(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
         if let Some(parent) = path.parent() {
             if parent.as_os_str().is_empty() {
                 return Ok(());
             }
-            let dir = File::open(parent)?;
+            let mut options = OpenOptions::new();
+            options.read(true);
+            options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
+            let dir = options.open(parent)?;
             dir.sync_all()?;
         }
     }
@@ -613,10 +843,15 @@ fn sync_parent(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn ensure_not_symlink(path: &Path) -> Result<(), SecretStoreError> {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(SecretStoreError::RefusingSymlink),
-        _ => Ok(()),
+fn is_symlink_error(err: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        err.raw_os_error() == Some(libc::ELOOP)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = err;
+        false
     }
 }
 
@@ -624,7 +859,8 @@ fn ensure_not_symlink(path: &Path) -> Result<(), SecretStoreError> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TempDir(PathBuf);
@@ -1053,6 +1289,113 @@ mod tests {
         assert_eq!(report.legacy_reads, 0);
         assert!(!report.already_migrated);
         assert!(!dir.0.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vault_dir_is_0700_even_if_it_started_world_accessible() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new();
+        let paths = dir.paths();
+        fs::create_dir_all(&paths.dir).unwrap();
+        fs::set_permissions(&paths.dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let _store = FileSecretStore::open(paths.clone()).unwrap();
+        assert_eq!(mode_of(&paths.dir), 0o700);
+        assert_eq!(mode_of(&paths.dir.join(LOCK_NAME)), 0o600);
+        assert_eq!(mode_of(&paths.key_path()), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlink_directory_and_does_not_write_into_the_target() {
+        let dir = TempDir::new();
+        let real = dir.0.join("real");
+        fs::create_dir_all(&real).unwrap();
+        let link = dir.0.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let opened = FileSecretStore::open(StorePaths::new(&link));
+        assert!(matches!(opened, Err(SecretStoreError::RefusingSymlink)));
+        assert!(fs::read_dir(&real).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlink_seed_and_journal() {
+        let dir = TempDir::new();
+        let paths = dir.paths();
+        fs::create_dir_all(&paths.dir).unwrap();
+        let outside_seed = dir.0.join("outside-seed");
+        fs::write(&outside_seed, vec![7u8; KEY_LEN]).unwrap();
+        std::os::unix::fs::symlink(&outside_seed, paths.key_path()).unwrap();
+        let opened = FileSecretStore::open(paths.clone());
+        assert!(matches!(opened, Err(SecretStoreError::RefusingSymlink)));
+        assert_eq!(fs::read(&outside_seed).unwrap(), vec![7u8; KEY_LEN]);
+        fs::remove_file(paths.key_path()).unwrap();
+
+        let mut store = FileSecretStore::open(paths.clone()).unwrap();
+        store.set("demo-account", "fixture-value").unwrap();
+        drop(store);
+        let outside_journal = dir.0.join("outside-journal");
+        fs::write(&outside_journal, b"keep").unwrap();
+        std::os::unix::fs::symlink(&outside_journal, paths.journal_path()).unwrap();
+        let legacy = MemLegacy::with(vec![]);
+        let err = migrate_in_dir(
+            &paths,
+            &legacy,
+            &[LegacyItem::new("com.example.app", "missing")],
+        )
+        .unwrap_err();
+        assert!(matches!(err, SecretStoreError::RefusingSymlink));
+        assert_eq!(fs::read(&outside_journal).unwrap(), b"keep");
+        assert_eq!(legacy.read_count(), 0);
+    }
+
+    #[test]
+    fn missing_seed_with_vault_is_an_error_and_does_not_regenerate() {
+        let dir = TempDir::new();
+        let paths = dir.paths();
+        let mut store = FileSecretStore::open(paths.clone()).unwrap();
+        store.set("demo-account", "fixture-value").unwrap();
+        drop(store);
+        let vault_before = fs::read(paths.vault_path()).unwrap();
+        fs::remove_file(paths.key_path()).unwrap();
+        let opened = FileSecretStore::open(paths.clone());
+        match &opened {
+            Err(err) => {
+                assert!(matches!(err, SecretStoreError::MissingSeed));
+                assert!(!err.to_string().contains("fixture-value"));
+            }
+            Ok(_) => panic!("missing seed must not open"),
+        }
+        assert!(!paths.key_path().exists());
+        assert_eq!(fs::read(paths.vault_path()).unwrap(), vault_before);
+    }
+
+    #[test]
+    fn concurrent_first_creation_shares_one_seed() {
+        let dir = TempDir::new();
+        let paths = dir.paths();
+        let barrier = Arc::new(Barrier::new(8));
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let paths = paths.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                let mut store = FileSecretStore::open(paths).expect("open");
+                store.set(&format!("acct-{i}"), "fixture").expect("set");
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("thread");
+        }
+        let store = FileSecretStore::open(paths).unwrap();
+        for i in 0..8 {
+            assert_eq!(
+                store.get(&format!("acct-{i}")).unwrap().as_deref(),
+                Some("fixture")
+            );
+        }
     }
 
     #[test]

@@ -42,4 +42,4 @@
 
 ## 已知坑
 
-- **不要用系统钥匙串存应用密钥。** macOS 上未签名、或每次更新后签名变了的桌面壳，用 `keyring` / Security.framework 密码项 / Stronghold 默认钥匙串时，读或写密钥都会弹出登录钥匙串密码，「始终允许」也留不住。密钥只走 `crates/tongyun-dev-core/src/secret_store.rs`：配置目录里 mode `0600` 的加密文件，密钥由本机随机种子经 HKDF 派生，不调用钥匙串。旧钥匙串项只在迁移时读一次，确认加密文件能读回之后才尝试删除；删不掉也保留文件，之后不再读钥匙串。本仓库的项目设置、`settings.json` 和主题本来就不写钥匙串。这个文件是单模块，tongyun-git / tongyun-api 按原样移植。
+- **不要用系统钥匙串存应用密钥。** macOS 上未签名、或每次更新后签名变了的桌面壳，用 `keyring` / Security.framework 密码项 / Stronghold 默认钥匙串时，读或写密钥都会弹出登录钥匙串密码，「始终允许」也留不住。密钥只走 `crates/tongyun-dev-core/src/secret_store.rs`：配置目录 mode `0700`（目录本身是符号链接就拒绝），里面 mode `0600` 的加密文件，密钥由本机随机种子经 HKDF 派生，不调用钥匙串。旧钥匙串项只在迁移时读一次，确认加密文件能读回之后才尝试删除；删不掉也保留文件，之后不再读钥匙串。本仓库的项目设置、`settings.json` 和主题本来就不写钥匙串。这个文件是单模块，tongyun-git / tongyun-api 按原样移植。

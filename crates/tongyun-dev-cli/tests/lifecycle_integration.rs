@@ -917,8 +917,8 @@ log_dir = "{d}/logs"
     )
     .unwrap();
 
-    let ui_port = free_port();
-    let ui_listener = TcpListener::bind(("127.0.0.1", ui_port)).unwrap();
+    let ui_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let ui_port = ui_listener.local_addr().unwrap().port();
     let cfg_clone = cfg.clone();
     thread::spawn(move || {
         let _ = tongyun_dev_cli::server::serve(ui_listener, cfg_clone, ui_port);
@@ -963,14 +963,36 @@ log_dir = "{d}/logs"
     let _guard = CleanupGuard::new(&loaded, "http_test", dir.clone());
     loaded.start_detached("http_test").unwrap();
 
-    // 4. While running, POST input succeeds
-    let ok_resp = http(
-        ui_port,
-        &post_req(
-            r#"{"text":"pong","enter":true}"#,
-            &format!("http://127.0.0.1:{ui_port}"),
-        ),
-    );
+    // Wait until process is running and stdin FIFO is ready
+    let fifo_path = dir.join("logs/http_test.stdin");
+    let start_t = std::time::Instant::now();
+    while start_t.elapsed() < Duration::from_secs(5) {
+        if fifo_path.exists() {
+            if let Ok(st) = loaded.status("http_test") {
+                if st.running {
+                    break;
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    // 4. While running, POST input succeeds (retry briefly if server is still registering process status)
+    let mut ok_resp = String::new();
+    let start_t = std::time::Instant::now();
+    while start_t.elapsed() < Duration::from_secs(5) {
+        ok_resp = http(
+            ui_port,
+            &post_req(
+                r#"{"text":"pong","enter":true}"#,
+                &format!("http://127.0.0.1:{ui_port}"),
+            ),
+        );
+        if ok_resp.starts_with("HTTP/1.1 200") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
     assert!(
         ok_resp.starts_with("HTTP/1.1 200"),
         "expected 200, got: {ok_resp}"

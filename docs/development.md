@@ -67,7 +67,7 @@ npm run tauri build
 
 配置查找顺序与 CLI 相同：1) 显式 `--config` 参数 → 2) 环境变量 `TONGYUN_DEV_CONFIG` → 3) `~/.config/tongyun-dev/settings.json` 记住的路径 → 4) 默认配置 `~/.config/tongyun-dev/projects.toml` → 5) 从当前目录及上级目录找 `config/projects.toml`。未找到配置时桌面端主区域会展示空状态，支持「扫描一个目录 / 手动新增」，或选择已有文件 / 一键创建默认配置。
 
-桌面壳不把密钥放进 macOS 钥匙串。需要落盘的密钥走 `tongyun-dev-core` 的 `secret_store`（`crates/tongyun-dev-core/src/secret_store.rs`，单文件，可原样移植）：写在应用配置目录的加密文件里（目录 `0700`，文件 `0600`），密钥由本机随机种子经 HKDF-SHA256 派生。目录本身如果是符号链接会拒绝写入，不链接 `keyring`、Security.framework 密码 API 或 Stronghold。升级后第一次启动会跑迁移；本仓库没有登记过钥匙串账户，因此启动、改项目设置、换配置文件和改主题都不会访问钥匙串。项目清单仍是明文 `projects.toml`（人要能手改），不要把整份配置加密。
+桌面壳不把密钥放进 macOS 钥匙串。需要落盘的密钥走 `tongyun-dev-core` 的 `secret_store`（`crates/tongyun-dev-core/src/secret_store.rs`，单文件，可原样移植）：写在应用配置目录的加密文件里（目录 `0700`，文件 `0600`），密钥由本机随机种子经 HKDF-SHA256 派生。目录本身如果是符号链接会拒绝写入（注意：仅校验存储目录本身，上级目录如 `~/.config` 不做符号链接校验，威胁模型为同机同用户边界），不链接 `keyring`、Security.framework 密码 API 或 Stronghold。升级后第一次启动会跑迁移；本仓库没有登记过钥匙串账户，因此启动、改项目设置、换配置文件和改主题都不会访问钥匙串。项目清单仍是明文 `projects.toml`（人要能手改），不要把整份配置加密。
 
 Mac 上 `npm run tauri build` 的应用在 `apps/desktop/src-tauri/target/release/bundle/macos/tongyun-dev.app`。安装步骤见 [README](../README.md)。第一次用 `open` 打开时，主窗口会在 `applicationDidFinishLaunching` 返回之后再显示到最前，避免窗口出现了但进程不是前台、随后自己退出。
 

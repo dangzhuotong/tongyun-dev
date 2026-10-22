@@ -1358,7 +1358,8 @@ mod tests {
     fn refuses_symlink_vault() {
         let dir = TempDir::new();
         let paths = dir.paths();
-        let store = FileSecretStore::open(paths.clone()).unwrap();
+        #[allow(unused_mut)]
+        let mut store = FileSecretStore::open(paths.clone()).unwrap();
         let outside = dir.0.join("outside.txt");
         fs::write(&outside, b"keep").unwrap();
         #[cfg(unix)]

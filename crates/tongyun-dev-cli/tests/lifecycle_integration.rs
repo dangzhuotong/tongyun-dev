@@ -897,6 +897,7 @@ env = {{ CI = "test_ci_value", CUSTOM = "123" }}
 #[test]
 fn http_post_input_endpoint_and_security() {
     let dir = temp_dir("http_input");
+    let service_port = free_port();
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
 
@@ -909,6 +910,7 @@ name = "HTTP Test"
 root = "{d}"
 start = ["sh", "-c", "{script}"]
 background = true
+port = {service_port}
 log_dir = "{d}/logs"
 "#
         ),

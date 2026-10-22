@@ -194,12 +194,17 @@ const TONE_RANK: Record<OverviewTone, number> = {
   danger: 4,
 };
 
-/** 状态行颜色取自身和警告里更高的一级，避免启动失败被端口警告的颜色盖住。 */
-export function toneAtLeast(base: OverviewTone, warnings: { tone: OverviewTone }[]): OverviewTone {
-  return warnings.reduce(
-    (best, warning) => (TONE_RANK[warning.tone] > TONE_RANK[best] ? warning.tone : best),
-    base,
-  );
+/** 状态行颜色取自身和警告里更高的一级，避免启动失败被端口警告的颜色盖住。启动提示不改变状态行颜色。 */
+export function toneAtLeast(
+  base: OverviewTone,
+  warnings: { id?: string; tone: OverviewTone }[],
+): OverviewTone {
+  return warnings
+    .filter((w) => w.id !== "hints")
+    .reduce(
+      (best, warning) => (TONE_RANK[warning.tone] > TONE_RANK[best] ? warning.tone : best),
+      base,
+    );
 }
 
 function startProgress(status: Status | null): OverviewProgress | null {

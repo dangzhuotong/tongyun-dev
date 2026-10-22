@@ -295,7 +295,7 @@ export function ProjectOverview(props: ProjectOverviewProps) {
                   </button>
                 )}
                 <button type="button" role="menuitem" onClick={() => { props.onCloseMore(); props.onShowLogs(); }}>
-                  <FileIcon /> 看日志
+                  <FileIcon /> 查看实时日志
                 </button>
                 <div className="menu-sep" />
                 <button

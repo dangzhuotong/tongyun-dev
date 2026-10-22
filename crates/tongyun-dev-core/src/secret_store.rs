@@ -7,10 +7,13 @@
 //!
 //! The encryption key is HKDF-SHA256 over a 32-byte seed stored next to the
 //! vault (`secret.key`, mode `0600`). The directory itself is mode `0700` and
-//! is rejected if it is a symlink. The seed is generated locally with
-//! `create_new` under a file lock. Nothing is derived from the OS keychain
-//! or from a machine-id API. A vault without its seed is an error; the seed
-//! is never regenerated over an existing vault.
+//! is rejected if it is a symlink (note: ancestor directories such as
+//! `~/.config` are not checked for symlinks; the threat model is within the
+//! same local user). The seed is generated locally with `create_new` into a
+//! temporary file under a file lock, then atomically linked or renamed and fsync'd.
+//! Nothing is derived from the OS keychain or from a machine-id API. A vault
+//! without its seed is an error; the seed is never regenerated over an existing
+//! vault.
 //!
 //! # Migration
 //!
@@ -69,6 +72,7 @@ const DEFAULT_KEY_NAME: &str = "secret.key";
 const DEFAULT_VAULT_NAME: &str = "secrets.vault";
 const DEFAULT_JOURNAL_NAME: &str = "secrets.migration.json";
 const DEFAULT_MARKER_NAME: &str = "secrets.migrated";
+#[cfg_attr(not(unix), allow(dead_code))]
 const LOCK_NAME: &str = ".secrets.lock";
 
 /// Where the seed, vault, migration journal, and done-marker live.
@@ -214,7 +218,10 @@ impl std::fmt::Display for SecretStoreError {
             }
             Self::EmptyAccount => write!(f, "secret store account is empty"),
             Self::RefusingSymlink => write!(f, "secret store refuses to follow a symlink"),
-            Self::MissingSeed => write!(f, "secret store seed is missing while the vault exists"),
+            Self::MissingSeed => write!(
+                f,
+                "secret store seed is missing while the vault exists (restore secret.key, or delete secrets.vault after confirming you want to reset the store)"
+            ),
             Self::NotOwner => {
                 write!(f, "secret store directory is not owned by the current user")
             }
@@ -591,6 +598,10 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), SecretStoreError>
 }
 
 /// Directory for the seed and vault: mode `0700`, not a symlink, owned by us.
+///
+/// **Ancestor directories**: Only `dir` itself is checked for symlinks; parent
+/// directories such as `~/.config` are assumed to be trusted within the same
+/// local user security boundary.
 fn ensure_private_dir(dir: &Path) -> Result<(), SecretStoreError> {
     match fs::symlink_metadata(dir) {
         Ok(meta) if meta.file_type().is_symlink() => return Err(SecretStoreError::RefusingSymlink),
@@ -619,6 +630,7 @@ fn ensure_private_dir(dir: &Path) -> Result<(), SecretStoreError> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => {}
         Err(err) => return Err(err.into()),
     }
+    #[allow(unused_mut)]
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -660,11 +672,83 @@ fn read_seed(path: &Path) -> Result<Option<[u8; KEY_LEN]>, SecretStoreError> {
 }
 
 fn create_seed_exclusive(path: &Path, seed: &[u8; KEY_LEN]) -> Result<(), SecretStoreError> {
-    let mut file = open_create_new_nofollow(path)?;
-    file.write_all(seed)?;
-    file.sync_all()?;
-    set_file_mode(&file, 0o600)?;
-    Ok(())
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            ensure_private_dir(parent)?;
+        }
+    }
+    // Refuse to replace a symlink or an existing seed file.
+    match regular_file_exists(path) {
+        Ok(true) => {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "seed already exists").into())
+        }
+        Ok(false) => {}
+        Err(err) => return Err(err),
+    }
+    for _ in 0..8 {
+        let tmp = temp_path_for(path);
+        match open_create_new_nofollow(&tmp) {
+            Ok(mut file) => {
+                file.write_all(seed)?;
+                file.sync_all()?;
+                set_file_mode(&file, 0o600)?;
+                drop(file);
+
+                #[cfg(unix)]
+                {
+                    match fs::hard_link(&tmp, path) {
+                        Ok(()) => {
+                            let _ = fs::remove_file(&tmp);
+                        }
+                        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                            let _ = fs::remove_file(&tmp);
+                            return Err(err.into());
+                        }
+                        Err(_) => {
+                            // Filesystem may not support hard links; fall back to rename
+                            // while ensuring destination does not exist.
+                            if regular_file_exists(path)? {
+                                let _ = fs::remove_file(&tmp);
+                                return Err(io::Error::new(
+                                    io::ErrorKind::AlreadyExists,
+                                    "seed already exists",
+                                )
+                                .into());
+                            }
+                            if let Err(err) = fs::rename(&tmp, path) {
+                                let _ = fs::remove_file(&tmp);
+                                return Err(err.into());
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    if regular_file_exists(path)? {
+                        let _ = fs::remove_file(&tmp);
+                        return Err(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            "seed already exists",
+                        )
+                        .into());
+                    }
+                    if let Err(err) = fs::rename(&tmp, path) {
+                        let _ = fs::remove_file(&tmp);
+                        return Err(err.into());
+                    }
+                }
+
+                if let Ok(file) = open_read_nofollow(path) {
+                    set_file_mode(&file, 0o600)?;
+                }
+                sync_parent(path)?;
+                return Ok(());
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Err(io::Error::new(io::ErrorKind::AlreadyExists, "temp file collision").into())
 }
 
 fn read_regular_file(path: &Path) -> Result<Option<Vec<u8>>, SecretStoreError> {
@@ -699,6 +783,24 @@ struct StoreLock {
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
+/// Acquire an exclusive lock on the secret store directory.
+///
+/// # Non-reentrant / 不可嵌套
+///
+/// **Do not call `lock_store` while already holding a `StoreLock`.**
+/// - On Unix, this opens `.secrets.lock` and applies `libc::flock(..., LOCK_EX)`.
+///   Because each call opens a distinct file descriptor, acquiring the lock a
+///   second time on the same thread or process will deadlock waiting for itself.
+/// - On non-Unix platforms, the fallback uses a process-wide `std::sync::Mutex`,
+///   which also deadlocks when locked recursively by the same thread.
+///
+/// # Porting note (tongyun-git / tongyun-api)
+///
+/// Keep internal read/write helpers (`read_entries`, `write_entries`,
+/// `write_journal`, `write_marker`) lock-free. Acquire `lock_store` only at the
+/// public API boundary (`get`, `set`, `delete`, `migrate_from_legacy`,
+/// `load_or_create_seed`). Never invoke another public method from within an
+/// operation that already holds `StoreLock`.
 fn lock_store(dir: &Path) -> Result<StoreLock, SecretStoreError> {
     ensure_private_dir(dir)?;
     #[cfg(unix)]
@@ -1256,7 +1358,7 @@ mod tests {
     fn refuses_symlink_vault() {
         let dir = TempDir::new();
         let paths = dir.paths();
-        let mut store = FileSecretStore::open(paths.clone()).unwrap();
+        let store = FileSecretStore::open(paths.clone()).unwrap();
         let outside = dir.0.join("outside.txt");
         fs::write(&outside, b"keep").unwrap();
         #[cfg(unix)]
@@ -1410,5 +1512,12 @@ mod tests {
             store.get("demo-account").unwrap().as_deref(),
             Some("fixture-value")
         );
+    }
+
+    #[test]
+    fn missing_seed_display_message_contains_recovery_guidance() {
+        let msg = SecretStoreError::MissingSeed.to_string();
+        assert!(msg.contains("restore secret.key"));
+        assert!(msg.contains("delete secrets.vault"));
     }
 }

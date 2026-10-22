@@ -134,7 +134,7 @@ describe("ProjectOverview", () => {
       "打开日志文件",
       "复制启动命令",
       "安装依赖（pnpm install）",
-      "看日志",
+      "查看实时日志",
       "删除项目…",
     ]) {
       expect(html).toContain(label);

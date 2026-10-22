@@ -156,6 +156,15 @@ describe("collectOverviewWarnings", () => {
     expect(running.tone).toBe("warn");
   });
 
+  it("只有启动提示时运行中状态行保持 ok 不变黄", () => {
+    const line = overviewStatusLine(
+      { ...previewDemoApi, hints: ["只有启动提示"] },
+      { ...previewDemoStatus, hints: ["只有启动提示"], port_conflict: false },
+    );
+    expect(line.headline).toBe("运行中");
+    expect(line.tone).toBe("ok");
+  });
+
   it("缺依赖的停止态给出一条可安装的提示", () => {
     const warnings = collectOverviewWarnings({
       project: { ...previewDemoApi, hints: [] },

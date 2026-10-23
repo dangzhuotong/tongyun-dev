@@ -24,6 +24,34 @@ fn free_port() -> u16 {
     l.local_addr().unwrap().port()
 }
 
+#[allow(dead_code)]
+fn free_service_port(exclude: &[u16]) -> u16 {
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT_PORT: AtomicU16 = AtomicU16::new(24100);
+    for _ in 0..200 {
+        let p = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = if (24000..32000).contains(&p) {
+            p
+        } else {
+            NEXT_PORT.store(24101, Ordering::Relaxed);
+            24100
+        };
+        if exclude.contains(&port) {
+            continue;
+        }
+        if let Ok(l) = TcpListener::bind(("127.0.0.1", port)) {
+            drop(l);
+            return port;
+        }
+    }
+    loop {
+        let p = free_port();
+        if !exclude.contains(&p) {
+            return p;
+        }
+    }
+}
+
 fn write_config(dir: &Path, port: u16) -> PathBuf {
     let d = dir.to_string_lossy().replace('\\', "/");
     let cfg = dir.join("projects.toml");
@@ -897,7 +925,9 @@ env = {{ CI = "test_ci_value", CUSTOM = "123" }}
 #[test]
 fn http_post_input_endpoint_and_security() {
     let dir = temp_dir("http_input");
-    let service_port = free_port();
+    let ui_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let ui_port = ui_listener.local_addr().unwrap().port();
+    let service_port = free_service_port(&[ui_port]);
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
 
@@ -916,9 +946,6 @@ log_dir = "{d}/logs"
         ),
     )
     .unwrap();
-
-    let ui_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let ui_port = ui_listener.local_addr().unwrap().port();
     let cfg_clone = cfg.clone();
     thread::spawn(move || {
         let _ = tongyun_dev_cli::server::serve(ui_listener, cfg_clone, ui_port);
@@ -963,18 +990,18 @@ log_dir = "{d}/logs"
     let _guard = CleanupGuard::new(&loaded, "http_test", dir.clone());
     loaded.start_detached("http_test").unwrap();
 
-    // Wait until process is running and stdin FIFO is ready
+    // Wait until process is alive (pid recorded) and stdin FIFO is ready
     let fifo_path = dir.join("logs/http_test.stdin");
     let start_t = std::time::Instant::now();
     while start_t.elapsed() < Duration::from_secs(5) {
         if fifo_path.exists() {
             if let Ok(st) = loaded.status("http_test") {
-                if st.running {
+                if st.pid.is_some() {
                     break;
                 }
             }
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(20));
     }
 
     // 4. While running, POST input succeeds (retry briefly if server is still registering process status)

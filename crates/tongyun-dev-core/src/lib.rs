@@ -10390,9 +10390,18 @@ stop = ["bash", "{{tomcat}}/bin/catalina.sh", "stop", "15", "-force"]
             &app_dir.join("pom.xml"),
             "<project><parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.2.0</version></parent><artifactId>demo-svc</artifactId><dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>",
         );
-        write(&app_dir.join("src/main/resources/application.yml"), "server:\n  port: 8080\n");
-        write(&app_dir.join("src/main/resources/application-dev.yml"), "server:\n  port: 8081\n");
-        write(&app_dir.join("src/main/resources/application-prod.yml"), "server:\n  port: 8082\n");
+        write(
+            &app_dir.join("src/main/resources/application.yml"),
+            "server:\n  port: 8080\n",
+        );
+        write(
+            &app_dir.join("src/main/resources/application-dev.yml"),
+            "server:\n  port: 8081\n",
+        );
+        write(
+            &app_dir.join("src/main/resources/application-prod.yml"),
+            "server:\n  port: 8082\n",
+        );
 
         let report = loaded.scan(&path_to_string(&d), 2).unwrap();
         assert_eq!(report.candidates.len(), 1);

@@ -1674,3 +1674,238 @@ start = ["sh", "-c", "echo ran >> '{web_s}'"]
         "group restart started demo_web before demo_api failed"
     );
 }
+
+fn detect_python_cmd() -> &'static str {
+    if std::process::Command::new("python")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        "python"
+    } else {
+        "python3"
+    }
+}
+
+#[test]
+fn group_start_waits_for_ready_and_web_only_starts_after_api_ready() {
+    let py = detect_python_cmd();
+    let dir = temp_dir("grp_start_order");
+    let d = dir.to_string_lossy().replace('\\', "/");
+    let cfg = dir.join("projects.toml");
+    let api_port = free_port();
+    let web_port = free_port();
+    let api_ready_file = dir.join("api_ready.flag");
+    let api_ready_s = api_ready_file.to_string_lossy().replace('\\', "/");
+    let web_record_file = dir.join("web_record.txt");
+    let web_record_s = web_record_file.to_string_lossy().replace('\\', "/");
+
+    let api_py = dir.join("api.py");
+    let web_py = dir.join("web.py");
+    let api_py_s = api_py.to_string_lossy().replace('\\', "/");
+    let web_py_s = web_py.to_string_lossy().replace('\\', "/");
+
+    let api_code = format!(
+        "import socket, time\ntime.sleep(1)\ns = socket.socket()\ns.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\ns.bind(('127.0.0.1', {api_port}))\ns.listen(16)\nopen('{api_ready_s}', 'w').write('ready')\ns.settimeout(0.5)\nt0 = time.time()\nwhile time.time() - t0 < 15:\n    try:\n        conn, _ = s.accept()\n        conn.close()\n    except Exception:\n        pass\n"
+    );
+    fs::write(&api_py, api_code).unwrap();
+
+    let web_code = format!(
+        "import socket, time, os\nassert os.path.exists('{api_ready_s}')\ns = socket.socket()\ns.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\ns.bind(('127.0.0.1', {web_port}))\ns.listen(16)\nopen('{web_record_s}', 'w').write('started_after_api_ready')\ns.settimeout(0.5)\nt0 = time.time()\nwhile time.time() - t0 < 15:\n    try:\n        conn, _ = s.accept()\n        conn.close()\n    except Exception:\n        pass\n"
+    );
+    fs::write(&web_py, web_code).unwrap();
+
+    fs::write(
+        &cfg,
+        format!(
+            r#"
+[group.shop]
+members = ["demo_api", "demo_web"]
+
+[projects.demo_api]
+name = "Demo API"
+group = "shop"
+root = "{d}"
+port = {api_port}
+background = true
+log_dir = "{d}/logs"
+start_timeout_secs = 8
+start = ["{py}", "{api_py_s}"]
+
+[projects.demo_web]
+name = "Demo Web"
+group = "shop"
+root = "{d}"
+port = {web_port}
+background = true
+log_dir = "{d}/logs"
+start_timeout_secs = 8
+depends_on = ["demo_api"]
+start = ["{py}", "{web_py_s}"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    let _guard_api = CleanupGuard::new(&loaded, "demo_api", dir.clone());
+    let _guard_web = CleanupGuard::new(&loaded, "demo_web", dir.clone());
+
+    // 1. Calling start_batch_detached for group "shop"
+    let out = loaded.start_batch_detached(Some("shop"), None).unwrap();
+    assert_eq!(out.total, 2);
+    assert_eq!(out.failed, 0);
+    assert_eq!(out.succeeded, 2);
+    assert!(out.results[0].ok);
+    assert_eq!(out.results[0].id, "demo_api");
+    assert!(out.results[1].ok);
+    assert_eq!(out.results[1].id, "demo_web");
+
+    // demo_web must have verified that demo_api was already ready
+    assert!(api_ready_file.exists());
+    assert!(web_record_file.exists());
+    assert_eq!(
+        fs::read_to_string(&web_record_file).unwrap(),
+        "started_after_api_ready"
+    );
+
+    let _ = loaded.stop_batch(Some("shop"), None);
+}
+
+#[test]
+fn group_start_web_api_skips_downstream_when_dependency_fails() {
+    let py = detect_python_cmd();
+    let dir = temp_dir("grp_start_skip");
+    let d = dir.to_string_lossy().replace('\\', "/");
+    let cfg = dir.join("projects.toml");
+    let web_hits = dir.join("web.hits");
+    let web_s = web_hits.to_string_lossy().replace('\\', "/");
+    let api_port = free_port();
+    let web_port = free_port();
+
+    fs::write(
+        &cfg,
+        format!(
+            r#"
+[group.shop]
+members = ["demo_api", "demo_web"]
+
+[projects.demo_api]
+name = "Demo API"
+group = "shop"
+root = "{d}"
+port = {api_port}
+log_dir = "{d}/logs"
+start_timeout_secs = 5
+start = ["{py}", "-c", "import sys; sys.exit(1)"]
+
+[projects.demo_web]
+name = "Demo Web"
+group = "shop"
+root = "{d}"
+port = {web_port}
+log_dir = "{d}/logs"
+start_timeout_secs = 5
+depends_on = ["demo_api"]
+start = ["{py}", "-c", "open('{web_s}', 'w').write('ran')"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let ui_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let ui_port = ui_listener.local_addr().unwrap().port();
+    let cfg_clone = cfg.clone();
+    thread::spawn(move || {
+        let _ = tongyun_dev_cli::server::serve(ui_listener, cfg_clone, ui_port);
+    });
+
+    let resp = post_json(ui_port, "/api/groups/shop/start", "{}", None);
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
+    let value: serde_json::Value = serde_json::from_str(body).expect(body);
+    assert_eq!(value["ok"], false, "{value}");
+    assert_eq!(value["results"][0]["id"], "demo_api");
+    assert_eq!(value["results"][0]["ok"], false);
+    assert_eq!(value["results"][1]["id"], "demo_web");
+    assert_eq!(value["results"][1]["error"], "依赖服务启动失败，已跳过");
+    assert!(
+        !web_hits.exists(),
+        "group start started demo_web before demo_api failed"
+    );
+    assert!(
+        !dir.join("logs/demo_web.pid.start").exists(),
+        "demo_web should never have entered starting"
+    );
+}
+
+#[test]
+fn group_start_detects_and_refuses_cycle() {
+    let dir = temp_dir("grp_cycle");
+    let d = dir.to_string_lossy().replace('\\', "/");
+    let cfg = dir.join("projects.toml");
+    let port_a = free_port();
+    let port_b = free_port();
+
+    fs::write(
+        &cfg,
+        format!(
+            r#"
+[group.cycle_grp]
+members = ["demo_api", "demo_web"]
+
+[projects.demo_api]
+name = "Demo API"
+group = "cycle_grp"
+root = "{d}"
+port = {port_a}
+log_dir = "{d}/logs"
+depends_on = ["demo_web"]
+start = ["echo", "api"]
+
+[projects.demo_web]
+name = "Demo Web"
+group = "cycle_grp"
+root = "{d}"
+port = {port_b}
+log_dir = "{d}/logs"
+depends_on = ["demo_api"]
+start = ["echo", "web"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
+    // 1. start_batch_detached detects cycle
+    let detached_res = loaded.start_batch_detached(Some("cycle_grp"), None).unwrap();
+    assert_eq!(detached_res.succeeded, 0);
+    assert_eq!(detached_res.failed, 2);
+    let err_msg = detached_res.results[0].error.as_deref().unwrap_or("");
+    assert!(
+        err_msg.contains("检测到循环依赖"),
+        "expected cycle error, got: {err_msg}"
+    );
+
+    // 2. Web API /api/groups/cycle_grp/start detects cycle
+    let ui_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let ui_port = ui_listener.local_addr().unwrap().port();
+    let cfg_clone = cfg.clone();
+    thread::spawn(move || {
+        let _ = tongyun_dev_cli::server::serve(ui_listener, cfg_clone, ui_port);
+    });
+
+    let resp = post_json(ui_port, "/api/groups/cycle_grp/start", "{}", None);
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
+    let value: serde_json::Value = serde_json::from_str(body).expect(body);
+    assert_eq!(value["ok"], false, "{value}");
+    let web_err = value["results"][0]["error"].as_str().unwrap_or("");
+    assert!(
+        web_err.contains("检测到循环依赖"),
+        "expected cycle error in web API, got: {web_err}"
+    );
+}

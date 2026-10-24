@@ -728,7 +728,8 @@ fn delayed_listen_transitions_from_starting_to_ready() {
     let port = free_port();
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
-    let listen_py = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/listen.py").replace('\\', "/");
+    let listen_py =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/listen.py").replace('\\', "/");
     fs::write(
         &cfg,
         format!(

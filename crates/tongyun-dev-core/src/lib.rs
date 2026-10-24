@@ -9716,6 +9716,93 @@ start = ["echo", "api"]
         );
     }
 
+    /// Task #7519563128619891671 / docs/tasks/04: Failed + fictional log → status/JSON failure line.
+    #[test]
+    fn status_exposes_extracted_failure_from_fictional_failed_log() {
+        let dir = std::env::temp_dir().join(format!(
+            "tongyun_dev_fail_line_{}",
+            current_time_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("logs")).unwrap();
+        let path = dir.join("projects.toml");
+        let root = dir.display().to_string().replace('\\', "/");
+        let toml = format!(
+            r#"
+[projects.demo_api]
+name = "Demo API"
+root = "{root}"
+port = 18080
+log_dir = "{root}/logs"
+start = ["echo", "hi"]
+"#
+        );
+        std::fs::write(&path, toml).unwrap();
+        let loaded = load(Some(&path)).unwrap();
+        let pid_file = dir.join("logs/demo_api.pid");
+        write_start_marker(
+            &pid_file,
+            &StartMarker {
+                started_at: current_time_secs().saturating_sub(60),
+                timeout_secs: 120,
+                error: None,
+            },
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("logs/demo_api.out"),
+            "INFO boot\nWeb server failed to start. Port 18080 was already in use.\n",
+        )
+        .unwrap();
+
+        let st = loaded.status("demo_api").unwrap();
+        assert_eq!(st.state, LifeState::Failed, "{st:?}");
+        let why = st.failure.as_deref().unwrap_or("");
+        assert!(
+            why.starts_with("端口被占用"),
+            "expected port failure line, got {why:?}"
+        );
+        assert!(
+            why.contains("18080") || why.to_ascii_lowercase().contains("already in use"),
+            "{why}"
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
+        assert_eq!(v["state"], "failed");
+        assert!(
+            v["failure"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("端口被占用"),
+            "{v}"
+        );
+
+        std::fs::write(
+            dir.join("logs/demo_api.out"),
+            "[ERROR] Failed to execute goal\n[ERROR] Could not resolve dependencies for project com.example:demo:jar:1.0\n",
+        )
+        .unwrap();
+        let st2 = loaded.status("demo_api").unwrap();
+        assert_eq!(st2.state, LifeState::Failed);
+        let why2 = st2.failure.as_deref().unwrap_or("");
+        assert!(
+            why2.starts_with("依赖解析失败"),
+            "expected deps failure line, got {why2:?}"
+        );
+        assert!(why2.contains("Could not resolve dependencies"), "{why2}");
+        let v2: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&st2).unwrap()).unwrap();
+        assert!(
+            v2["failure"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("依赖解析失败"),
+            "{v2}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn test_20_batch_start_and_stop_detached() {
         let dir = std::env::temp_dir().join(format!("tongyun_dev_batch_{}", current_time_secs()));

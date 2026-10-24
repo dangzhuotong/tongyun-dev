@@ -1223,6 +1223,7 @@ impl Loaded {
         }
 
         if !project.depends_on.is_empty() {
+            self.check_depends_on_cycle(id, &project.depends_on)?;
             for dep_id in &project.depends_on {
                 let dep_proj = self
                     .config
@@ -1234,7 +1235,10 @@ impl Loaded {
                 }
                 let st = self.status(dep_id)?;
                 if !matches!(st.state, LifeState::Ready | LifeState::PortOpen) {
-                    let _ = self.start_detached_with_profile(dep_id, None)?;
+                    let dep_st = self.start_detached_with_profile(dep_id, None)?;
+                    let budget = Duration::from_secs(dep_st.timeout_secs);
+                    self.wait_for_ready(dep_id, dep_st, budget)
+                        .with_context(|| format!("启动项目 `{id}` 的依赖项 `{dep_id}` 失败"))?;
                 }
             }
         }
@@ -1526,6 +1530,19 @@ impl Loaded {
                 continue;
             }
 
+            if let Err(err) = self.check_depends_on_cycle(id, &p.depends_on) {
+                failed += 1;
+                failed_ids.insert(id.clone());
+                results.push(BatchItemResult {
+                    id: id.clone(),
+                    success: false,
+                    ok: false,
+                    status: self.status(id).ok(),
+                    error: Some(format!("{err:#}")),
+                });
+                continue;
+            }
+
             match self.start_with_profile(id, None, timeout) {
                 Ok(st) => {
                     succeeded += 1;
@@ -1559,96 +1576,13 @@ impl Loaded {
         })
     }
 
-    /// 批量启动项目（后台脱离运行，立刻返回，供 GUI/网页端调用）
+    /// 批量启动项目（后台脱离运行，按依赖拓扑顺序串行等待 Ready 后启动下一项）
     pub fn start_batch_detached(
         &self,
         group: Option<&str>,
         ids: Option<&[String]>,
     ) -> Result<BatchOutput> {
-        let candidate_ids: Vec<String> = if let Some(ids) = ids {
-            ids.iter()
-                .filter(|id| self.config.projects.contains_key(*id))
-                .cloned()
-                .collect()
-        } else if let Some(g) = group {
-            self.projects_in_group(g)
-        } else {
-            self.config.projects.keys().cloned().collect()
-        };
-
-        let mut to_run = Vec::new();
-        for id in &candidate_ids {
-            if let Ok(resolved) = self.resolve(id) {
-                let configured = resolved.port > 0
-                    && (!resolved.active_start().is_empty() || resolved.tomcat.is_some());
-                if resolved.enabled && configured {
-                    to_run.push(id.as_str());
-                }
-            }
-        }
-
-        let sorted = self.sorted_projects_for_start(&to_run);
-        let mut results = Vec::new();
-        let mut failed_ids = std::collections::HashSet::new();
-        let mut succeeded = 0;
-        let mut failed = 0;
-
-        for id in &sorted {
-            let depends_on = self
-                .config
-                .projects
-                .get(id)
-                .map(|p| p.depends_on.clone())
-                .unwrap_or_default();
-            if depends_on.iter().any(|d| failed_ids.contains(d)) {
-                failed += 1;
-                failed_ids.insert(id.clone());
-                results.push(self.skipped_dep_item(id));
-                continue;
-            }
-            match self.start_detached_with_profile(id, None) {
-                Ok(st) if st.state == LifeState::Failed => {
-                    failed += 1;
-                    failed_ids.insert(id.clone());
-                    let error = st.failure.clone().unwrap_or_else(|| "启动失败".to_string());
-                    results.push(BatchItemResult {
-                        id: id.clone(),
-                        success: false,
-                        ok: false,
-                        status: Some(st),
-                        error: Some(error),
-                    });
-                }
-                Ok(st) => {
-                    succeeded += 1;
-                    results.push(BatchItemResult {
-                        id: id.clone(),
-                        success: true,
-                        ok: true,
-                        status: Some(st),
-                        error: None,
-                    });
-                }
-                Err(err) => {
-                    failed += 1;
-                    failed_ids.insert(id.clone());
-                    results.push(BatchItemResult {
-                        id: id.clone(),
-                        success: false,
-                        ok: false,
-                        status: self.status(id).ok(),
-                        error: Some(format!("{err:#}")),
-                    });
-                }
-            }
-        }
-
-        Ok(BatchOutput {
-            total: sorted.len(),
-            succeeded,
-            failed,
-            results,
-        })
+        self.start_batch(group, ids, None)
     }
 
     /// 批量停止项目（按依赖逆序停止）
@@ -9902,6 +9836,53 @@ port = 5174
         assert!(mock.contains("pnpm dev:mock"), "{mock}");
         assert!(mock.contains("5174"), "{mock}");
         assert!(!mock.contains("5173"), "{mock}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn batch_start_detached_detects_and_refuses_cycle() {
+        let dir = std::env::temp_dir().join(format!(
+            "tongyun_dev_batch_cycle_{}_{}",
+            std::process::id(),
+            current_time_secs()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let root = dir.display().to_string().replace('\\', "/");
+        let path = dir.join("projects.toml");
+        let toml = format!(
+            r#"
+[group.cycle_grp]
+members = ["demo_api", "demo_web"]
+
+[projects.demo_api]
+name = "Demo API"
+group = "cycle_grp"
+root = "{root}"
+port = 8080
+log_dir = "{root}/logs"
+start = ["echo", "api"]
+depends_on = ["demo_web"]
+
+[projects.demo_web]
+name = "Demo Web"
+group = "cycle_grp"
+root = "{root}"
+port = 5173
+log_dir = "{root}/logs"
+start = ["echo", "web"]
+depends_on = ["demo_api"]
+"#
+        );
+        std::fs::write(&path, toml).unwrap();
+        let loaded = load(Some(&path)).unwrap();
+
+        let detached = loaded
+            .start_batch_detached(Some("cycle_grp"), None)
+            .unwrap();
+        assert_eq!(detached.failed, 2);
+        assert_eq!(detached.succeeded, 0);
+        let err_0 = detached.results[0].error.as_deref().unwrap_or("");
+        assert!(err_0.contains("检测到循环依赖"), "got error: {err_0}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

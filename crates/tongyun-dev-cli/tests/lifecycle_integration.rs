@@ -1881,7 +1881,9 @@ start = ["echo", "web"]
 
     let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
     // 1. start_batch_detached detects cycle
-    let detached_res = loaded.start_batch_detached(Some("cycle_grp"), None).unwrap();
+    let detached_res = loaded
+        .start_batch_detached(Some("cycle_grp"), None)
+        .unwrap();
     assert_eq!(detached_res.succeeded, 0);
     assert_eq!(detached_res.failed, 2);
     let err_msg = detached_res.results[0].error.as_deref().unwrap_or("");

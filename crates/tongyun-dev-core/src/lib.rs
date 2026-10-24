@@ -9876,7 +9876,9 @@ depends_on = ["demo_api"]
         std::fs::write(&path, toml).unwrap();
         let loaded = load(Some(&path)).unwrap();
 
-        let detached = loaded.start_batch_detached(Some("cycle_grp"), None).unwrap();
+        let detached = loaded
+            .start_batch_detached(Some("cycle_grp"), None)
+            .unwrap();
         assert_eq!(detached.failed, 2);
         assert_eq!(detached.succeeded, 0);
         let err_0 = detached.results[0].error.as_deref().unwrap_or("");

@@ -235,6 +235,7 @@ export type ScanCandidate = {
   needs_tomcat: boolean;
   why: string[];
   existing_id: string | null;
+  default_profile?: string | null;
   profiles?: Record<string, ProfileConfig>;
   env?: Record<string, string>;
   maven_guide?: {

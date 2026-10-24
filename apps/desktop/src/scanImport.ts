@@ -10,7 +10,12 @@ export type ScanRow = ScanCandidate & {
 export const TOMCAT_REASON = "Tomcat WAR：先填 Tomcat 安装目录（tomcat 字段）再启用";
 
 export function toRows(candidates: ScanCandidate[]): ScanRow[] {
-  return candidates.map((c) => ({ ...c, picked: !c.existing_id, tomcat: "" }));
+  return candidates.map((c) => ({
+    ...c,
+    picked: !c.existing_id,
+    tomcat: "",
+    default_profile: c.default_profile ?? null,
+  }));
 }
 
 /** Rows that will be written by「添加选中」. */
@@ -53,6 +58,7 @@ export function toImportItems(rows: ScanRow[]): NewProjectReq[] {
       background: r.background,
       tomcat: tomcat || null,
       env: r.env,
+      default_profile: r.default_profile?.trim() || null,
       profiles: r.profiles,
       enabled: parked ? false : undefined,
       reason: parked ? TOMCAT_REASON : null,

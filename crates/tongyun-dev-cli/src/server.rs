@@ -1033,7 +1033,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
     .scan-root { font-family: var(--ty-font-mono); font-size: 12px; color: var(--ty-text-muted); margin: 4px 0 8px; word-break: break-all; }
     .scan-fields { display: grid; grid-template-columns: 1fr 1fr 2fr 90px; gap: 8px; }
     .scan-fields label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--ty-text-muted); }
-    .scan-fields input { width: 100%; box-sizing: border-box; }
+    .scan-fields input, .scan-fields select { width: 100%; box-sizing: border-box; }
     .scan-why { margin-top: 6px; font-size: 12px; color: var(--ty-text-muted); }
     .scan-why ul { margin: 4px 0 0 18px; padding: 0; }
     .chip.conf-high { background: var(--ty-matcha-tint); color: var(--ty-matcha); }
@@ -1288,16 +1288,32 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
       list.innerHTML = scanRows.map((c, i) => {
         const done = !!c.existing_id;
         const tools = [c.java ? 'Java ' + escapeHtml(c.java) : '', c.node ? 'Node ' + escapeHtml(c.node) : ''].filter(Boolean).map(t => `<span class="chip">${t}</span>`).join('');
+        const profileKeys = (c.profiles && typeof c.profiles === 'object') ? Object.keys(c.profiles) : [];
+        const profileChips = profileKeys.length ? `<span class="chip">Profile: ${profileKeys.map(escapeHtml).join(', ')}</span>` : '';
+        const profileField = profileKeys.length ? `
+              <label class="full" style="grid-column: 1 / -1;">环境预设（Profile 候选：${profileKeys.map(escapeHtml).join('、')}）· 默认生效 Profile
+                <select ${done ? 'disabled' : ''} onchange="scanField(${i}, 'default_profile', this.value)">
+                  <option value="">（不设默认，直接使用基础启动命令）</option>
+                  ${profileKeys.map(k => {
+                    const pConf = c.profiles[k] || {};
+                    const portText = pConf.port ? ' · 端口 :' + pConf.port : '';
+                    const sel = (c.default_profile === k) ? 'selected' : '';
+                    const rec = (k === 'dev' || c.default_profile === k) ? '（推断推荐）' : '';
+                    return `<option value="${escapeHtml(k)}" ${sel}>${escapeHtml(k)}${portText}${rec}</option>`;
+                  }).join('')}
+                </select>
+              </label>` : '';
         return `<div class="scan-row ${done ? 'done' : ''}">
           <label class="scan-pick"><input type="checkbox" ${c.picked && !done ? 'checked' : ''} ${done ? 'disabled' : ''} onchange="scanField(${i}, 'picked', this.checked)" /></label>
           <div class="scan-main">
-            <div class="scan-title"><strong>${escapeHtml(c.label)}</strong><span class="chip conf-${c.confidence}">${conf[c.confidence] || c.confidence}</span>${tools}${done ? `<span class="chip">已注册为 ${escapeHtml(c.existing_id)}</span>` : ''}${c.needs_tomcat ? '<span class="chip">需要 Tomcat</span>' : ''}</div>
+            <div class="scan-title"><strong>${escapeHtml(c.label)}</strong><span class="chip conf-${c.confidence}">${conf[c.confidence] || c.confidence}</span>${tools}${profileChips}${done ? `<span class="chip">已注册为 ${escapeHtml(c.existing_id)}</span>` : ''}${c.needs_tomcat ? '<span class="chip">需要 Tomcat</span>' : ''}</div>
             <div class="scan-root">${escapeHtml(c.root)}</div>
             <div class="scan-fields">
               <label>ID<input value="${escapeHtml(c.id)}" ${done ? 'disabled' : ''} oninput="scanField(${i}, 'id', this.value)" /></label>
               <label>名称<input value="${escapeHtml(c.name)}" ${done ? 'disabled' : ''} oninput="scanField(${i}, 'name', this.value)" /></label>
               <label class="wide">启动命令<input value="${escapeHtml(c.start)}" ${done ? 'disabled' : ''} oninput="scanField(${i}, 'start', this.value)" /></label>
               <label class="narrow">端口<input type="number" value="${c.port || ''}" placeholder="?" ${done ? 'disabled' : ''} oninput="scanField(${i}, 'port', this.value)" /></label>
+              ${profileField}
             </div>
             <details class="scan-why"><summary>为什么这么猜</summary><ul>${c.why.map(w => `<li>${escapeHtml(w)}</li>`).join('')}</ul></details>
           </div>
@@ -1314,6 +1330,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
         node: c.node || null, java: c.java || null, background: c.background,
         port_mode: c.port_mode || null,
         env: c.env || {},
+        default_profile: (c.default_profile && c.default_profile.trim()) ? c.default_profile.trim() : null,
         profiles: c.profiles || {},
         enabled: c.needs_tomcat ? false : null,
         reason: c.needs_tomcat ? 'Tomcat WAR：先填 Tomcat 安装目录（tomcat 字段）再启用' : null,
@@ -2287,6 +2304,8 @@ mod tests {
         assert!(UI_HTML.contains("editPortMode"));
         assert!(UI_HTML.contains("editEnv"));
         assert!(UI_HTML.contains("editAutoAnswers"));
+        assert!(UI_HTML.contains("default_profile"));
+        assert!(UI_HTML.contains("Profile 候选"));
     }
 
     #[test]

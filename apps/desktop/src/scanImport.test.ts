@@ -62,4 +62,37 @@ describe("scan import", () => {
     expect(items[2]).toMatchObject({ tomcat: "~/opt/tomcat-9", reason: null });
     expect(items[2].enabled).toBeUndefined();
   });
+
+  it("preserves and updates profile candidates and default_profile", () => {
+    const profiles = {
+      dev: { port: 8081, start: "mvn spring-boot:run -Dspring-boot.run.profiles=dev" },
+      prod: { port: 8080, start: "mvn spring-boot:run -Dspring-boot.run.profiles=prod" },
+    };
+    const rows = toRows([
+      C({
+        id: "boot-app",
+        kind: "spring-boot-maven",
+        port: 8080,
+        default_profile: "dev",
+        profiles,
+      }),
+    ]);
+    expect(rows[0].default_profile).toBe("dev");
+    expect(rows[0].profiles).toEqual(profiles);
+
+    // Default import item passes dev profile through
+    let items = toImportItems(rows);
+    expect(items[0].default_profile).toBe("dev");
+    expect(items[0].profiles).toEqual(profiles);
+
+    // User switches default profile to prod
+    rows[0].default_profile = "prod";
+    items = toImportItems(rows);
+    expect(items[0].default_profile).toBe("prod");
+
+    // User clears default profile
+    rows[0].default_profile = "";
+    items = toImportItems(rows);
+    expect(items[0].default_profile).toBeNull();
+  });
 });

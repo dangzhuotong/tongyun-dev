@@ -167,6 +167,9 @@ export function ScanDialog({ onClose, onImported }: ScanDialogProps) {
                         {r.java && <span className="tool-tag">Java {r.java}</span>}
                         {r.node && <span className="tool-tag">Node {r.node}</span>}
                         {r.needs_tomcat && <span className="tool-tag">需要 Tomcat</span>}
+                        {r.profiles && Object.keys(r.profiles).length > 0 && (
+                          <span className="tool-tag">Profile: {Object.keys(r.profiles).join(", ")}</span>
+                        )}
                         {done && <span className="tool-tag">已注册为 {r.existing_id}</span>}
                       </div>
                       <code className="scan-root">{r.root}</code>
@@ -202,6 +205,27 @@ export function ScanDialog({ onClose, onImported }: ScanDialogProps) {
                                 placeholder="~/opt/tomcat-9"
                                 onChange={(e) => update(i, { tomcat: e.target.value })}
                               />
+                            </label>
+                          )}
+                          {r.profiles && Object.keys(r.profiles).length > 0 && (
+                            <label className="full">
+                              环境预设（Profile 候选：{Object.keys(r.profiles).join("、")}）· 默认生效 Profile
+                              <select
+                                value={r.default_profile || ""}
+                                onChange={(e) => update(i, { default_profile: e.target.value.trim() || null })}
+                              >
+                                <option value="">（不设默认，直接使用基础启动命令）</option>
+                                {Object.keys(r.profiles).map((pName) => {
+                                  const pConf = r.profiles![pName];
+                                  const portHint = pConf.port ? ` · 端口 :${pConf.port}` : "";
+                                  const isRec = pName === "dev" || pName === r.default_profile;
+                                  return (
+                                    <option key={pName} value={pName}>
+                                      {pName}{portHint}{isRec ? "（推断推荐）" : ""}
+                                    </option>
+                                  );
+                                })}
+                              </select>
                             </label>
                           )}
                         </div>

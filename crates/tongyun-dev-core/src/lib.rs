@@ -10377,6 +10377,55 @@ stop = ["bash", "{{tomcat}}/bin/catalina.sh", "stop", "15", "-force"]
         assert!(!msg.contains("/bin/catalina.sh"), "{msg}");
         let _ = std::fs::remove_dir_all(&d);
     }
+
+    #[test]
+    fn scan_spring_boot_imports_with_profiles_and_default_profile() {
+        let d = tmp("boot_profiles");
+        let cfg = d.join("projects.toml");
+        std::fs::write(&cfg, DEFAULT_CONFIG_TEMPLATE).unwrap();
+        let mut loaded = load(Some(&cfg)).unwrap();
+
+        let app_dir = d.join("demo-svc");
+        write(
+            &app_dir.join("pom.xml"),
+            "<project><parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.2.0</version></parent><artifactId>demo-svc</artifactId><dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>",
+        );
+        write(&app_dir.join("src/main/resources/application.yml"), "server:\n  port: 8080\n");
+        write(&app_dir.join("src/main/resources/application-dev.yml"), "server:\n  port: 8081\n");
+        write(&app_dir.join("src/main/resources/application-prod.yml"), "server:\n  port: 8082\n");
+
+        let report = loaded.scan(&path_to_string(&d), 2).unwrap();
+        assert_eq!(report.candidates.len(), 1);
+        let cand = &report.candidates[0];
+        assert_eq!(cand.default_profile.as_deref(), Some("dev"));
+        assert_eq!(cand.profiles.len(), 2);
+        assert!(cand.profiles.contains_key("dev"));
+        assert!(cand.profiles.contains_key("prod"));
+
+        // User confirms and imports candidate
+        let req = cand.to_new_project();
+        assert_eq!(req.default_profile.as_deref(), Some("dev"));
+        let out = loaded.import_scanned(vec![req]).unwrap();
+        assert_eq!(out.added.len(), 1);
+        assert_eq!(out.added[0].id, "demo-svc");
+
+        // Verify config on disk
+        let saved_toml = std::fs::read_to_string(&cfg).unwrap();
+        assert!(saved_toml.contains("default_profile = \"dev\""));
+        assert!(saved_toml.contains("[projects.demo-svc.profiles.dev]"));
+        assert!(saved_toml.contains("[projects.demo-svc.profiles.prod]"));
+
+        // Verify loaded resolution
+        let reloaded = load(Some(&cfg)).unwrap();
+        let resolved = reloaded.resolve("demo-svc").unwrap();
+        let detail = reloaded.project_detail("demo-svc").unwrap();
+        assert_eq!(detail.default_profile.as_deref(), Some("dev"));
+        assert_eq!(resolved.port, 8081);
+        let start_str = resolved.active_start().join(" ");
+        assert!(start_str.contains("-Dspring-boot.run.profiles=dev"));
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
 
 #[cfg(test)]

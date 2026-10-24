@@ -1479,11 +1479,22 @@ mod tests {
         );
         let cs = run(&t);
         assert!(!cs.iter().any(|c| c.id == "demo-parent"));
-        let sub_pure = cs.iter().find(|c| c.id == "demo-sub-pure").expect("sub-pure found");
+        let sub_pure = cs
+            .iter()
+            .find(|c| c.id == "demo-sub-pure")
+            .expect("sub-pure found");
         assert_eq!(sub_pure.confidence, Confidence::Low);
-        assert!(sub_pure.maven_guide.as_ref().unwrap().main_classes.is_empty());
+        assert!(sub_pure
+            .maven_guide
+            .as_ref()
+            .unwrap()
+            .main_classes
+            .is_empty());
 
-        let sub_exec = cs.iter().find(|c| c.id == "demo-sub-exec").expect("sub-exec found");
+        let sub_exec = cs
+            .iter()
+            .find(|c| c.id == "demo-sub-exec")
+            .expect("sub-exec found");
         assert_eq!(sub_exec.confidence, Confidence::Medium);
         assert_eq!(
             sub_exec.maven_guide.as_ref().unwrap().main_classes,

@@ -711,7 +711,12 @@ export function App() {
     try {
       await invoke("open_in_cursor", { path: folder });
     } catch (err: unknown) {
-      setError(String(err));
+      try {
+        await invoke("open_folder", { path: folder });
+        setError(`未找到 Cursor（${String(err)}），已降级为在系统文件管理器中打开项目目录`);
+      } catch (err2: unknown) {
+        setError(`用 Cursor 打开失败（${String(err)}），降级打开目录亦失败（${String(err2)}）`);
+      }
     }
   }
 

@@ -642,6 +642,7 @@ fn fill_maven_guide(c: &mut Candidate, pom: &str, dir: &Path, packaging: &str, m
         );
         c.start = format!("{mvn} -q -DskipTests package");
     } else {
+        c.confidence = Confidence::Medium;
         c.why.push(format!("mainClass 候选：{}", mains.join("、")));
         c.start = format!("{mvn} -q exec:java -Dexec.mainClass={}", mains[0]);
     }
@@ -665,7 +666,7 @@ fn fill_maven_guide(c: &mut Candidate, pom: &str, dir: &Path, packaging: &str, m
 fn detect_maven(dir: &Path, home: Option<&Path>) -> Option<Detection> {
     let pom = read(&dir.join("pom.xml"))?;
     let own = pom_own_section(&pom);
-    if own.contains("<modules>") {
+    if own.contains("<modules>") || pom.contains("<modules>") {
         return Some(Detection {
             container: true,
             candidate: None,
@@ -673,6 +674,12 @@ fn detect_maven(dir: &Path, home: Option<&Path>) -> Option<Detection> {
     }
     let artifact = xml_tag(&own, "artifactId").map(str::to_string);
     let packaging = xml_tag(&own, "packaging").unwrap_or("jar").to_string();
+    if packaging == "pom" {
+        return Some(Detection {
+            container: true,
+            candidate: None,
+        });
+    }
     let is_boot = pom.contains("spring-boot");
     let has_wrapper = dir.join("mvnw").is_file();
     let mvn = if has_wrapper { "./mvnw" } else { "mvn" };
@@ -709,11 +716,6 @@ fn detect_maven(dir: &Path, home: Option<&Path>) -> Option<Detection> {
             c.why.push("有 actuator，用 /actuator/health 探活".into());
         }
         c
-    } else if packaging == "pom" {
-        return Some(Detection {
-            container: true,
-            candidate: None,
-        });
     } else {
         let mut c = base_candidate(dir, home, "maven-app", "Maven（非 Spring Boot）");
         c.confidence = Confidence::Low;
@@ -1346,6 +1348,7 @@ mod tests {
         );
         let cs = run(&t);
         let c = one(&cs, "maven-app");
+        assert_eq!(c.confidence, Confidence::Medium);
         assert!(!c.needs_tomcat);
         let guide = c.maven_guide.as_ref().unwrap();
         assert_eq!(guide.packaging, "jar");
@@ -1398,6 +1401,94 @@ mod tests {
         let req = c.to_new_project();
         assert_eq!(req.enabled, Some(false));
         assert!(req.reason.as_deref().unwrap_or("").contains("Tomcat"));
+    }
+
+    #[test]
+    fn plain_maven_pure_jar_without_main_class() {
+        let t = Tmp::new("purejar");
+        t.write(
+            "lib/pom.xml",
+            r#"<project>
+              <modelVersion>4.0.0</modelVersion>
+              <groupId>com.example.fake</groupId>
+              <artifactId>demo-pure-lib</artifactId>
+              <version>1.0.0</version>
+              <packaging>jar</packaging>
+            </project>"#,
+        );
+        let cs = run(&t);
+        let c = one(&cs, "maven-app");
+        assert_eq!(c.id, "demo-pure-lib");
+        assert_eq!(c.kind, "maven-app");
+        assert_eq!(c.confidence, Confidence::Low);
+        assert!(!c.needs_tomcat);
+        let guide = c.maven_guide.as_ref().expect("maven_guide present");
+        assert_eq!(guide.packaging, "jar");
+        assert!(guide.main_classes.is_empty());
+        assert_eq!(guide.ports, vec![8080]);
+        assert_eq!(c.start, "mvn -q -DskipTests package");
+        assert!(c.why.iter().any(|w| w.contains("没有 <mainClass>")));
+        assert!(c.why.iter().any(|w| w.contains("这不是 Spring Boot")));
+        let req = c.to_new_project();
+        assert_ne!(req.enabled, Some(false));
+        assert!(req.reason.is_none());
+    }
+
+    #[test]
+    fn plain_maven_packaging_pom_container_descends_without_candidate() {
+        let t = Tmp::new("pomcontainer");
+        t.write(
+            "parent/pom.xml",
+            r#"<project>
+              <modelVersion>4.0.0</modelVersion>
+              <groupId>com.example.fake</groupId>
+              <artifactId>demo-parent</artifactId>
+              <version>1.0.0</version>
+              <packaging>pom</packaging>
+            </project>"#,
+        );
+        t.write(
+            "parent/sub-pure/pom.xml",
+            r#"<project>
+              <modelVersion>4.0.0</modelVersion>
+              <groupId>com.example.fake</groupId>
+              <artifactId>demo-sub-pure</artifactId>
+              <version>1.0.0</version>
+              <packaging>jar</packaging>
+            </project>"#,
+        );
+        t.write(
+            "parent/sub-exec/pom.xml",
+            r#"<project>
+              <modelVersion>4.0.0</modelVersion>
+              <groupId>com.example.fake</groupId>
+              <artifactId>demo-sub-exec</artifactId>
+              <version>1.0.0</version>
+              <packaging>jar</packaging>
+              <build>
+                <plugins>
+                  <plugin>
+                    <artifactId>exec-maven-plugin</artifactId>
+                    <configuration>
+                      <mainClass>com.example.fake.Runner</mainClass>
+                    </configuration>
+                  </plugin>
+                </plugins>
+              </build>
+            </project>"#,
+        );
+        let cs = run(&t);
+        assert!(!cs.iter().any(|c| c.id == "demo-parent"));
+        let sub_pure = cs.iter().find(|c| c.id == "demo-sub-pure").expect("sub-pure found");
+        assert_eq!(sub_pure.confidence, Confidence::Low);
+        assert!(sub_pure.maven_guide.as_ref().unwrap().main_classes.is_empty());
+
+        let sub_exec = cs.iter().find(|c| c.id == "demo-sub-exec").expect("sub-exec found");
+        assert_eq!(sub_exec.confidence, Confidence::Medium);
+        assert_eq!(
+            sub_exec.maven_guide.as_ref().unwrap().main_classes,
+            vec!["com.example.fake.Runner".to_string()]
+        );
     }
 
     #[test]

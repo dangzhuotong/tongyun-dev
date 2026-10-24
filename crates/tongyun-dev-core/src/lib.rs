@@ -10330,6 +10330,58 @@ mod scan_import_tests {
     }
 
     #[test]
+    fn plain_maven_guided_user_sets_start_and_can_status_start() {
+        let d = tmp("plain_guided");
+        let cfg = d.join("projects.toml");
+        std::fs::write(&cfg, DEFAULT_CONFIG_TEMPLATE).unwrap();
+        let mut loaded = load(Some(&cfg)).unwrap();
+
+        // Fictional non-boot plain maven project (pure jar without mainClass)
+        write(
+            &d.join("demo_svc/pom.xml"),
+            r#"<project>
+              <modelVersion>4.0.0</modelVersion>
+              <groupId>com.example.fake</groupId>
+              <artifactId>demo-plain-svc</artifactId>
+              <version>1.0.0</version>
+              <packaging>jar</packaging>
+            </project>"#,
+        );
+
+        let report = loaded.scan(&path_to_string(&d), 2).unwrap();
+        assert_eq!(report.candidates.len(), 1);
+        let cand = &report.candidates[0];
+        assert_eq!(cand.id, "demo-plain-svc");
+        assert_eq!(cand.kind, "maven-app");
+        assert_eq!(cand.confidence, Confidence::Low);
+        assert!(cand.maven_guide.is_some());
+        assert!(cand.why.iter().any(|w| w.contains("没有 <mainClass>")));
+
+        // User follows guidance: converts to NewProject and specifies start command
+        let mut req = cand.to_new_project();
+        req.start = "echo demo-plain-svc-started".into();
+        req.port = Some(8097);
+
+        let out = loaded.import_scanned(vec![req]).unwrap();
+        assert_eq!(out.added.len(), 1);
+        assert_eq!(out.added[0].id, "demo-plain-svc");
+
+        // Verify status before starting: stopped
+        let st_init = loaded.status("demo-plain-svc").unwrap();
+        assert_eq!(st_init.state, LifeState::Stopped);
+        assert_eq!(st_init.port, 8097);
+
+        // Verify start and stop
+        let st_start = loaded.start_detached("demo-plain-svc").unwrap();
+        assert_eq!(st_start.id, "demo-plain-svc");
+
+        let st_stop = loaded.stop("demo-plain-svc").unwrap();
+        assert_eq!(st_stop.id, "demo-plain-svc");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn unresolved_tomcat_is_not_rewritten_to_root_catalina() {
         let home = Path::new("/home/demo");
         let enabled = r#"

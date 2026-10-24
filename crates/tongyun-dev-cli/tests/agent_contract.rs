@@ -694,3 +694,68 @@ start = ["sh", "-c", "echo ran >> '{web_s}'"]
     );
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn status_json_exposes_log_failure_line() {
+    use tongyun_dev_core::{write_start_marker, StartMarker};
+    let fx = Fixture::new(r#"["echo","hi"]"#, "");
+    let logs = fx.root.join("logs");
+    fs::create_dir_all(&logs).unwrap();
+    let pid_file = logs.join("demo.pid");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    write_start_marker(
+        &pid_file,
+        &StartMarker {
+            started_at: now.saturating_sub(60),
+            timeout_secs: 120,
+            error: None,
+        },
+    )
+    .unwrap();
+    fs::write(
+        logs.join("demo.out"),
+        "Web server failed to start. Port already in use.\n",
+    )
+    .unwrap();
+
+    let out = fx.cli(&["status", "demo", "--json"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).expect("status --json object");
+    assert_eq!(v["state"], "failed", "{v}");
+    let failure = v["failure"].as_str().unwrap_or("");
+    assert!(
+        failure.starts_with("端口被占用") || failure.to_ascii_lowercase().contains("port"),
+        "failure={failure:?} full={v}"
+    );
+
+    fs::write(
+        logs.join("demo.out"),
+        "[ERROR] Could not resolve dependencies for project com.example:demo:jar:1.0\n",
+    )
+    .unwrap();
+    let out2 = fx.cli(&["status", "--json"]);
+    assert!(
+        out2.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    let arr: Value = serde_json::from_slice(&out2.stdout).expect("status --json array");
+    let demo = arr
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "demo")
+        .expect("demo row");
+    let failure2 = demo["failure"].as_str().unwrap_or("");
+    assert!(
+        failure2.starts_with("依赖解析失败"),
+        "failure={failure2:?} row={demo}"
+    );
+}

@@ -9719,10 +9719,8 @@ start = ["echo", "api"]
     /// Task #7519563128619891671 / docs/tasks/04: Failed + fictional log → status/JSON failure line.
     #[test]
     fn status_exposes_extracted_failure_from_fictional_failed_log() {
-        let dir = std::env::temp_dir().join(format!(
-            "tongyun_dev_fail_line_{}",
-            current_time_secs()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("tongyun_dev_fail_line_{}", current_time_secs()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("logs")).unwrap();
         let path = dir.join("projects.toml");

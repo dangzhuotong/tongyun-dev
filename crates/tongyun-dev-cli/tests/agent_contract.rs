@@ -695,7 +695,6 @@ start = ["sh", "-c", "echo ran >> '{web_s}'"]
     let _ = fs::remove_dir_all(&root);
 }
 
-
 #[test]
 fn status_json_exposes_log_failure_line() {
     use tongyun_dev_core::{write_start_marker, StartMarker};
@@ -742,7 +741,11 @@ fn status_json_exposes_log_failure_line() {
     )
     .unwrap();
     let out2 = fx.cli(&["status", "--json"]);
-    assert!(out2.status.success(), "{}", String::from_utf8_lossy(&out2.stderr));
+    assert!(
+        out2.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
     let arr: Value = serde_json::from_slice(&out2.stdout).expect("status --json array");
     let demo = arr
         .as_array()

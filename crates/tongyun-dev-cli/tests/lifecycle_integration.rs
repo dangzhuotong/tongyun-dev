@@ -697,49 +697,46 @@ log_dir = "{d}/logs"
     );
 }
 
+fn probe_python_cmd() -> Option<&'static str> {
+    let candidates = if cfg!(windows) {
+        ["python", "python3"]
+    } else {
+        ["python3", "python"]
+    };
+    for cmd in candidates {
+        if std::process::Command::new(cmd)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return Some(cmd);
+        }
+    }
+    None
+}
+
 #[test]
 fn delayed_listen_transitions_from_starting_to_ready() {
-    let python3_ok = std::process::Command::new("python3")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !python3_ok {
-        eprintln!("跳过测试 delayed_listen_transitions_from_starting_to_ready: python3 不可用");
-        return;
-    }
+    let py = probe_python_cmd().expect(
+        "delayed_listen_transitions_from_starting_to_ready requires python or python3 on PATH, but neither was found",
+    );
 
     let dir = temp_dir("py_listen");
     let port = free_port();
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
-    let (shell_cmd, shell_arg, script) = if cfg!(windows) {
-        (
-            "cmd",
-            "/C",
-            format!("python3 -m http.server {port} --bind 127.0.0.1"),
-        )
-    } else {
-        // Same listener as agent_contract: skip http.server, which stalls in
-        // socket.getfqdn before listen on macOS 15+.
-        (
-            "sh",
-            "-c",
-            format!(
-                "sleep 2; exec python3 '{}' {port}",
-                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/listen.py")
-            ),
-        )
-    };
+    let listen_py =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/listen.py").replace('\\', "/");
     fs::write(
         &cfg,
         format!(
             r#"[projects.py_srv]
 name = "Python Server"
 root = "{d}"
-start = ["{shell_cmd}", "{shell_arg}", "{script}"]
+start = ["{py}", "{listen_py}", "{port}", "--delay-secs", "2"]
 background = true
 port = {port}
 log_dir = "{d}/logs"

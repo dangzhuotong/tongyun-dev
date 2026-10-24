@@ -539,15 +539,25 @@ pub fn suggest_spring_profiles(dir: &Path) -> BTreeMap<String, ProfileConfig> {
         let mut env = BTreeMap::new();
         env.insert("SPRING_PROFILES_ACTIVE".into(), profile.clone());
         let start = if dir.join("mvnw").is_file() {
-            Some(format!("./mvnw spring-boot:run -Dspring-boot.run.profiles={profile}"))
+            Some(format!(
+                "./mvnw spring-boot:run -Dspring-boot.run.profiles={profile}"
+            ))
         } else if dir.join("gradlew").is_file() {
-            Some(format!("./gradlew bootRun --args='--spring.profiles.active={profile}'"))
+            Some(format!(
+                "./gradlew bootRun --args='--spring.profiles.active={profile}'"
+            ))
         } else if dir.join("build.gradle").is_file() || dir.join("build.gradle.kts").is_file() {
-            Some(format!("gradle bootRun --args='--spring.profiles.active={profile}'"))
+            Some(format!(
+                "gradle bootRun --args='--spring.profiles.active={profile}'"
+            ))
         } else if dir.join("pom.xml").is_file() {
-            Some(format!("mvn spring-boot:run -Dspring-boot.run.profiles={profile}"))
+            Some(format!(
+                "mvn spring-boot:run -Dspring-boot.run.profiles={profile}"
+            ))
         } else {
-            Some(format!("mvn spring-boot:run -Dspring-boot.run.profiles={profile}"))
+            Some(format!(
+                "mvn spring-boot:run -Dspring-boot.run.profiles={profile}"
+            ))
         };
         out.insert(
             profile.clone(),
@@ -571,7 +581,10 @@ fn attach_spring_profiles(c: &mut Candidate, dir: &Path) {
         if c.start.contains("spring-boot:run") {
             prof.start = Some(format!("{} -Dspring-boot.run.profiles={}", c.start, name));
         } else if c.start.contains("bootRun") {
-            prof.start = Some(format!("{} --args='--spring.profiles.active={}'", c.start, name));
+            prof.start = Some(format!(
+                "{} --args='--spring.profiles.active={}'",
+                c.start, name
+            ));
         } else if !c.kind.starts_with("spring-boot") {
             prof.start = None;
         }
@@ -1513,7 +1526,10 @@ mod tests {
         let cs = run(&t);
 
         // Verify 1: has application-dev.yml
-        let c_dev = cs.iter().find(|c| c.root.ends_with("/app_dev")).expect("app_dev candidate");
+        let c_dev = cs
+            .iter()
+            .find(|c| c.root.ends_with("/app_dev"))
+            .expect("app_dev candidate");
         assert_eq!(c_dev.port, 8080);
         assert_eq!(c_dev.default_profile.as_deref(), Some("dev"));
         assert_eq!(c_dev.profiles.len(), 2);
@@ -1533,11 +1549,16 @@ mod tests {
             req_dev.profiles["dev"].start.as_deref(),
             Some("mvn spring-boot:run -Dspring-boot.run.profiles=dev")
         );
-        let (_, proj_dev) = req_dev.into_project().expect("add request validation succeeds");
+        let (_, proj_dev) = req_dev
+            .into_project()
+            .expect("add request validation succeeds");
         assert_eq!(proj_dev.default_profile.as_deref(), Some("dev"));
 
         // Verify 2: no profile
-        let c_noprof = cs.iter().find(|c| c.root.ends_with("/app_noprof")).expect("app_noprof candidate");
+        let c_noprof = cs
+            .iter()
+            .find(|c| c.root.ends_with("/app_noprof"))
+            .expect("app_noprof candidate");
         assert_eq!(c_noprof.start, "mvn spring-boot:run");
         assert_eq!(c_noprof.default_profile, None);
         assert!(c_noprof.profiles.is_empty());
@@ -1546,7 +1567,10 @@ mod tests {
         assert!(req_noprof.profiles.is_empty());
 
         // Verify 3: only application.yml
-        let c_only = cs.iter().find(|c| c.root.ends_with("/app_only_app")).expect("app_only_app candidate");
+        let c_only = cs
+            .iter()
+            .find(|c| c.root.ends_with("/app_only_app"))
+            .expect("app_only_app candidate");
         assert_eq!(c_only.start, "mvn spring-boot:run");
         assert_eq!(c_only.port, 8085);
         assert_eq!(c_only.default_profile, None);
@@ -1556,7 +1580,10 @@ mod tests {
         assert!(req_only.profiles.is_empty());
 
         // Verify 4: mvnw wrapper with dev profile
-        let c_mvnw = cs.iter().find(|c| c.root.ends_with("/app_mvnw")).expect("app_mvnw candidate");
+        let c_mvnw = cs
+            .iter()
+            .find(|c| c.root.ends_with("/app_mvnw"))
+            .expect("app_mvnw candidate");
         assert_eq!(c_mvnw.start, "./mvnw spring-boot:run");
         assert_eq!(c_mvnw.default_profile.as_deref(), Some("dev"));
         assert_eq!(
@@ -1566,7 +1593,10 @@ mod tests {
         assert_eq!(c_mvnw.profiles["dev"].port, Some(8086));
 
         // Verify 5: profiles without dev
-        let c_nodev = cs.iter().find(|c| c.root.ends_with("/app_nodev")).expect("app_nodev candidate");
+        let c_nodev = cs
+            .iter()
+            .find(|c| c.root.ends_with("/app_nodev"))
+            .expect("app_nodev candidate");
         assert_eq!(c_nodev.profiles.len(), 1);
         assert_eq!(c_nodev.default_profile, None);
         assert_eq!(
@@ -1590,9 +1620,13 @@ start = ["bash", "-c", "exec mvn spring-boot:run"]
             "legacy_app",
             legacy_proj,
             Some(std::path::Path::new("/home/demo")),
-        ).expect("legacy project resolves without error");
+        )
+        .expect("legacy project resolves without error");
         assert_eq!(resolved.port, 8080);
-        assert_eq!(resolved.active_start(), vec!["bash", "-c", "exec mvn spring-boot:run"]);
+        assert_eq!(
+            resolved.active_start(),
+            vec!["bash", "-c", "exec mvn spring-boot:run"]
+        );
     }
 
     #[test]

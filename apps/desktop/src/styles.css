@@ -2579,7 +2579,8 @@ mark {
 
 .scan-bar input[type="text"],
 .scan-bar input[type="number"],
-.scan-fields input {
+.scan-fields input,
+.scan-fields select {
   padding: 7px 10px;
   border-radius: var(--ty-radius-sm);
   border: 1px solid var(--ty-border);
@@ -2590,7 +2591,8 @@ mark {
 }
 
 .scan-bar input:focus,
-.scan-fields input:focus {
+.scan-fields input:focus,
+.scan-fields select:focus {
   border-color: var(--ty-matcha);
   background: var(--ty-surface);
   box-shadow: var(--ty-focus-ring);

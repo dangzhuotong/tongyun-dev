@@ -603,17 +603,26 @@ fn run_batch_start_restart(
             Err(e) => {
                 any_err = true;
                 failed_ids.insert(id.clone());
-                let err_msg = format!("{e:#}");
+                let mut status = loaded.status(id).ok();
+                let err_msg = loaded.batch_item_failure_line(id, status.as_ref(), Some(&e));
+                if let Some(ref mut st) = status {
+                    st.failure = Some(err_msg.clone());
+                    if let Some(hint) = tongyun_dev_core::failure_line_hint(&err_msg) {
+                        if !st.hints.contains(&hint) {
+                            st.hints.push(hint);
+                        }
+                    }
+                }
                 if !json {
                     eprintln!("  失败: {err_msg}");
-                    if let Ok(st) = loaded.status(id) {
-                        let _ = print_status(&st, false);
+                    if let Some(ref st) = status {
+                        let _ = print_status(st, false);
                     }
                 }
                 results.push(serde_json::json!({
                     "id": id,
                     "ok": false,
-                    "status": loaded.status(id).ok(),
+                    "status": status,
                     "error": err_msg,
                 }));
             }

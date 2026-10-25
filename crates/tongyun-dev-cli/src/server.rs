@@ -702,11 +702,24 @@ fn route(req: &Request, state: &AppState) -> (u16, &'static str, Vec<u8>) {
                     .and_then(|p| tongyun_dev_core::open_path(&p).map(|_| json!({"path": p}))),
                 "open-log" => loaded.log_file(id).and_then(|p| {
                     let shown = p.display().to_string();
+                    if !p.exists() {
+                        anyhow::bail!("日志文件尚未生成：{shown}（项目启动后才会产生日志）");
+                    }
                     tongyun_dev_core::open_path(&p).map(|_| json!({"path": shown}))
                 }),
                 "cursor" => loaded.root_dir(id).and_then(|p| {
                     let shown = p.display().to_string();
-                    tongyun_dev_core::open_in_cursor(&p).map(|_| json!({"path": shown}))
+                    match tongyun_dev_core::open_in_cursor(&p) {
+                        Ok(()) => Ok(json!({"path": shown})),
+                        Err(e) => match tongyun_dev_core::open_path(&p) {
+                            Ok(()) => Ok(json!({
+                                "path": shown,
+                                "degraded": true,
+                                "warning": format!("{e:#}，已降级为在系统文件管理器中打开项目目录")
+                            })),
+                            Err(e2) => Err(anyhow::anyhow!("{e:#}；且降级打开目录也失败：{e2:#}")),
+                        },
+                    }
                 }),
                 _ => Err(anyhow::anyhow!("unknown action")),
             };
@@ -1857,7 +1870,10 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
 
     async function openInCursor(id) {
       try {
-        await postJson(`/api/projects/${id}/cursor`);
+        const res = await postJson(`/api/projects/${id}/cursor`);
+        if (res && res.degraded) {
+          alert(res.warning || '未找到 Cursor，已降级为在系统文件管理器中打开项目目录');
+        }
       } catch (e) {
         alert('用 Cursor 打开失败：' + e.message);
       }

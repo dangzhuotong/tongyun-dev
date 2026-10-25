@@ -7174,7 +7174,24 @@ pub fn open_url(url: &str) -> Result<()> {
     open_with_system(url)
 }
 
-/// Open a project directory in Cursor (`cursor <dir>` on PATH).
+/// Assemble a `cursor://file/...` URI for a directory or file path.
+pub fn cursor_uri(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let normalized = trimmed.replace('\\', "/");
+    let path_part = if normalized.starts_with('/') {
+        normalized
+    } else {
+        format!("/{normalized}")
+    };
+    let encoded = path_part.replace(' ', "%20");
+    format!("cursor://file{encoded}")
+}
+
+/// Open a project directory in Cursor (`cursor <dir>` on PATH, or `cursor://file/...`).
 pub fn open_in_cursor(path: &Path) -> Result<()> {
     if !path.is_dir() {
         bail!("不是目录：{}", path.display());
@@ -7193,6 +7210,10 @@ pub fn open_in_cursor(path: &Path) -> Result<()> {
     {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let uri = cursor_uri(path);
+            if !uri.is_empty() && open_with_system(&uri).is_ok() {
+                return Ok(());
+            }
             bail!(
                 "未找到 {bin} 命令。安装 Cursor 后，在命令面板执行 Install 'cursor' command in PATH"
             );
@@ -9820,6 +9841,37 @@ start = ["echo", "hi"]
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cursor_uri_and_command_formatting() {
+        assert_eq!(
+            cursor_uri(Path::new("/Users/demo/project")),
+            "cursor://file/Users/demo/project"
+        );
+        assert_eq!(
+            cursor_uri(Path::new("C:\\Users\\demo\\project")),
+            "cursor://file/C:/Users/demo/project"
+        );
+        assert_eq!(
+            cursor_uri(Path::new("/Users/demo/my project")),
+            "cursor://file/Users/demo/my%20project"
+        );
+        assert_eq!(cursor_uri(Path::new("")), "");
+
+        assert_eq!(display_command(&[]), "");
+        assert_eq!(
+            display_command(&["npm".into(), "run".into(), "dev".into()]),
+            "npm run dev"
+        );
+        assert_eq!(
+            display_command(&["python".into(), "run script.py".into()]),
+            "python \"run script.py\""
+        );
+        assert_eq!(
+            display_command(&["sh".into(), "-c".into(), "echo hello".into()]),
+            "echo hello"
+        );
     }
 
     #[test]

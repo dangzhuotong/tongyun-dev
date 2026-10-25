@@ -3302,7 +3302,12 @@ fn status_of(p: &Resolved, peers: &[(String, u32)]) -> StatusJson {
             .unwrap_or(true)
     {
         if let Ok(text) = read_tail(&p.log_file, 120) {
-            if let Some(line) = extract_start_failure_line(&text) {
+            if let Some((line, hint)) = extract_start_failure_with_hint(&text) {
+                if let Some(h) = hint {
+                    if !hints.contains(&h) {
+                        hints.push(h);
+                    }
+                }
                 failure = Some(line);
             }
         }
@@ -3744,6 +3749,31 @@ pub fn extract_start_failure_line(log: &str) -> Option<String> {
         return Some(prefix_failure("异常", line));
     }
     None
+}
+
+/// Contextual diagnosis hint corresponding to an extracted failure line.
+pub fn failure_line_hint(failure: &str) -> Option<String> {
+    if failure.starts_with("端口被占用") {
+        Some("端口已被占用，建议先排查并停止冲突进程，或调整项目端口配置".to_string())
+    } else if failure.starts_with("依赖解析失败") {
+        Some("依赖解析失败，建议检查网络连接、仓库配置或先执行依赖安装命令".to_string())
+    } else if failure.starts_with("认证失败：Maven") {
+        Some(
+            "Maven 私服认证失败（401/403），建议检查 settings.xml 中的账号密码或访问权限"
+                .to_string(),
+        )
+    } else if failure.starts_with("异常") {
+        Some("启动时抛出未捕获异常，建议查看完整日志定位具体原因".to_string())
+    } else {
+        None
+    }
+}
+
+/// One-line start-failure reason and optional actionable hint from a log tail.
+pub fn extract_start_failure_with_hint(log: &str) -> Option<(String, Option<String>)> {
+    let line = extract_start_failure_line(log)?;
+    let hint = failure_line_hint(&line);
+    Some((line, hint))
 }
 
 fn log_lines(log: &str) -> Vec<String> {
@@ -9796,6 +9826,63 @@ start = ["echo", "hi"]
                 .unwrap_or("")
                 .starts_with("依赖解析失败"),
             "{v2}"
+        );
+        assert!(
+            st2.hints.iter().any(|h| h.contains("依赖解析失败")),
+            "hints={:?}",
+            st2.hints
+        );
+
+        // 3. Maven 401 authentication failure
+        std::fs::write(
+            dir.join("logs/demo_api.out"),
+            "[ERROR] Failed to execute goal ... authentication failed, status: 401 Unauthorized\n",
+        )
+        .unwrap();
+        let st3 = loaded.status("demo_api").unwrap();
+        assert_eq!(st3.state, LifeState::Failed);
+        let why3 = st3.failure.as_deref().unwrap_or("");
+        assert!(
+            why3.starts_with("认证失败：Maven 仓库返回 401"),
+            "expected Maven auth failure line, got {why3:?}"
+        );
+        assert!(
+            st3.hints.iter().any(|h| h.contains("Maven 私服认证失败")),
+            "hints={:?}",
+            st3.hints
+        );
+
+        // 4. Uncaught exception
+        std::fs::write(
+            dir.join("logs/demo_api.out"),
+            "Exception in thread \"main\" java.lang.NullPointerException: demo config is null\n",
+        )
+        .unwrap();
+        let st4 = loaded.status("demo_api").unwrap();
+        assert_eq!(st4.state, LifeState::Failed);
+        let why4 = st4.failure.as_deref().unwrap_or("");
+        assert!(
+            why4.starts_with("异常："),
+            "expected exception failure line, got {why4:?}"
+        );
+        assert!(
+            st4.hints.iter().any(|h| h.contains("启动时抛出未捕获异常")),
+            "hints={:?}",
+            st4.hints
+        );
+
+        // 5. Normal or clean log with no matching failure pattern: fallback to previous generic failure
+        std::fs::write(
+            dir.join("logs/demo_api.out"),
+            "INFO Application starting on port 18080\n",
+        )
+        .unwrap();
+        let st5 = loaded.status("demo_api").unwrap();
+        assert_eq!(st5.state, LifeState::Failed);
+        let why5 = st5.failure.as_deref().unwrap_or("");
+        assert_eq!(
+            why5, "进程已退出",
+            "fallback to generic failure when log tail has no error"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

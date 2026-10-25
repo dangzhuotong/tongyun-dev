@@ -1695,6 +1695,7 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
           ${!configured && !p.resolve_error ? `<div class="note">还没配置好：缺端口或启动命令。打开这个项目的「设置」填好就能启动。</div>` : ''}
           ${conflict}
           ${configured && enabled && state === 'failed' && p.failure ? `<div class="fail">${escapeHtml(p.failure)}</div>` : ''}
+          ${configured && enabled && p.hints && p.hints.length ? p.hints.map(h => `<div class="note">💡 ${escapeHtml(h)}</div>`).join('') : ''}
           ${state === 'failed' && p.pid ? `<div class="note">进程 PID ${p.pid} 仍在，停止可清理，重启可重新尝试。</div>` : ''}
           ${profileBar}
           <div class="meta-list">

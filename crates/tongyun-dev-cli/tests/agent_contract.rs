@@ -644,7 +644,7 @@ members = ["demo_api", "demo_web"]
 name = "Demo API"
 group = "shop"
 root = "{root_s}"
-port = 8080
+port = 28080
 log_dir = "{root_s}/logs"
 start_timeout_secs = 5
 start = ["sh", "-c", "echo x >> '{hits_s}'; exit 1"]
@@ -653,7 +653,7 @@ start = ["sh", "-c", "echo x >> '{hits_s}'; exit 1"]
 name = "Demo Web"
 group = "shop"
 root = "{root_s}"
-port = 5173
+port = 25173
 log_dir = "{root_s}/logs"
 start_timeout_secs = 5
 depends_on = ["demo_api"]
@@ -692,6 +692,88 @@ start = ["sh", "-c", "echo ran >> '{web_s}'"]
         "downstream command ran: {}",
         fs::read_to_string(&web_hits).unwrap_or_default()
     );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn group_start_json_batch_item_error_contains_extracted_log_failure_line() {
+    let root = std::env::temp_dir().join(format!(
+        "tongyun_group_fail_line_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(root.join("logs")).unwrap();
+    let root_s = root.display().to_string();
+    let config = root.join("projects.toml");
+    fs::write(
+        &config,
+        format!(
+            r#"
+[group.shop]
+members = ["demo_api", "demo_web"]
+
+[projects.demo_api]
+name = "Demo API"
+group = "shop"
+root = "{root_s}"
+port = 28080
+log_dir = "{root_s}/logs"
+start_timeout_secs = 5
+start = ["sh", "-c", "echo 'Web server failed to start. Port 28080 was already in use.' >> '{root_s}/logs/demo_api.out'; exit 1"]
+
+[projects.demo_web]
+name = "Demo Web"
+group = "shop"
+root = "{root_s}"
+port = 25173
+log_dir = "{root_s}/logs"
+start_timeout_secs = 5
+depends_on = ["demo_api"]
+start = ["sh", "-c", "echo ran >> '{root_s}/logs/demo_web.out'"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_tongyun-dev"))
+        .arg("--config")
+        .arg(&config)
+        .args(["start", "shop", "--json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let value: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|err| {
+        panic!(
+            "stdout is not JSON ({err}): {stdout}\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    assert_eq!(value["ok"], false, "{value}");
+    assert_eq!(value["results"][0]["id"], "demo_api");
+    assert_eq!(value["results"][0]["ok"], false);
+    let api_err = value["results"][0]["error"].as_str().unwrap_or("");
+    assert!(
+        api_err.starts_with("端口被占用"),
+        "expected extracted port failure in batch item error, got: {api_err:?}"
+    );
+    assert!(
+        api_err.contains("28080") || api_err.to_ascii_lowercase().contains("already in use"),
+        "{api_err}"
+    );
+    let status_fail = value["results"][0]["status"]["failure"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(status_fail, api_err);
+
+    // Downstream skipped with DEP_START_SKIPPED
+    assert_eq!(value["results"][1]["id"], "demo_web");
+    assert_eq!(value["results"][1]["ok"], false);
+    assert_eq!(value["results"][1]["error"], "依赖服务启动失败，已跳过");
+    assert!(!root.join("logs/demo_web.out").exists());
+
     let _ = fs::remove_dir_all(&root);
 }
 

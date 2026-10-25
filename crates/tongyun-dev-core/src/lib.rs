@@ -1557,12 +1557,22 @@ impl Loaded {
                 Err(err) => {
                     failed += 1;
                     failed_ids.insert(id.clone());
+                    let mut status = self.status(id).ok();
+                    let error_line = self.batch_item_failure_line(id, status.as_ref(), Some(&err));
+                    if let Some(ref mut st) = status {
+                        st.failure = Some(error_line.clone());
+                        if let Some(hint) = failure_line_hint(&error_line) {
+                            if !st.hints.contains(&hint) {
+                                st.hints.push(hint);
+                            }
+                        }
+                    }
                     results.push(BatchItemResult {
                         id: id.clone(),
                         success: false,
                         ok: false,
-                        status: self.status(id).ok(),
-                        error: Some(format!("{err:#}")),
+                        status,
+                        error: Some(error_line),
                     });
                 }
             }
@@ -1652,6 +1662,61 @@ impl Loaded {
             ok: false,
             status: self.status(id).ok(),
             error: Some(DEP_START_SKIPPED.to_string()),
+        }
+    }
+
+    /// 提炼批量/组启动项失败时的一句话原因（对齐 01/04）。
+    /// 优先从项目日志尾部提炼（端口占用、依赖解析、Maven 认证、未捕获异常），
+    /// 其次复用 status.failure 中的非泛化原因，最后回退到具体错误消息。
+    pub fn batch_item_failure_line(
+        &self,
+        id: &str,
+        status: Option<&StatusJson>,
+        err: Option<&anyhow::Error>,
+    ) -> String {
+        // 1. 尝试从项目日志文件尾部提取最新具体错误
+        if let Ok(resolved) = self.resolve(id) {
+            if let Ok(text) = read_tail(&resolved.log_file, 120) {
+                if let Some(line) = extract_start_failure_line(&text) {
+                    return line;
+                }
+            }
+        }
+
+        // 2. 检查 status.failure 中是否已有提炼后的具体原因
+        if let Some(st) = status {
+            if let Some(ref fail) = st.failure {
+                if !fail.is_empty() && !failure_allows_log_line(fail) {
+                    return fail.clone();
+                }
+            }
+        }
+
+        // 3. 检查 err 错误链（若包含特征日志行或具体业务失败）
+        if let Some(e) = err {
+            let msg = format!("{e:#}");
+            if let Some(line) = extract_start_failure_line(&msg) {
+                return line;
+            }
+            if !failure_allows_log_line(&msg) {
+                return msg;
+            }
+        }
+
+        // 4. 回退至 status.failure（即便为泛化原因，如「进程已退出」）
+        if let Some(st) = status {
+            if let Some(ref fail) = st.failure {
+                if !fail.is_empty() {
+                    return fail.clone();
+                }
+            }
+        }
+
+        // 5. 最终兜底
+        if let Some(e) = err {
+            format!("{e:#}")
+        } else {
+            "启动失败".to_string()
         }
     }
 
@@ -3647,7 +3712,7 @@ pub fn diagnose_start_command(root: &Path, start_cmd: &[String]) -> Option<Strin
 }
 
 /// Whether a stored failure is generic enough to replace with a log one-liner.
-fn failure_allows_log_line(msg: &str) -> bool {
+pub fn failure_allows_log_line(msg: &str) -> bool {
     if msg.contains("建议去掉 --port")
         || msg.contains("缺 Java")
         || msg.contains("缺 Node")
@@ -3661,6 +3726,8 @@ fn failure_allows_log_line(msg: &str) -> bool {
         || msg == "启动失败"
         || msg.starts_with("超过 ")
         || msg.starts_with("进程已退出")
+        || msg.starts_with("等待就绪超过")
+        || msg.contains("exited with ")
 }
 
 /// One-line start-failure reason from a log tail.
@@ -9255,7 +9322,7 @@ port = 3001
 [projects.web_app.profiles.mock.env]
 USE_MOCK = "true"
 "#;
-        std::fs::write(&path, toml).unwrap();
+        std::fs::write(&path, &toml).unwrap();
         let mut loaded = load(Some(&path)).unwrap();
 
         let detail = loaded.project_detail("web_app").unwrap();
@@ -9333,7 +9400,7 @@ root = "/tmp"
 port = 3000
 start = ["bash", "-c", "exec pnpm dev"]
 "#;
-        std::fs::write(&path, toml).unwrap();
+        std::fs::write(&path, &toml).unwrap();
         let mut loaded = load(Some(&path)).unwrap();
 
         // Invalid link URL
@@ -9426,7 +9493,7 @@ port = 3001
             dir.display().to_string().replace('\\', "/"),
             dir.display().to_string().replace('\\', "/")
         );
-        std::fs::write(&path, toml).unwrap();
+        std::fs::write(&path, &toml).unwrap();
         let loaded = load(Some(&path)).unwrap();
 
         // 1. Stopped status: port is base port 3000, active_profile is None
@@ -9483,7 +9550,7 @@ start = ["echo", "hi"]
 "#,
             dir.display().to_string().replace('\\', "/")
         );
-        std::fs::write(&path, toml).unwrap();
+        std::fs::write(&path, &toml).unwrap();
 
         // Write legacy PID file in <root>/logs/app.pid
         let legacy_logs = dir.join("logs");
@@ -9531,7 +9598,7 @@ port = 3001
 start = ["echo", "admin"]
 depends_on = ["web"]
 "#;
-        std::fs::write(&path, toml).unwrap();
+        std::fs::write(&path, &toml).unwrap();
         let mut loaded = load(Some(&path)).unwrap();
 
         // 1. Verify sorted_projects_for_start orders api before web, web before admin
@@ -9610,7 +9677,7 @@ root = "/tmp"
 port = 8080
 start = ["echo", "api"]
 "#;
-        std::fs::write(&path, toml).unwrap();
+        std::fs::write(&path, &toml).unwrap();
         let loaded = load(Some(&path)).unwrap();
         assert_eq!(
             loaded.projects_in_group("shop"),
@@ -9648,7 +9715,7 @@ root = "/tmp"
 port = 8080
 start = ["echo", "api"]
 "#;
-        std::fs::write(&path, toml).unwrap();
+        std::fs::write(&path, &toml).unwrap();
         let loaded = load(Some(&path)).unwrap();
         let order = loaded.sorted_projects_for_start(&["alpha_web", "zeta_api"]);
         assert_eq!(
@@ -9720,7 +9787,7 @@ log_dir = "{root}/logs"
 start = ["echo", "hi"]
 "#
         );
-        std::fs::write(&path, toml).unwrap();
+        std::fs::write(&path, &toml).unwrap();
         let loaded = load(Some(&path)).unwrap();
         let pid_file = dir.join("logs/demo_api.pid");
         write_start_marker(
@@ -9912,7 +9979,7 @@ start = ["echo", "disabled"]
             dir.display().to_string().replace('\\', "/"),
             dir.display().to_string().replace('\\', "/")
         );
-        std::fs::write(&path, toml).unwrap();
+        std::fs::write(&path, &toml).unwrap();
         let loaded = load(Some(&path)).unwrap();
 
         // 1. Batch start detached for group "demo": only enabled projects (api, web) run
@@ -9948,7 +10015,7 @@ members = ["demo_api", "demo_web", "demo_ui"]
 name = "Demo API"
 group = "shop"
 root = "{root}"
-port = 8080
+port = 28080
 log_dir = "{root}/logs"
 start = ["{root}/missing-api.sh"]
 
@@ -9956,7 +10023,7 @@ start = ["{root}/missing-api.sh"]
 name = "Demo Web"
 group = "shop"
 root = "{root}"
-port = 5173
+port = 25173
 log_dir = "{root}/logs"
 start = ["{root}/missing-web.sh"]
 depends_on = ["demo_api"]
@@ -9965,13 +10032,13 @@ depends_on = ["demo_api"]
 name = "Demo UI"
 group = "shop"
 root = "{root}"
-port = 5174
+port = 25174
 log_dir = "{root}/logs"
 start = ["{root}/missing-ui.sh"]
 depends_on = ["demo_web"]
 "#
         );
-        std::fs::write(&path, toml).unwrap();
+        std::fs::write(&path, &toml).unwrap();
         let loaded = load(Some(&path)).unwrap();
 
         let batch = loaded.start_batch(Some("shop"), None, None).unwrap();
@@ -10007,6 +10074,101 @@ depends_on = ["demo_web"]
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Task #7519563123138628849 / docs/tasks/01 & 04:
+    /// 组启动失败时 batch item 写清一句话 error，下游按 depends_on 跳过。
+    #[test]
+    fn batch_start_item_error_extracts_failure_line_and_skips_downstream() {
+        let dir = std::env::temp_dir().join(format!(
+            "tongyun_dev_batch_fail_line_{}_{}",
+            std::process::id(),
+            current_time_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(dir.join("logs"));
+        let root = dir.display().to_string().replace('\\', "/");
+        let path = dir.join("projects.toml");
+        let toml = format!(
+            r#"
+[group.shop]
+label = "Shop"
+members = ["demo_api", "demo_web"]
+
+[projects.demo_api]
+name = "Demo API"
+group = "shop"
+root = "{root}"
+port = 28080
+log_dir = "{root}/logs"
+start_timeout_secs = 5
+start = ["sh", "-c", "echo 'Web server failed to start. Port 28080 was already in use.' >> '{root}/logs/demo_api.out'; exit 1"]
+
+[projects.demo_web]
+name = "Demo Web"
+group = "shop"
+root = "{root}"
+port = 25173
+log_dir = "{root}/logs"
+depends_on = ["demo_api"]
+start = ["sh", "-c", "echo 'web ran' >> '{root}/logs/demo_web.out'"]
+"#
+        );
+        std::fs::write(&path, &toml).unwrap();
+        let loaded = load(Some(&path)).unwrap();
+
+        let batch = loaded
+            .start_batch(Some("shop"), None, Some(Duration::from_secs(4)))
+            .unwrap();
+        assert_eq!(batch.total, 2);
+        assert_eq!(batch.results[0].id, "demo_api");
+        assert!(!batch.results[0].ok);
+        let api_err = batch.results[0].error.as_deref().unwrap();
+        assert!(
+            api_err.starts_with("端口被占用"),
+            "expected extracted failure one-liner, got {api_err:?}"
+        );
+        assert!(
+            api_err.contains("28080") || api_err.to_ascii_lowercase().contains("already in use"),
+            "{api_err}"
+        );
+        assert_eq!(
+            batch.results[0]
+                .status
+                .as_ref()
+                .and_then(|s| s.failure.as_deref()),
+            Some(api_err)
+        );
+
+        // Downstream demo_web skipped with DEP_START_SKIPPED
+        assert_eq!(batch.results[1].id, "demo_web");
+        assert!(!batch.results[1].ok);
+        assert_eq!(batch.results[1].error.as_deref(), Some(DEP_START_SKIPPED));
+        assert!(!dir.join("logs/demo_web.out").exists());
+
+        // Test with dependency resolution failure in detached mode
+        let toml_deps = toml.replace(
+            "echo 'Web server failed to start. Port 28080 was already in use.'",
+            "echo '[ERROR] Could not resolve dependencies for project demo_api:jar:1.0'",
+        );
+        std::fs::write(&path, toml_deps).unwrap();
+        let _ = std::fs::remove_file(dir.join("logs/demo_api.out"));
+        let loaded2 = load(Some(&path)).unwrap();
+        let detached = loaded2.start_batch_detached(Some("shop"), None).unwrap();
+        assert_eq!(detached.results[0].id, "demo_api");
+        assert!(!detached.results[0].ok);
+        let detached_err = detached.results[0].error.as_deref().unwrap();
+        assert!(
+            detached_err.starts_with("依赖解析失败"),
+            "expected deps failure line, got {detached_err:?}"
+        );
+        assert_eq!(detached.results[1].id, "demo_web");
+        assert_eq!(
+            detached.results[1].error.as_deref(),
+            Some(DEP_START_SKIPPED)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn profile_start_commands_use_that_profiles_start_and_port() {
         let dir = std::env::temp_dir().join(format!(
@@ -10038,7 +10200,7 @@ start = "pnpm dev:mock"
 port = 5174
 "#
         );
-        std::fs::write(&path, toml).unwrap();
+        std::fs::write(&path, &toml).unwrap();
         let loaded = load(Some(&path)).unwrap();
         let row = loaded
             .list()

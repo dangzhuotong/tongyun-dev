@@ -100,6 +100,9 @@ pub struct Candidate {
     /// Suggested Spring profiles, one per existing `application-<name>.*` file.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, ProfileConfig>,
+    /// Default profile when profiles exist and dev is present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_profile: Option<String>,
     /// Extra env for the project itself (scanner leaves this empty unless a file says so).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
@@ -139,6 +142,7 @@ impl Candidate {
             },
             port_mode: self.port_mode.clone(),
             env: self.env.clone(),
+            default_profile: self.default_profile.clone(),
             profiles: self.profiles.clone(),
             ..Default::default()
         }
@@ -292,6 +296,7 @@ fn base_candidate(dir: &Path, home: Option<&Path>, kind: &str, label: &str) -> C
         existing_id: None,
         port_mode: None,
         profiles: BTreeMap::new(),
+        default_profile: None,
         env: BTreeMap::new(),
         maven_guide: None,
     }
@@ -533,11 +538,32 @@ pub fn suggest_spring_profiles(dir: &Path) -> BTreeMap<String, ProfileConfig> {
         };
         let mut env = BTreeMap::new();
         env.insert("SPRING_PROFILES_ACTIVE".into(), profile.clone());
+        let start = if dir.join("mvnw").is_file() {
+            Some(format!(
+                "./mvnw spring-boot:run -Dspring-boot.run.profiles={profile}"
+            ))
+        } else if dir.join("gradlew").is_file() {
+            Some(format!(
+                "./gradlew bootRun --args='--spring.profiles.active={profile}'"
+            ))
+        } else if dir.join("build.gradle").is_file() || dir.join("build.gradle.kts").is_file() {
+            Some(format!(
+                "gradle bootRun --args='--spring.profiles.active={profile}'"
+            ))
+        } else if dir.join("pom.xml").is_file() {
+            Some(format!(
+                "mvn spring-boot:run -Dspring-boot.run.profiles={profile}"
+            ))
+        } else {
+            Some(format!(
+                "mvn spring-boot:run -Dspring-boot.run.profiles={profile}"
+            ))
+        };
         out.insert(
             profile.clone(),
             ProfileConfig {
                 label: profile,
-                start: None,
+                start,
                 port,
                 env,
             },
@@ -547,15 +573,33 @@ pub fn suggest_spring_profiles(dir: &Path) -> BTreeMap<String, ProfileConfig> {
 }
 
 fn attach_spring_profiles(c: &mut Candidate, dir: &Path) {
-    let profiles = suggest_spring_profiles(dir);
+    let mut profiles = suggest_spring_profiles(dir);
     if profiles.is_empty() {
         return;
+    }
+    for (name, prof) in &mut profiles {
+        if c.start.contains("spring-boot:run") {
+            prof.start = Some(format!("{} -Dspring-boot.run.profiles={}", c.start, name));
+        } else if c.start.contains("bootRun") {
+            prof.start = Some(format!(
+                "{} --args='--spring.profiles.active={}'",
+                c.start, name
+            ));
+        } else if !c.kind.starts_with("spring-boot") {
+            prof.start = None;
+        }
+    }
+    if profiles.contains_key("dev") {
+        c.default_profile = Some("dev".into());
     }
     let names: Vec<&str> = profiles.keys().map(String::as_str).collect();
     c.why.push(format!(
         "环境预设来自已有的 application-*.yml / .yaml / .properties：{}",
         names.join("、")
     ));
+    if c.default_profile.is_some() {
+        c.why.push("默认环境预设设为 dev".into());
+    }
     c.profiles = profiles;
 }
 
@@ -1418,10 +1462,171 @@ mod tests {
         assert!(c.profiles.contains_key("dev"));
         assert!(!c.profiles.contains_key("test"));
         assert_eq!(c.profiles["dev"].port, Some(8088));
+        assert_eq!(
+            c.profiles["dev"].start.as_deref(),
+            Some("mvn spring-boot:run -Dspring-boot.run.profiles=dev")
+        );
+        assert_eq!(c.default_profile.as_deref(), Some("dev"));
+        let req = c.to_new_project();
+        assert_eq!(req.default_profile.as_deref(), Some("dev"));
+        assert_eq!(
+            req.profiles["dev"].start.as_deref(),
+            Some("mvn spring-boot:run -Dspring-boot.run.profiles=dev")
+        );
         assert!(c
             .why
             .iter()
             .any(|w| w.contains("application-*.yml") && w.contains("dev")));
+    }
+
+    #[test]
+    fn spring_boot_profile_and_env_fixture_matrix() {
+        let t = Tmp::new("boot_matrix");
+
+        // 1. Fixture: has application-dev.yml -> profiles preset + default_profile = dev + start command with -D
+        t.write("app_dev/pom.xml", BOOT_POM);
+        t.write(
+            "app_dev/src/main/resources/application.yml",
+            "server:\n  port: 8080\n",
+        );
+        t.write(
+            "app_dev/src/main/resources/application-dev.yml",
+            "server:\n  port: 8081\n",
+        );
+        t.write(
+            "app_dev/src/main/resources/application-prod.yml",
+            "server:\n  port: 9090\n",
+        );
+
+        // 2. Fixture: no profile at all -> profiles empty, default_profile = None, bare start
+        t.write("app_noprof/pom.xml", BOOT_POM);
+
+        // 3. Fixture: only application.yml -> profiles empty, default_profile = None, bare start, port read
+        t.write("app_only_app/pom.xml", BOOT_POM);
+        t.write(
+            "app_only_app/src/main/resources/application.yml",
+            "server:\n  port: 8085\n",
+        );
+
+        // 4. Fixture: mvnw wrapper with application-dev.properties
+        t.write("app_mvnw/pom.xml", BOOT_POM);
+        t.write("app_mvnw/mvnw", "");
+        t.write(
+            "app_mvnw/src/main/resources/application-dev.properties",
+            "server.port=8086\n",
+        );
+
+        // 5. Fixture: profiles present but without dev -> default_profile = None
+        t.write("app_nodev/pom.xml", BOOT_POM);
+        t.write(
+            "app_nodev/src/main/resources/application-test.yml",
+            "server:\n  port: 8087\n",
+        );
+
+        let cs = run(&t);
+
+        // Verify 1: has application-dev.yml
+        let c_dev = cs
+            .iter()
+            .find(|c| c.root.ends_with("/app_dev"))
+            .expect("app_dev candidate");
+        assert_eq!(c_dev.port, 8080);
+        assert_eq!(c_dev.default_profile.as_deref(), Some("dev"));
+        assert_eq!(c_dev.profiles.len(), 2);
+        assert_eq!(
+            c_dev.profiles["dev"].start.as_deref(),
+            Some("mvn spring-boot:run -Dspring-boot.run.profiles=dev")
+        );
+        assert_eq!(c_dev.profiles["dev"].port, Some(8081));
+        assert_eq!(
+            c_dev.profiles["prod"].start.as_deref(),
+            Some("mvn spring-boot:run -Dspring-boot.run.profiles=prod")
+        );
+        assert_eq!(c_dev.profiles["prod"].port, Some(9090));
+        let req_dev = c_dev.to_new_project();
+        assert_eq!(req_dev.default_profile.as_deref(), Some("dev"));
+        assert_eq!(
+            req_dev.profiles["dev"].start.as_deref(),
+            Some("mvn spring-boot:run -Dspring-boot.run.profiles=dev")
+        );
+        let (_, proj_dev) = req_dev
+            .into_project()
+            .expect("add request validation succeeds");
+        assert_eq!(proj_dev.default_profile.as_deref(), Some("dev"));
+
+        // Verify 2: no profile
+        let c_noprof = cs
+            .iter()
+            .find(|c| c.root.ends_with("/app_noprof"))
+            .expect("app_noprof candidate");
+        assert_eq!(c_noprof.start, "mvn spring-boot:run");
+        assert_eq!(c_noprof.default_profile, None);
+        assert!(c_noprof.profiles.is_empty());
+        let req_noprof = c_noprof.to_new_project();
+        assert_eq!(req_noprof.default_profile, None);
+        assert!(req_noprof.profiles.is_empty());
+
+        // Verify 3: only application.yml
+        let c_only = cs
+            .iter()
+            .find(|c| c.root.ends_with("/app_only_app"))
+            .expect("app_only_app candidate");
+        assert_eq!(c_only.start, "mvn spring-boot:run");
+        assert_eq!(c_only.port, 8085);
+        assert_eq!(c_only.default_profile, None);
+        assert!(c_only.profiles.is_empty());
+        let req_only = c_only.to_new_project();
+        assert_eq!(req_only.default_profile, None);
+        assert!(req_only.profiles.is_empty());
+
+        // Verify 4: mvnw wrapper with dev profile
+        let c_mvnw = cs
+            .iter()
+            .find(|c| c.root.ends_with("/app_mvnw"))
+            .expect("app_mvnw candidate");
+        assert_eq!(c_mvnw.start, "./mvnw spring-boot:run");
+        assert_eq!(c_mvnw.default_profile.as_deref(), Some("dev"));
+        assert_eq!(
+            c_mvnw.profiles["dev"].start.as_deref(),
+            Some("./mvnw spring-boot:run -Dspring-boot.run.profiles=dev")
+        );
+        assert_eq!(c_mvnw.profiles["dev"].port, Some(8086));
+
+        // Verify 5: profiles without dev
+        let c_nodev = cs
+            .iter()
+            .find(|c| c.root.ends_with("/app_nodev"))
+            .expect("app_nodev candidate");
+        assert_eq!(c_nodev.profiles.len(), 1);
+        assert_eq!(c_nodev.default_profile, None);
+        assert_eq!(
+            c_nodev.profiles["test"].start.as_deref(),
+            Some("mvn spring-boot:run -Dspring-boot.run.profiles=test")
+        );
+
+        // Verify 6: legacy config without profiles remains readable and has identical behavior
+        let legacy_toml = r#"
+[projects.legacy_app]
+name = "Legacy App"
+root = "/tmp"
+port = 8080
+start = ["bash", "-c", "exec mvn spring-boot:run"]
+"#;
+        let parsed_cfg = crate::parse_config(legacy_toml).expect("legacy config parses cleanly");
+        let legacy_proj = &parsed_cfg.projects["legacy_app"];
+        assert_eq!(legacy_proj.default_profile, None);
+        assert!(legacy_proj.profiles.is_empty());
+        let resolved = crate::resolve_project(
+            "legacy_app",
+            legacy_proj,
+            Some(std::path::Path::new("/home/demo")),
+        )
+        .expect("legacy project resolves without error");
+        assert_eq!(resolved.port, 8080);
+        assert_eq!(
+            resolved.active_start(),
+            vec!["bash", "-c", "exec mvn spring-boot:run"]
+        );
     }
 
     #[test]

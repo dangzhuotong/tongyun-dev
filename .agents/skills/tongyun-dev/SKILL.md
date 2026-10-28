@@ -72,7 +72,7 @@ Unix 上 `pty = true` 的后台进程不走系统 `script`。macOS 与 Linux 同
 
 ## 4. HTTP 控制台（:9099）
 
-本机 `tongyun-dev ui` 后：
+本机启动桌面 App（开 App 即带 Agent HTTP 服务）或执行 `tongyun-dev ui` 后：
 
 | 方法 | 路径 | 作用 |
 | --- | --- | --- |

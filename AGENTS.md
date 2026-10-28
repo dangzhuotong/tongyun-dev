@@ -5,7 +5,8 @@
 ## 项目与修改入口
 
 - 用途：本机开发服务登记 / 扫描 / 启停 / 状态 / 日志；服务 AI 与人。范围见 [docs/prd.md](docs/prd.md)。
-- 技术栈：Rust `tongyun-dev-core` 放全部项目逻辑（启停、状态、日志、扫描、add/remove/edit、打开页面/目录）；CLI、网页控制台（`tongyun-dev ui`，:9099，`crates/tongyun-dev-cli/src/server.rs`）和 Tauri 2 + React 桌面壳都只调用它，不要在入口层重复实现。
+- 技术栈：Rust `tongyun-dev-core` 放全部项目逻辑（启停、状态、日志、扫描、add/remove/edit、打开页面/目录）；CLI、网页控制台（`tongyun-dev ui`，:9099，`crates/tongyun-dev-cli/src/server.rs`）和 Tauri 2 + React 桌面壳都只调用它，不要在入口层重复实现。桌面 App 启动时会自动在后台绑定并拉起 Agent HTTP 服务（默认 `127.0.0.1:9099`，若占用则顺延同 server.rs；退出 App 时自动停止无残留），提供与 `tongyun-dev ui` 完全同等的 Agent API（至少 list/status/start/stop）。因此开着桌面 App 即自带 Agent HTTP，无需另起 CLI。
+- 桌面 App 与 Agent HTTP：启动桌面 App 时自动拉起后台 Agent HTTP 服务（默认 127.0.0.1:9099，端口占用顺延至 9100..=9119），提供与 `tongyun-dev ui` 相同的完整 Agent HTTP API（list/status/start/stop/restart/logs 等）。开 App 即带服务，无需另起 CLI；App 退出时服务自动停止无残留。
 - 这是要开源的通用工具：**仓库里不许出现任何真实的公司 / 个人项目名、本机路径、内网地址或端口表**。用户的项目清单只在 `~/.config/tongyun-dev/projects.toml`。示例、测试、文档一律用虚构名字（`demo_api`、`acme-web`、`~/code/demo/...`）。
 - 密钥、数据库密码、Token：**不进仓、不打印**。
 

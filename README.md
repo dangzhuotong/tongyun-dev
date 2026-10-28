@@ -10,7 +10,9 @@
 
 | 入口 | 怎么开 | 适合 |
 | --- | --- | --- |
-| 桌面 App | `apps/desktop`（Tauri 2），见下文「桌面 App」 | 常驻窗口，跟日志 |
+| 桌面 App | `apps/desktop`（Tauri 2），启动即带 Agent HTTP（:9099） | 常驻窗口，跟日志，开 App 即带与 tongyun-dev ui 同等 Agent HTTP API（占用顺延，退出关掉），无需另起 CLI |
+
+> **桌面 App 自带 Agent HTTP**：启动桌面 App 时自动绑定并运行 Agent HTTP 服务（默认 `http://127.0.0.1:9099`，若被占用则顺延尝试后续端口，底部状态栏与「关于」窗口可见实际端口；App 退出时服务自动关闭无残留）。Agent 可直接调用其 HTTP API 进行项目管理，无需额外执行 CLI 另起服务。
 | 网页控制台 | `tongyun-dev`（无参数）或 `tongyun-dev ui`，默认 `http://127.0.0.1:9099` | 浏览器里点 |
 | CLI | `tongyun-dev <命令>`，`--json` 给 Agent | 终端、脚本、AI |
 
@@ -110,6 +112,8 @@ tongyun-dev ui [--port 9099] [--no-open]
 **从旧版升级**：默认日志目录已经改成 `~/.tongyun-dev/logs`。升级后第一次打开，App 可能认不出用旧位置启动、还在跑的进程（显示为未运行）。手动停掉旧进程再从 App 启动即可；想沿用旧目录，就在对应项目里设 `log_dir`。
 
 ## 桌面 App
+
+启动桌面 App 时会自动绑定 `127.0.0.1:9099`（若被占用则按规则自动顺延至 9100..=9119），在后台提供与 `tongyun-dev ui` 相同的完整 Agent HTTP API（`list`/`status`/`start`/`stop`/`logs` 等）。开 App 即带服务，无需另起 CLI 进程；状态栏右侧与“关于”窗口均可直观查看当前绑定的实际端口。App 退出时服务自动关闭，无后台进程残留。
 
 需要 Node.js 20+；macOS 还要 Xcode Command Line Tools；桌面壳需要 Rust 1.88+（Tauri 依赖要求）。
 

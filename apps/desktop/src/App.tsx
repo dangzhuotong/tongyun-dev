@@ -1,7 +1,7 @@
 import { invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isDetailPreview, previewInvoke } from "./previewData";
-import type { BatchOutput, ConfigInfo, LogTail, ProjectDetail, ProjectList, Status } from "./types";
+import type { AgentHttpInfo, BatchOutput, ConfigInfo, LogTail, ProjectDetail, ProjectList, Status } from "./types";
 import { Toolbar } from "./Toolbar";
 import { StatusBar } from "./StatusBar";
 import { AboutModal } from "./AboutModal";
@@ -114,6 +114,7 @@ export function App() {
   });
   const [aboutOpen, setAboutOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [agentPort, setAgentPort] = useState<number>(9099);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [runtimeVersion, setRuntimeVersion] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -342,6 +343,11 @@ export function App() {
 
   useEffect(() => {
     loadProjects();
+    invoke<AgentHttpInfo>("agent_http_info")
+      .then((info) => {
+        if (info?.port) setAgentPort(info.port);
+      })
+      .catch(() => {});
   }, [loadProjects]);
 
   const refreshAllStatuses = useCallback(async () => {
@@ -1551,6 +1557,7 @@ export function App() {
 
       <StatusBar
         selectedProject={current ?? undefined}
+        agentPort={agentPort}
         status={status}
         totalProjects={projectList.length}
         runningCount={runningCount}
@@ -1564,6 +1571,7 @@ export function App() {
 
       <AboutModal
         isOpen={aboutOpen}
+        agentPort={agentPort}
         onClose={() => setAboutOpen(false)}
         version={displayVersion}
         checkingUpdate={checkingUpdate}

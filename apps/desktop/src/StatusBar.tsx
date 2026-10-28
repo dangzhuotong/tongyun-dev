@@ -13,6 +13,7 @@ export interface StatusBarProps {
   runningCount: number;
   isRefreshing?: boolean;
   configPath?: string;
+  agentPort?: number;
   onOpenConfigFile: () => void;
   onOpenTerminal?: () => void;
   onOpenShortcuts: () => void;
@@ -26,6 +27,7 @@ export function StatusBar({
   runningCount,
   isRefreshing = false,
   configPath,
+  agentPort = 9099,
   onOpenConfigFile,
   onOpenTerminal,
   onOpenShortcuts,
@@ -116,8 +118,11 @@ export function StatusBar({
         )}
 
         {/* Web console hint */}
-        <span className="hidden sm:inline font-mono text-[10px] text-[var(--color-text-subtle)]" title="网页控制台服务地址">
-          :9099
+        <span
+          className="hidden sm:inline font-mono text-[10px] text-[var(--color-text-subtle)]"
+          title={`网页控制台服务地址: http://127.0.0.1:${agentPort}`}
+        >
+          :{agentPort}
         </span>
 
         {/* Terminal quick launcher */}

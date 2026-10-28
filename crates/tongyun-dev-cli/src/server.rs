@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -19,10 +20,38 @@ const MAX_BODY: usize = 64 * 1024;
 const LOG_LINES: usize = 120;
 
 struct AppState {
-    config_path: PathBuf,
+    config_path: Option<PathBuf>,
     port: u16,
     /// Serializes config writes (add / remove).
     write_lock: Mutex<()>,
+}
+
+/// Handle for a running background server. Dropping it or calling `stop()` shuts down the listener.
+pub struct ServerHandle {
+    port: u16,
+    shutdown: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl ServerHandle {
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn stop(&mut self) {
+        if !self.shutdown.swap(true, Ordering::SeqCst) {
+            let _ = TcpStream::connect(("127.0.0.1", self.port));
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+}
+
+impl Drop for ServerHandle {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 /// Bind 127.0.0.1:`initial_port` (or the next free port up to +20) and serve forever.
@@ -50,7 +79,7 @@ pub fn start_ui_server(config_path: PathBuf, initial_port: u16, auto_open: bool)
     serve(listener, config_path, port)
 }
 
-fn bind_from(initial_port: u16) -> Result<(TcpListener, u16)> {
+pub fn bind_from(initial_port: u16) -> Result<(TcpListener, u16)> {
     let last = initial_port.saturating_add(20);
     let mut port = initial_port;
     loop {
@@ -68,22 +97,62 @@ fn bind_from(initial_port: u16) -> Result<(TcpListener, u16)> {
     }
 }
 
+/// Start background Agent HTTP / UI server.
+pub fn start_background_server(
+    config_path: Option<PathBuf>,
+    initial_port: u16,
+) -> Result<ServerHandle> {
+    let (listener, port) = bind_from(initial_port)?;
+    eprintln!("tongyun-dev Agent HTTP 服务已启动: http://127.0.0.1:{port}");
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = Arc::clone(&shutdown);
+    let thread = thread::spawn(move || {
+        let _ = serve_with_shutdown(listener, config_path, port, Some(shutdown_clone));
+    });
+    Ok(ServerHandle {
+        port,
+        shutdown,
+        thread: Some(thread),
+    })
+}
+
 /// Serve on an already-bound listener (used by tests with an ephemeral port).
 pub fn serve(listener: TcpListener, config_path: PathBuf, port: u16) -> Result<()> {
+    serve_with_shutdown(listener, Some(config_path), port, None)
+}
+
+pub fn serve_with_shutdown(
+    listener: TcpListener,
+    config_path: Option<PathBuf>,
+    port: u16,
+    shutdown: Option<Arc<AtomicBool>>,
+) -> Result<()> {
+    let shutdown_flag = shutdown.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
     let state = Arc::new(AppState {
         config_path,
         port,
         write_lock: Mutex::new(()),
     });
     for stream in listener.incoming() {
+        if shutdown_flag.load(Ordering::SeqCst) {
+            break;
+        }
         match stream {
             Ok(stream) => {
+                if shutdown_flag.load(Ordering::SeqCst) {
+                    break;
+                }
                 let state = Arc::clone(&state);
                 thread::spawn(move || {
                     let _ = handle_connection(stream, &state);
                 });
             }
-            Err(e) => eprintln!("UI server connection error: {e}"),
+            Err(e) => {
+                if shutdown_flag.load(Ordering::SeqCst) {
+                    break;
+                }
+                eprintln!("UI server connection error: {e}");
+            }
         }
     }
     Ok(())
@@ -247,7 +316,7 @@ fn err_json(code: u16, e: impl std::fmt::Display) -> (u16, &'static str, Vec<u8>
 }
 
 fn load(state: &AppState) -> Result<Loaded> {
-    tongyun_dev_core::load(Some(&state.config_path))
+    tongyun_dev_core::load(state.config_path.as_deref())
 }
 
 /// Status plus list fields (enabled / reason / node / java) for every project.
@@ -2298,6 +2367,37 @@ const UI_HTML: &str = r##"<!DOCTYPE html>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_start_background_server_and_stop() {
+        let dir = std::env::temp_dir().join(format!("ty_bg_srv_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cfg = dir.join("projects.toml");
+        std::fs::write(&cfg, "[projects]\n").unwrap();
+
+        let mut handle = start_background_server(Some(cfg), 0).expect("should start");
+        let port = handle.port();
+        assert!(port > 0);
+
+        // Make HTTP request to verify server is running
+        let mut stream =
+            TcpStream::connect(("127.0.0.1", port)).expect("connect to background server");
+        let req = format!("GET /api/projects HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+        stream.write_all(req.as_bytes()).unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).unwrap();
+        let resp = String::from_utf8_lossy(&buf);
+        assert!(resp.starts_with("HTTP/1.1 200"), "response was: {resp}");
+
+        // Stop server
+        handle.stop();
+
+        // Verify listener is stopped and connections fail
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn home_html_contains_starting_and_port_open_branches() {

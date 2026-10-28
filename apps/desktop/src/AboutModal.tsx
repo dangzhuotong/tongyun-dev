@@ -7,6 +7,7 @@ export interface AboutModalProps {
   onClose: () => void;
   version?: string;
   configPath?: string;
+  agentPort?: number;
   checkingUpdate?: boolean;
   onCheckUpdate?: () => void;
 }
@@ -16,6 +17,7 @@ export function AboutModal({
   onClose,
   version = "0.2.1",
   configPath,
+  agentPort = 9099,
   checkingUpdate = false,
   onCheckUpdate,
 }: AboutModalProps) {
@@ -80,7 +82,7 @@ export function AboutModal({
             </div>
             <div className="flex justify-between items-center">
               <span className="text-[var(--color-text-muted)]">网页控制台</span>
-              <span className="font-mono text-[var(--color-text)]">http://127.0.0.1:9099</span>
+              <span className="font-mono text-[var(--color-text)]">http://127.0.0.1:{agentPort}</span>
             </div>
             {configPath && (
               <div className="flex flex-col gap-0.5 pt-1 border-t border-[var(--color-border)]/50">

@@ -1908,3 +1908,41 @@ start = ["echo", "web"]
         "expected cycle error in web API, got: {web_err}"
     );
 }
+
+#[test]
+fn test_start_background_server_and_port_fallback() {
+    let dir = temp_dir("bg_srv");
+    let cfg = write_config(&dir, free_port());
+    let initial_port = free_service_port(&[]);
+
+    // 1. Occupy initial_port with a dummy listener
+    let blocker = TcpListener::bind(("127.0.0.1", initial_port)).unwrap();
+
+    // 2. Start background server starting from initial_port
+    let mut server =
+        tongyun_dev_cli::server::start_background_server(Some(cfg.clone()), initial_port).unwrap();
+
+    // The bound port must be > initial_port (顺延)
+    assert_eq!(server.port(), initial_port + 1);
+
+    // 3. Verify server responds to HTTP requests
+    let resp = http(
+        server.port(),
+        &format!(
+            "GET /api/projects HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+            server.port()
+        ),
+    );
+    assert!(resp.starts_with("HTTP/1.1 200"), "response: {resp}");
+    assert!(resp.contains("\"id\":\"mock\""), "response: {resp}");
+
+    // 4. Stop the server and verify port is freed
+    server.stop();
+    drop(blocker);
+
+    // Port should be closed and no longer accept connections
+    thread::sleep(Duration::from_millis(50));
+    assert!(TcpStream::connect(("127.0.0.1", initial_port + 1)).is_err());
+
+    let _ = fs::remove_dir_all(&dir);
+}

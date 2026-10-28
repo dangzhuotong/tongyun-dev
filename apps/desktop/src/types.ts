@@ -275,3 +275,8 @@ export type BatchOutput = {
   items?: BatchItemResult[];
 };
 
+export type AgentHttpInfo = {
+  port: number;
+  url: string;
+};
+

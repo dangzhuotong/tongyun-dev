@@ -4618,6 +4618,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "tongyun-dev-cli",
  "tongyun-dev-core",
 ]
 

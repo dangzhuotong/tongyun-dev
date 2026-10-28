@@ -1,9 +1,29 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::Mutex;
+use tongyun_dev_cli::server::{ServerHandle, DEFAULT_UI_PORT};
 use tongyun_dev_core::{
     BatchOutput, ImportReport, LogTail, NewProject, ProjectDetail, ProjectEdit, ProjectList,
     ProjectRow, ScanReport, StatusJson,
 };
+
+static SERVER_HANDLE: Mutex<Option<ServerHandle>> = Mutex::new(None);
+static AGENT_PORT: AtomicU16 = AtomicU16::new(DEFAULT_UI_PORT);
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct AgentHttpInfo {
+    pub port: u16,
+    pub url: String,
+}
+
+#[tauri::command]
+fn agent_http_info() -> AgentHttpInfo {
+    let port = AGENT_PORT.load(Ordering::Relaxed);
+    AgentHttpInfo {
+        port,
+        url: format!("http://127.0.0.1:{port}"),
+    }
+}
 
 fn report(err: impl std::fmt::Display) -> String {
     format!("{err:#}")
@@ -436,6 +456,20 @@ pub fn run() {
                 &tongyun_dev_core::config_dir(None),
             );
             schedule_front(app.handle());
+
+            // Start Agent HTTP server on 127.0.0.1:9099 (or next free port up to +20).
+            match tongyun_dev_cli::server::start_background_server(None, DEFAULT_UI_PORT) {
+                Ok(srv) => {
+                    AGENT_PORT.store(srv.port(), Ordering::Relaxed);
+                    if let Ok(mut lock) = SERVER_HANDLE.lock() {
+                        *lock = Some(srv);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Failed to start Agent HTTP server: {err:#}");
+                }
+            }
+
             Ok(())
         })
         .on_window_event(|_window, event| {
@@ -444,6 +478,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            agent_http_info,
             list_projects,
             project_status,
             all_status,
@@ -490,6 +525,13 @@ pub fn run() {
                     schedule_front(app);
                 }
             }
+            tauri::RunEvent::Exit => {
+                if let Ok(mut lock) = SERVER_HANDLE.lock() {
+                    if let Some(mut srv) = lock.take() {
+                        srv.stop();
+                    }
+                }
+            }
             _ => {}
         });
 }
@@ -497,6 +539,13 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_agent_http_info() {
+        let info = agent_http_info();
+        assert!(info.port >= DEFAULT_UI_PORT);
+        assert_eq!(info.url, format!("http://127.0.0.1:{}", info.port));
+    }
 
     #[test]
     fn test_report_formatting() {

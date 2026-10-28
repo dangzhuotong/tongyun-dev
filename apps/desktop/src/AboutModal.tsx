@@ -7,7 +7,8 @@ export interface AboutModalProps {
   onClose: () => void;
   version?: string;
   configPath?: string;
-  agentPort?: number;
+  agentPort?: number | null;
+  agentRunning?: boolean;
   checkingUpdate?: boolean;
   onCheckUpdate?: () => void;
 }
@@ -17,10 +18,13 @@ export function AboutModal({
   onClose,
   version = "0.2.1",
   configPath,
-  agentPort = 9099,
+  agentPort,
+  agentRunning,
   checkingUpdate = false,
   onCheckUpdate,
 }: AboutModalProps) {
+  const isAgentActive =
+    agentRunning !== undefined ? agentRunning && agentPort != null : agentPort != null;
   useEffect(() => {
     if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -82,7 +86,11 @@ export function AboutModal({
             </div>
             <div className="flex justify-between items-center">
               <span className="text-[var(--color-text-muted)]">网页控制台</span>
-              <span className="font-mono text-[var(--color-text)]">http://127.0.0.1:{agentPort}</span>
+              {isAgentActive ? (
+                <span className="font-mono text-[var(--color-text)]">http://127.0.0.1:{agentPort}</span>
+              ) : (
+                <span className="text-[var(--color-text-subtle)]">未运行</span>
+              )}
             </div>
             {configPath && (
               <div className="flex flex-col gap-0.5 pt-1 border-t border-[var(--color-border)]/50">

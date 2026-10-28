@@ -13,7 +13,8 @@ export interface StatusBarProps {
   runningCount: number;
   isRefreshing?: boolean;
   configPath?: string;
-  agentPort?: number;
+  agentPort?: number | null;
+  agentRunning?: boolean;
   onOpenConfigFile: () => void;
   onOpenTerminal?: () => void;
   onOpenShortcuts: () => void;
@@ -27,12 +28,15 @@ export function StatusBar({
   runningCount,
   isRefreshing = false,
   configPath,
-  agentPort = 9099,
+  agentPort,
+  agentRunning,
   onOpenConfigFile,
   onOpenTerminal,
   onOpenShortcuts,
   onOpenAbout,
 }: StatusBarProps) {
+  const isAgentActive =
+    agentRunning !== undefined ? agentRunning && agentPort != null : agentPort != null;
   const isRunning =
     status?.running ||
     status?.state === "ready" ||
@@ -118,12 +122,21 @@ export function StatusBar({
         )}
 
         {/* Web console hint */}
-        <span
-          className="hidden sm:inline font-mono text-[10px] text-[var(--color-text-subtle)]"
-          title={`网页控制台服务地址: http://127.0.0.1:${agentPort}`}
-        >
-          :{agentPort}
-        </span>
+        {isAgentActive ? (
+          <span
+            className="hidden sm:inline font-mono text-[10px] text-[var(--color-text-subtle)]"
+            title={`网页控制台服务地址: http://127.0.0.1:${agentPort}`}
+          >
+            :{agentPort}
+          </span>
+        ) : (
+          <span
+            className="hidden sm:inline font-mono text-[10px] text-[var(--color-text-subtle)]"
+            title="Agent HTTP 服务未运行"
+          >
+            未运行
+          </span>
+        )}
 
         {/* Terminal quick launcher */}
         {onOpenTerminal && selectedProject && (

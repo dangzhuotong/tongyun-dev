@@ -114,7 +114,7 @@ export function App() {
   });
   const [aboutOpen, setAboutOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [agentPort, setAgentPort] = useState<number>(9099);
+  const [agentHttpInfo, setAgentHttpInfo] = useState<AgentHttpInfo | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [runtimeVersion, setRuntimeVersion] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -345,9 +345,11 @@ export function App() {
     loadProjects();
     invoke<AgentHttpInfo>("agent_http_info")
       .then((info) => {
-        if (info?.port) setAgentPort(info.port);
+        setAgentHttpInfo(info);
       })
-      .catch(() => {});
+      .catch(() => {
+        setAgentHttpInfo({ running: false, port: null, url: null });
+      });
   }, [loadProjects]);
 
   const refreshAllStatuses = useCallback(async () => {
@@ -1557,7 +1559,8 @@ export function App() {
 
       <StatusBar
         selectedProject={current ?? undefined}
-        agentPort={agentPort}
+        agentPort={agentHttpInfo?.port}
+        agentRunning={agentHttpInfo?.running}
         status={status}
         totalProjects={projectList.length}
         runningCount={runningCount}
@@ -1571,7 +1574,8 @@ export function App() {
 
       <AboutModal
         isOpen={aboutOpen}
-        agentPort={agentPort}
+        agentPort={agentHttpInfo?.port}
+        agentRunning={agentHttpInfo?.running}
         onClose={() => setAboutOpen(false)}
         version={displayVersion}
         checkingUpdate={checkingUpdate}

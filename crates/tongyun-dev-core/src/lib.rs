@@ -10087,6 +10087,23 @@ depends_on = ["demo_web"]
         let _ = std::fs::create_dir_all(dir.join("logs"));
         let root = dir.display().to_string().replace('\\', "/");
         let path = dir.join("projects.toml");
+        let (sh_cmd, sh_arg, api_script, deps_script, web_script) = if cfg!(windows) {
+            (
+                "cmd",
+                "/C",
+                format!("echo Web server failed to start. Port 28080 was already in use. >> {root}/logs/demo_api.out & exit 1"),
+                format!("echo [ERROR] Could not resolve dependencies for project demo_api:jar:1.0 >> {root}/logs/demo_api.out & exit 1"),
+                format!("echo web ran >> {root}/logs/demo_web.out"),
+            )
+        } else {
+            (
+                "sh",
+                "-c",
+                format!("echo 'Web server failed to start. Port 28080 was already in use.' >> '{root}/logs/demo_api.out'; exit 1"),
+                format!("echo '[ERROR] Could not resolve dependencies for project demo_api:jar:1.0' >> '{root}/logs/demo_api.out'; exit 1"),
+                format!("echo 'web ran' >> '{root}/logs/demo_web.out'"),
+            )
+        };
         let toml = format!(
             r#"
 [group.shop]
@@ -10100,7 +10117,7 @@ root = "{root}"
 port = 28080
 log_dir = "{root}/logs"
 start_timeout_secs = 5
-start = ["sh", "-c", "echo 'Web server failed to start. Port 28080 was already in use.' >> '{root}/logs/demo_api.out'; exit 1"]
+start = ["{sh_cmd}", "{sh_arg}", "{api_script}"]
 
 [projects.demo_web]
 name = "Demo Web"
@@ -10109,7 +10126,7 @@ root = "{root}"
 port = 25173
 log_dir = "{root}/logs"
 depends_on = ["demo_api"]
-start = ["sh", "-c", "echo 'web ran' >> '{root}/logs/demo_web.out'"]
+start = ["{sh_cmd}", "{sh_arg}", "{web_script}"]
 "#
         );
         std::fs::write(&path, &toml).unwrap();
@@ -10145,10 +10162,7 @@ start = ["sh", "-c", "echo 'web ran' >> '{root}/logs/demo_web.out'"]
         assert!(!dir.join("logs/demo_web.out").exists());
 
         // Test with dependency resolution failure in detached mode
-        let toml_deps = toml.replace(
-            "echo 'Web server failed to start. Port 28080 was already in use.'",
-            "echo '[ERROR] Could not resolve dependencies for project demo_api:jar:1.0'",
-        );
+        let toml_deps = toml.replace(&api_script, &deps_script);
         std::fs::write(&path, toml_deps).unwrap();
         let _ = std::fs::remove_file(dir.join("logs/demo_api.out"));
         let loaded2 = load(Some(&path)).unwrap();

@@ -19,16 +19,10 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
-fn free_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    l.local_addr().unwrap().port()
-}
-
-#[allow(dead_code)]
 fn free_service_port(exclude: &[u16]) -> u16 {
     use std::sync::atomic::{AtomicU16, Ordering};
     static NEXT_PORT: AtomicU16 = AtomicU16::new(24100);
-    for _ in 0..200 {
+    for _ in 0..8000 {
         let p = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
         let port = if (24000..32000).contains(&p) {
             p
@@ -44,12 +38,7 @@ fn free_service_port(exclude: &[u16]) -> u16 {
             return port;
         }
     }
-    loop {
-        let p = free_port();
-        if !exclude.contains(&p) {
-            return p;
-        }
-    }
+    panic!("could not find an available port in 24000..32000");
 }
 
 fn write_config(dir: &Path, port: u16) -> PathBuf {
@@ -81,8 +70,10 @@ reason = "not checked out"
 #[test]
 fn status_follows_pid_file_port_and_log() {
     let dir = temp_dir("lifecycle");
-    let port = free_port();
-    let cfg = write_config(&dir, port);
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let unlistened_port = free_service_port(&[port]);
+    let cfg = write_config(&dir, unlistened_port);
     let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
 
     let st = loaded.status("mock").unwrap();
@@ -90,7 +81,8 @@ fn status_follows_pid_file_port_and_log() {
     assert!(!st.port_conflict);
 
     // Simulate the service: our own pid in the pid file, listening on the port.
-    let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+    let cfg = write_config(&dir, port);
+    let loaded = tongyun_dev_core::load(Some(&cfg)).unwrap();
     fs::write(dir.join("logs/mock.pid"), std::process::id().to_string()).unwrap();
     fs::write(dir.join("logs/mock.out"), "Service started\nListening\n").unwrap();
     let st = loaded.status("mock").unwrap();
@@ -146,7 +138,7 @@ fn post_json(port: u16, path: &str, body: &str, origin: Option<&str>) -> String 
 #[test]
 fn web_console_lists_adds_and_removes_through_core() {
     let dir = temp_dir("ui");
-    let cfg = write_config(&dir, free_port());
+    let cfg = write_config(&dir, free_service_port(&[]));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let ui = listener.local_addr().unwrap().port();
     let cfg_clone = cfg.clone();
@@ -320,7 +312,7 @@ fn web_console_lists_adds_and_removes_through_core() {
 #[test]
 fn start_ui_server_missing_config_fails_gracefully() {
     let missing_path = PathBuf::from("/definitely/nonexistent/tongyun_dev_missing_projects.toml");
-    let res = tongyun_dev_cli::server::start_ui_server(missing_path, free_port(), false);
+    let res = tongyun_dev_cli::server::start_ui_server(missing_path, 0, false);
     assert!(res.is_err());
     let err = res.unwrap_err().to_string();
     assert!(err.contains("未找到配置文件 projects.toml") || err.contains("not found"));
@@ -491,7 +483,7 @@ fn pgroup_pids(pgid: u32) -> Vec<u32> {
 #[cfg(unix)]
 fn process_group_stop_cleans_children_and_markers() {
     let dir = temp_dir("pg_stop");
-    let port = free_port();
+    let port = free_service_port(&[]);
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
     fs::write(
@@ -558,7 +550,7 @@ log_dir = "{d}/logs"
 #[cfg(unix)]
 fn trap_term_killed_after_grace_period() {
     let dir = temp_dir("trap_term");
-    let port = free_port();
+    let port = free_service_port(&[]);
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
     fs::write(
@@ -607,7 +599,7 @@ log_dir = "{d}/logs"
 #[test]
 fn stale_pid_file_reported_stopped_and_cleaned() {
     let dir = temp_dir("stale_pid");
-    let port = free_port();
+    let port = free_service_port(&[]);
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
     let (shell_cmd, shell_arg) = if cfg!(windows) {
@@ -648,7 +640,7 @@ log_dir = "{d}/logs"
 #[test]
 fn fast_exit_transitions_to_failed_within_four_seconds() {
     let dir = temp_dir("fast_exit");
-    let port = free_port();
+    let port = free_service_port(&[]);
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
     let (shell_cmd, shell_arg) = if cfg!(windows) {
@@ -698,12 +690,12 @@ log_dir = "{d}/logs"
 }
 
 fn probe_python_cmd() -> Option<&'static str> {
-    let candidates = if cfg!(windows) {
-        ["python", "python3"]
+    let candidates: &[&str] = if cfg!(windows) {
+        &["py", "python", "python3"]
     } else {
-        ["python3", "python"]
+        &["python3", "python"]
     };
-    for cmd in candidates {
+    for &cmd in candidates {
         if std::process::Command::new(cmd)
             .arg("--version")
             .stdout(std::process::Stdio::null())
@@ -725,7 +717,7 @@ fn delayed_listen_transitions_from_starting_to_ready() {
     );
 
     let dir = temp_dir("py_listen");
-    let port = free_port();
+    let port = free_service_port(&[]);
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
     let listen_py =
@@ -788,7 +780,7 @@ background = true
 port = {}
 log_dir = "{d}/logs"
 "#,
-            free_port()
+            free_service_port(&[])
         ),
     )
     .unwrap();
@@ -840,7 +832,7 @@ fn foreign_listener_blocks_restart_without_running_start_command() {
 #[test]
 fn pty_stdin_fifo_and_env_lifecycle() {
     let dir = temp_dir("stdin_fifo");
-    let port = free_port();
+    let port = free_service_port(&[]);
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
 
@@ -1049,7 +1041,7 @@ log_dir = "{d}/logs"
 #[test]
 fn auto_answers_automatically_answers_prompt() {
     let dir = temp_dir("auto_answers_test");
-    let port = free_port();
+    let port = free_service_port(&[]);
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
 
@@ -1122,7 +1114,7 @@ auto_answers = [
 #[test]
 fn pty_true_outputs_tty_and_cleans_up_on_stop() {
     let dir = temp_dir("pty_tty_test");
-    let port = free_port();
+    let port = free_service_port(&[]);
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
 
@@ -1266,7 +1258,7 @@ env = {{ CI = "pty_ci" }}
 #[test]
 fn pty_password_prompt_does_not_echo_secret_into_log() {
     let dir = temp_dir("pty_secret");
-    let port = free_port();
+    let port = free_service_port(&[]);
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
 
@@ -1336,7 +1328,7 @@ log_dir = "{d}/logs"
 #[test]
 fn test_send_input_secret_pass_shows_placeholder_not_plaintext() {
     let dir = temp_dir("secret_input_test");
-    let port = free_port();
+    let port = free_service_port(&[]);
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
 
@@ -1401,7 +1393,7 @@ log_dir = "{d}/logs"
 #[test]
 fn test_send_input_limit_4096_bytes_error() {
     let dir = temp_dir("limit_input_test");
-    let port = free_port();
+    let port = free_service_port(&[]);
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
 
@@ -1451,7 +1443,7 @@ log_dir = "{d}/logs"
 #[test]
 fn test_auto_answers_skips_echo_lines_once_false() {
     let dir = temp_dir("echo_skip_test");
-    let port = free_port();
+    let port = free_service_port(&[]);
     let cfg = dir.join("projects.toml");
     let d = dir.to_string_lossy().replace('\\', "/");
 
@@ -1539,8 +1531,8 @@ port = 8080
     )
     .unwrap();
 
-    let ui_port = free_port();
-    let ui_listener = TcpListener::bind(("127.0.0.1", ui_port)).unwrap();
+    let ui_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let ui_port = ui_listener.local_addr().unwrap().port();
     let cfg_clone = cfg.clone();
     thread::spawn(move || {
         let _ = tongyun_dev_cli::server::serve(ui_listener, cfg_clone, ui_port);
@@ -1620,6 +1612,8 @@ fn group_restart_waits_and_skips_downstream_when_dependency_exits() {
     let cfg = dir.join("projects.toml");
     let web_hits = dir.join("web.hits");
     let web_s = web_hits.to_string_lossy().replace('\\', "/");
+    let api_port = free_service_port(&[]);
+    let web_port = free_service_port(&[api_port]);
     fs::write(
         &cfg,
         format!(
@@ -1631,7 +1625,7 @@ members = ["demo_api", "demo_web"]
 name = "Demo API"
 group = "shop"
 root = "{d}"
-port = 8080
+port = {api_port}
 log_dir = "{d}/logs"
 start_timeout_secs = 5
 start = ["sh", "-c", "exit 1"]
@@ -1640,7 +1634,7 @@ start = ["sh", "-c", "exit 1"]
 name = "Demo Web"
 group = "shop"
 root = "{d}"
-port = 5173
+port = {web_port}
 log_dir = "{d}/logs"
 start_timeout_secs = 5
 depends_on = ["demo_api"]
@@ -1673,15 +1667,25 @@ start = ["sh", "-c", "echo ran >> '{web_s}'"]
 }
 
 fn detect_python_cmd() -> &'static str {
-    if std::process::Command::new("python")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        "python"
+    let candidates: &[&str] = if cfg!(windows) {
+        &["py", "python", "python3"]
+    } else {
+        &["python3", "python"]
+    };
+    for &cmd in candidates {
+        if std::process::Command::new(cmd)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return cmd;
+        }
+    }
+    if cfg!(windows) {
+        "py"
     } else {
         "python3"
     }
@@ -1693,8 +1697,8 @@ fn group_start_waits_for_ready_and_web_only_starts_after_api_ready() {
     let dir = temp_dir("grp_start_order");
     let d = dir.to_string_lossy().replace('\\', "/");
     let cfg = dir.join("projects.toml");
-    let api_port = free_port();
-    let web_port = free_port();
+    let api_port = free_service_port(&[]);
+    let web_port = free_service_port(&[api_port]);
     let api_ready_file = dir.join("api_ready.flag");
     let api_ready_s = api_ready_file.to_string_lossy().replace('\\', "/");
     let web_record_file = dir.join("web_record.txt");
@@ -1780,8 +1784,8 @@ fn group_start_web_api_skips_downstream_when_dependency_fails() {
     let cfg = dir.join("projects.toml");
     let web_hits = dir.join("web.hits");
     let web_s = web_hits.to_string_lossy().replace('\\', "/");
-    let api_port = free_port();
-    let web_port = free_port();
+    let api_port = free_service_port(&[]);
+    let web_port = free_service_port(&[api_port]);
 
     fs::write(
         &cfg,
@@ -1844,8 +1848,8 @@ fn group_start_detects_and_refuses_cycle() {
     let dir = temp_dir("grp_cycle");
     let d = dir.to_string_lossy().replace('\\', "/");
     let cfg = dir.join("projects.toml");
-    let port_a = free_port();
-    let port_b = free_port();
+    let port_a = free_service_port(&[]);
+    let port_b = free_service_port(&[port_a]);
 
     fs::write(
         &cfg,
@@ -1912,11 +1916,11 @@ start = ["echo", "web"]
 #[test]
 fn test_start_background_server_and_port_fallback() {
     let dir = temp_dir("bg_srv");
-    let cfg = write_config(&dir, free_port());
-    let initial_port = free_service_port(&[]);
+    let cfg = write_config(&dir, 0);
 
     // 1. Occupy initial_port with a dummy listener
-    let blocker = TcpListener::bind(("127.0.0.1", initial_port)).unwrap();
+    let blocker = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let initial_port = blocker.local_addr().unwrap().port();
 
     // 2. Start background server starting from initial_port
     let mut server =
@@ -1950,12 +1954,12 @@ fn test_start_background_server_and_port_fallback() {
 #[test]
 fn test_start_background_server_reuses_existing_on_initial_port() {
     let dir = temp_dir("bg_reuse");
-    let cfg = write_config(&dir, free_port());
-    let initial_port = free_service_port(&[]);
+    let cfg = write_config(&dir, 0);
 
-    // 1. Start a real tongyun-dev background server on initial_port
+    // 1. Start a real tongyun-dev background server on an available port
     let mut server1 =
-        tongyun_dev_cli::server::start_background_server(Some(cfg.clone()), initial_port).unwrap();
+        tongyun_dev_cli::server::start_background_server(Some(cfg.clone()), 0).unwrap();
+    let initial_port = server1.port();
     assert_eq!(server1.port(), initial_port);
     assert!(!server1.is_reused());
 

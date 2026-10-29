@@ -10117,7 +10117,7 @@ root = "{root}"
 port = 28080
 log_dir = "{root}/logs"
 start_timeout_secs = 5
-start = ['{sh_cmd}', '{sh_arg}', '{api_script}']
+start = ["{sh_cmd}", "{sh_arg}", "{api_script}"]
 
 [projects.demo_web]
 name = "Demo Web"
@@ -10126,7 +10126,7 @@ root = "{root}"
 port = 25173
 log_dir = "{root}/logs"
 depends_on = ["demo_api"]
-start = ['{sh_cmd}', '{sh_arg}', '{web_script}']
+start = ["{sh_cmd}", "{sh_arg}", "{web_script}"]
 "#
         );
         std::fs::write(&path, &toml).unwrap();

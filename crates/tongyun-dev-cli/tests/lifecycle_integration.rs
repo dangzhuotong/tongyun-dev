@@ -1946,3 +1946,35 @@ fn test_start_background_server_and_port_fallback() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn test_start_background_server_reuses_existing_on_initial_port() {
+    let dir = temp_dir("bg_reuse");
+    let cfg = write_config(&dir, free_port());
+    let initial_port = free_service_port(&[]);
+
+    // 1. Start a real tongyun-dev background server on initial_port
+    let mut server1 =
+        tongyun_dev_cli::server::start_background_server(Some(cfg.clone()), initial_port).unwrap();
+    assert_eq!(server1.port(), initial_port);
+    assert!(!server1.is_reused());
+
+    // 2. Start a second server targeting the same port; it should reuse it
+    let mut server2 =
+        tongyun_dev_cli::server::start_background_server(Some(cfg), initial_port).unwrap();
+    assert_eq!(server2.port(), initial_port);
+    assert!(server2.is_reused());
+
+    // 3. Stopping server2 does not stop server1
+    server2.stop();
+    assert!(tongyun_dev_cli::server::is_tongyun_dev_server(initial_port));
+
+    // 4. Stopping server1 cleans up
+    server1.stop();
+    thread::sleep(Duration::from_millis(50));
+    assert!(!tongyun_dev_cli::server::is_tongyun_dev_server(
+        initial_port
+    ));
+
+    let _ = fs::remove_dir_all(&dir);
+}

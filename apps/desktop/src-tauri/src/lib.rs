@@ -8,20 +8,31 @@ use tongyun_dev_core::{
 };
 
 static SERVER_HANDLE: Mutex<Option<ServerHandle>> = Mutex::new(None);
-static AGENT_PORT: AtomicU16 = AtomicU16::new(DEFAULT_UI_PORT);
+static AGENT_PORT: AtomicU16 = AtomicU16::new(0);
+static AGENT_RUNNING: AtomicBool = AtomicBool::new(false);
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AgentHttpInfo {
-    pub port: u16,
-    pub url: String,
+    pub running: bool,
+    pub port: Option<u16>,
+    pub url: Option<String>,
 }
 
 #[tauri::command]
 fn agent_http_info() -> AgentHttpInfo {
-    let port = AGENT_PORT.load(Ordering::Relaxed);
-    AgentHttpInfo {
-        port,
-        url: format!("http://127.0.0.1:{port}"),
+    if AGENT_RUNNING.load(Ordering::Relaxed) {
+        let port = AGENT_PORT.load(Ordering::Relaxed);
+        AgentHttpInfo {
+            running: true,
+            port: Some(port),
+            url: Some(format!("http://127.0.0.1:{port}")),
+        }
+    } else {
+        AgentHttpInfo {
+            running: false,
+            port: None,
+            url: None,
+        }
     }
 }
 
@@ -461,11 +472,14 @@ pub fn run() {
             match tongyun_dev_cli::server::start_background_server(None, DEFAULT_UI_PORT) {
                 Ok(srv) => {
                     AGENT_PORT.store(srv.port(), Ordering::Relaxed);
+                    AGENT_RUNNING.store(true, Ordering::Relaxed);
                     if let Ok(mut lock) = SERVER_HANDLE.lock() {
                         *lock = Some(srv);
                     }
                 }
                 Err(err) => {
+                    AGENT_RUNNING.store(false, Ordering::Relaxed);
+                    AGENT_PORT.store(0, Ordering::Relaxed);
                     eprintln!("Failed to start Agent HTTP server: {err:#}");
                 }
             }
@@ -526,6 +540,7 @@ pub fn run() {
                 }
             }
             tauri::RunEvent::Exit => {
+                AGENT_RUNNING.store(false, Ordering::Relaxed);
                 if let Ok(mut lock) = SERVER_HANDLE.lock() {
                     if let Some(mut srv) = lock.take() {
                         srv.stop();
@@ -542,9 +557,21 @@ mod tests {
 
     #[test]
     fn test_agent_http_info() {
-        let info = agent_http_info();
-        assert!(info.port >= DEFAULT_UI_PORT);
-        assert_eq!(info.url, format!("http://127.0.0.1:{}", info.port));
+        AGENT_RUNNING.store(false, Ordering::Relaxed);
+        let stopped = agent_http_info();
+        assert!(!stopped.running);
+        assert_eq!(stopped.port, None);
+        assert_eq!(stopped.url, None);
+
+        AGENT_RUNNING.store(true, Ordering::Relaxed);
+        AGENT_PORT.store(9099, Ordering::Relaxed);
+        let running = agent_http_info();
+        assert!(running.running);
+        assert_eq!(running.port, Some(9099));
+        assert_eq!(running.url, Some("http://127.0.0.1:9099".to_string()));
+
+        // Restore stopped state
+        AGENT_RUNNING.store(false, Ordering::Relaxed);
     }
 
     #[test]

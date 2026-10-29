@@ -31,14 +31,31 @@ pub struct ServerHandle {
     port: u16,
     shutdown: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
+    reused: bool,
 }
 
 impl ServerHandle {
+    pub fn reused(port: u16) -> Self {
+        Self {
+            port,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            thread: None,
+            reused: true,
+        }
+    }
+
     pub fn port(&self) -> u16 {
         self.port
     }
 
+    pub fn is_reused(&self) -> bool {
+        self.reused
+    }
+
     pub fn stop(&mut self) {
+        if self.reused {
+            return;
+        }
         if !self.shutdown.swap(true, Ordering::SeqCst) {
             let _ = TcpStream::connect(("127.0.0.1", self.port));
             if let Some(t) = self.thread.take() {
@@ -54,6 +71,40 @@ impl Drop for ServerHandle {
     }
 }
 
+/// Probes whether 127.0.0.1:`port` is running an active tongyun-dev web/agent server
+/// by requesting GET /api/projects and verifying the HTTP 200 response and JSON array body.
+pub fn is_tongyun_dev_server(port: u16) -> bool {
+    let Ok(mut stream) = TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_millis(300),
+    ) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    let req = format!(
+        "GET /api/projects HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = Vec::new();
+    if stream.read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    let head = String::from_utf8_lossy(&buf);
+    if !head.starts_with("HTTP/1.1 200") && !head.starts_with("HTTP/1.0 200") {
+        return false;
+    }
+    let Some(header_end) = find(&buf, b"\r\n\r\n") else {
+        return false;
+    };
+    let body = &buf[header_end + 4..];
+    serde_json::from_slice::<Value>(body)
+        .map(|v| v.is_array())
+        .unwrap_or(false)
+}
+
 /// Bind 127.0.0.1:`initial_port` (or the next free port up to +20) and serve forever.
 pub fn start_ui_server(config_path: PathBuf, initial_port: u16, auto_open: bool) -> Result<()> {
     if !config_path.is_file() {
@@ -63,6 +114,16 @@ pub fn start_ui_server(config_path: PathBuf, initial_port: u16, auto_open: bool)
         eprintln!("默认配置路径：{default_hint}");
         eprintln!("提示：可在 `{default_hint}` 创建默认配置，或通过 --config 参数 / TONGYUN_DEV_CONFIG 环境变量指定配置路径。");
         bail!("未找到配置文件 projects.toml：{}", config_path.display());
+    }
+    if initial_port > 0 && is_tongyun_dev_server(initial_port) {
+        let url = format!("http://127.0.0.1:{initial_port}");
+        println!("tongyun-dev 网页控制台已在运行：{url}");
+        if auto_open {
+            if let Err(e) = tongyun_dev_core::open_url(&url) {
+                eprintln!("could not open browser: {e:#}");
+            }
+        }
+        return Ok(());
     }
     let (listener, port) = bind_from(initial_port)?;
     let url = format!("http://127.0.0.1:{port}");
@@ -98,22 +159,53 @@ pub fn bind_from(initial_port: u16) -> Result<(TcpListener, u16)> {
 }
 
 /// Start background Agent HTTP / UI server.
+/// Probes whether `initial_port` (or subsequent ports) is already running a tongyun-dev server,
+/// in which case it reuses that port rather than starting a second instance.
 pub fn start_background_server(
     config_path: Option<PathBuf>,
     initial_port: u16,
 ) -> Result<ServerHandle> {
-    let (listener, port) = bind_from(initial_port)?;
-    eprintln!("tongyun-dev Agent HTTP 服务已启动: http://127.0.0.1:{port}");
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = Arc::clone(&shutdown);
-    let thread = thread::spawn(move || {
-        let _ = serve_with_shutdown(listener, config_path, port, Some(shutdown_clone));
-    });
-    Ok(ServerHandle {
-        port,
-        shutdown,
-        thread: Some(thread),
-    })
+    if initial_port > 0 && is_tongyun_dev_server(initial_port) {
+        eprintln!(
+            "tongyun-dev Agent HTTP 服务已在运行，复用已有端口: http://127.0.0.1:{initial_port}"
+        );
+        return Ok(ServerHandle::reused(initial_port));
+    }
+
+    let last = initial_port.saturating_add(20);
+    let mut port = initial_port;
+    loop {
+        if port > 0 && is_tongyun_dev_server(port) {
+            eprintln!("tongyun-dev Agent HTTP 服务已在运行，复用已有端口: http://127.0.0.1:{port}");
+            return Ok(ServerHandle::reused(port));
+        }
+
+        match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) => {
+                let actual = listener.local_addr()?.port();
+                eprintln!("tongyun-dev Agent HTTP 服务已启动: http://127.0.0.1:{actual}");
+                let shutdown = Arc::new(AtomicBool::new(false));
+                let shutdown_clone = Arc::clone(&shutdown);
+                let thread = thread::spawn(move || {
+                    let _ =
+                        serve_with_shutdown(listener, config_path, actual, Some(shutdown_clone));
+                });
+                return Ok(ServerHandle {
+                    port: actual,
+                    shutdown,
+                    thread: Some(thread),
+                    reused: false,
+                });
+            }
+            Err(e) if port < last => {
+                eprintln!("port {port} busy ({e}), trying {}", port + 1);
+                port += 1;
+            }
+            Err(e) => {
+                bail!("could not bind UI server on 127.0.0.1:{initial_port}..={last}: {e}");
+            }
+        }
+    }
 }
 
 /// Serve on an already-bound listener (used by tests with an ephemeral port).
@@ -2395,6 +2487,39 @@ mod tests {
         // Verify listener is stopped and connections fail
         std::thread::sleep(Duration::from_millis(50));
         assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_start_background_server_reuses_existing_tongyun_dev() {
+        let dir = std::env::temp_dir().join(format!("ty_bg_reuse_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cfg = dir.join("projects.toml");
+        std::fs::write(&cfg, "[projects]\n").unwrap();
+
+        // 1. Start primary background server
+        let mut primary = start_background_server(Some(cfg.clone()), 0).expect("primary start");
+        let port = primary.port();
+        assert!(port > 0);
+        assert!(!primary.is_reused());
+
+        // Verify is_tongyun_dev_server returns true
+        assert!(is_tongyun_dev_server(port));
+
+        // 2. Calling start_background_server on the same port should reuse it
+        let mut secondary = start_background_server(Some(cfg), port).expect("secondary start");
+        assert_eq!(secondary.port(), port);
+        assert!(secondary.is_reused());
+
+        // 3. Stopping the secondary (reused) handle should NOT stop the primary server
+        secondary.stop();
+        assert!(is_tongyun_dev_server(port));
+
+        // 4. Stopping primary stops the actual server
+        primary.stop();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!is_tongyun_dev_server(port));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -276,7 +276,8 @@ export type BatchOutput = {
 };
 
 export type AgentHttpInfo = {
-  port: number;
-  url: string;
+  running: boolean;
+  port: number | null;
+  url: string | null;
 };
 
